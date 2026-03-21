@@ -1,0 +1,1786 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Gate 永续合约仪表板</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+
+  <link rel="stylesheet" href="https://cdn.datatables.net/1.13.8/css/jquery.dataTables.min.css" />
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
+
+  <style>
+    body { font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    .card { border: 1px solid rgba(255,255,255,0.08); background: rgba(17,24,39,0.55); }
+    .muted { color: rgba(255,255,255,0.65); }
+    .pill { display:inline-block; padding: 2px 10px; border-radius: 999px; font-weight:600; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03); }
+    .pos { color: #22c55e; }
+    .neg { color: #ef4444; }
+    .neu { color: #9ca3af; }
+    .sig { display:inline-block; padding: 4px 10px; border-radius: 999px; font-weight: 700; font-size: 12px; border: 1px solid rgba(255,255,255,0.10); }
+    .sig-bull-exit { background: rgba(127, 29, 29, 0.35); border-color: rgba(153, 27, 27, 0.55); color: rgb(252, 165, 165); }
+    .sig-bull-entry { background: rgba(20, 83, 45, 0.35); border-color: rgba(22, 101, 52, 0.55); color: rgb(134, 239, 172); }
+    .sig-bear-exit { background: rgba(30, 58, 138, 0.35); border-color: rgba(30, 64, 175, 0.55); color: rgb(147, 197, 253); }
+    .sig-bear-entry { background: rgba(124, 45, 18, 0.35); border-color: rgba(154, 52, 18, 0.55); color: rgb(253, 186, 116); }
+    table.dataTable thead th { background: rgba(55,65,81,0.5); color: rgba(255,255,255,0.8); }
+    .nav-item { display:block; width:100%; text-align:left; padding: 10px 12px; border-radius: 12px; font-weight: 700; color: rgba(255,255,255,0.78); }
+    .nav-item:hover { background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.92); }
+    .nav-item.active { background: rgba(37, 99, 235, 0.25); border: 1px solid rgba(59, 130, 246, 0.45); color: rgb(191, 219, 254); }
+    .btn { padding: 8px 12px; border-radius: 12px; font-weight: 800; border: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.04); }
+    .btn:hover { background: rgba(255,255,255,0.08); }
+    .btn.active { background: rgba(37, 99, 235, 0.25); border-color: rgba(59, 130, 246, 0.55); color: rgb(191, 219, 254); }
+    .row-golden td { background: rgba(20, 83, 45, 0.25) !important; }
+    .row-death td { background: rgba(127, 29, 29, 0.25) !important; }
+  </style>
+</head>
+<body class="bg-gray-900 text-white">
+  <div class="max-w-7xl mx-auto px-4 py-8">
+    <div class="flex flex-col lg:flex-row gap-6">
+      <aside class="w-full lg:w-64">
+        <div class="card rounded-2xl p-4 sticky top-6">
+          <div class="text-sm font-extrabold text-blue-300">功能导航</div>
+          <div class="muted text-xs mt-1">点击标题切换功能区</div>
+          <div class="mt-4 space-y-2">
+            <button class="nav-item active" data-target="page-dashboard" id="nav-dashboard">仪表板</button>
+            <button class="nav-item" data-target="page-macd" id="nav-macd">MACD 监控</button>
+            <button class="nav-item" data-target="page-prealert" id="nav-prealert">MACD 预警</button>
+            <button class="nav-item" data-target="page-signal" id="nav-signal">多空综合雷达</button>
+            <button class="nav-item" data-target="page-news" id="nav-news">新闻多空哨兵</button>
+            <button class="nav-item" data-target="page-telegram" id="nav-telegram">Telegram 推送</button>
+            <button class="nav-item" data-target="page-placeholder" id="nav-placeholder">更多功能（待新增）</button>
+          </div>
+        </div>
+      </aside>
+
+      <main class="flex-1 min-w-0">
+        <section id="page-dashboard">
+          <header class="mb-8">
+            <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+              <div>
+                <h1 class="text-3xl font-extrabold text-blue-300">Gate.io 永续合约市场数据</h1>
+                <p class="muted mt-2">主表：固定 5 个合约。市场异动：Top50（以 24h 成交额代理市值排序）。</p>
+              </div>
+
+              <div class="flex items-center gap-3">
+                <label class="muted text-sm">时间框架</label>
+                <select id="tf" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+                  <option value="15m">15m</option>
+                  <option value="1h" selected>1h</option>
+                  <option value="4h">4h</option>
+                  <option value="1d">1d</option>
+                </select>
+
+                <button id="refresh" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg font-semibold">刷新</button>
+                <span id="status" class="muted text-sm"></span>
+              </div>
+            </div>
+          </header>
+
+          <section class="mb-10">
+            <h2 class="text-xl font-extrabold mb-3">主表格</h2>
+            <div class="card rounded-2xl p-4">
+              <table id="mainTable" class="display" style="width:100%">
+                <thead>
+                  <tr>
+                    <th>代币符号</th>
+                    <th>时间框架</th>
+                    <th>最新价格</th>
+                    <th>价格变化%</th>
+                    <th>OI 变化%</th>
+                    <th>市场信号</th>
+                    <th>更新时间</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+              <details class="mt-4">
+                <summary class="muted text-sm cursor-pointer">查看指标说明（价格变化 / OI 变化 / 市场信号）</summary>
+                <div class="muted text-xs mt-3 space-y-3 leading-relaxed">
+                  <div>
+                    <div class="font-semibold text-gray-200">价格变化%（随上方时间框架）</div>
+                    <div>
+                      取该时间框架最新两根 K线收盘价：<span class="text-gray-100">(Close_last - Close_prev) / Close_prev × 100%</span>。
+                    </div>
+                  </div>
+
+                  <div>
+                    <div class="font-semibold text-gray-200">OI 变化%（随上方时间框架）</div>
+                    <div>
+                      取 Gate 合约统计 contract_stats 最近两条同时间框架数据：<span class="text-gray-100">(OI_last - OI_prev) / OI_prev × 100%</span>。
+                    </div>
+                  </div>
+
+                  <div>
+                    <div class="font-semibold text-gray-200">市场信号（四象限）</div>
+                    <div>
+                      由 价格变化% 与 OI 变化% 的符号组合判断：
+                    </div>
+                    <div>
+                      1) 价格↑ + OI↑：<span class="text-gray-100">多头强势进场</span>（上涨伴随增仓）。
+                    </div>
+                    <div>
+                      2) 价格↑ + OI↓：<span class="text-gray-100">多头获利了结</span>（上涨但减仓）。
+                    </div>
+                    <div>
+                      3) 价格↓ + OI↑：<span class="text-gray-100">空头强势进场</span>（下跌伴随增仓）。
+                    </div>
+                    <div>
+                      4) 价格↓ + OI↓：<span class="text-gray-100">空头获利了结</span>（下跌但减仓）。
+                    </div>
+                  </div>
+
+                  <div>
+                    <div class="font-semibold text-gray-200">注意事项</div>
+                    <div>
+                      1) “最新价格”来自 K线最后收盘价（该时间框架），不等同于实时 ticker last。
+                    </div>
+                    <div>
+                      2) contract_stats 与 K线数据更新时间可能不同步，极短时间内会有轻微偏差。
+                    </div>
+                  </div>
+                </div>
+              </details>
+            </div>
+          </section>
+
+          <section class="mb-10">
+            <h2 class="text-xl font-extrabold mb-3">市场异动（Top50）</h2>
+            <div id="cards" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4"></div>
+          </section>
+
+          <section id="detailsSection" class="mb-10 hidden">
+            <div class="flex items-center justify-between mb-3">
+              <h2 id="detailsTitle" class="text-xl font-extrabold">异动详情</h2>
+              <button id="closeDetails" class="muted hover:text-white">关闭</button>
+            </div>
+            <div class="card rounded-2xl p-4">
+              <table id="detailTable" class="display" style="width:100%">
+                <thead>
+                  <tr>
+                    <th>币种</th>
+                    <th>最新价格</th>
+                    <th>价格变化%</th>
+                    <th>OI 变化%</th>
+                    <th>时间框架</th>
+                    <th>更新时间</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="page-signal" class="hidden">
+          <header class="mb-6">
+            <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+              <div>
+                <h1 class="text-3xl font-extrabold text-blue-300">多空综合雷达（Signal Dashboard）</h1>
+                <p class="muted mt-2">综合资金费率 / OI / 量能 / MACD / RSI 打分，输出强多/强空信号，并可配合 Telegram 推送。</p>
+              </div>
+
+              <div class="flex flex-wrap items-center gap-3">
+                <label class="muted text-sm">范围</label>
+                <select id="sigMode" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+                  <option value="top100" selected>Top100</option>
+                  <option value="watchlist">自选清单</option>
+                </select>
+
+                <label class="muted text-sm">K线</label>
+                <select id="sigKtf" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+                  <option value="15m">15m</option>
+                  <option value="1h" selected>1h</option>
+                  <option value="1d">1d</option>
+                </select>
+
+                <label class="muted text-sm flex items-center gap-2">
+                  <input id="sigOnlySignal" type="checkbox" class="accent-blue-500" checked />
+                  只看有信号
+                </label>
+
+                <label class="muted text-sm">排序</label>
+                <select id="sigSort" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+                  <option value="score" selected>按分数</option>
+                  <option value="rank">按市值排名</option>
+                  <option value="symbol">按币种</option>
+                </select>
+
+                <label class="muted text-sm">刷新间隔</label>
+                <select id="sigRefreshSec" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+                  <option value="60">60s</option>
+                  <option value="120" selected>120s</option>
+                  <option value="180">180s</option>
+                  <option value="300">300s</option>
+                </select>
+                <button id="sigRefresh" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg font-semibold">刷新</button>
+                <span id="sigStatus" class="muted text-sm"></span>
+              </div>
+            </div>
+          </header>
+
+          <section class="mb-10">
+            <div class="card rounded-2xl p-4">
+              <table id="sigTable" class="display" style="width:100%">
+                <thead>
+                  <tr>
+                    <th style="display:none">score_raw</th>
+                    <th style="display:none">updated_ts</th>
+                    <th>市值排名</th>
+                    <th>合约</th>
+                    <th>分数</th>
+                    <th>级别</th>
+                    <th>价格</th>
+                    <th>价格(tf)%</th>
+                    <th>资金费率</th>
+                    <th>OI(tf)%</th>
+                    <th>量能(tf/24h)</th>
+                    <th>MACD</th>
+                    <th>RSI(14)</th>
+                    <th>主要原因</th>
+                    <th>更新时间</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+              <details class="mt-4">
+                <summary class="muted text-sm cursor-pointer">查看指标计算公式与打分规则</summary>
+                <div class="muted text-xs mt-3 space-y-3 leading-relaxed">
+                  <div>
+                    <div class="font-semibold text-gray-200">信号等级（score ∈ [-10, +10]）</div>
+                    <div>
+                      strong_long：score ≥ +6；long：score ≥ +3；neutral：(-3, +3)；short：score ≤ -3；strong_short：score ≤ -6。
+                    </div>
+                  </div>
+
+                  <div>
+                    <div class="font-semibold text-gray-200">时间框架（K线选择）</div>
+                    <div>
+                      本页面所有与 K线相关的指标都会跟随上方 <span class="text-gray-100">K线</span> 选择（15m/1h/1d），默认 1h。
+                    </div>
+                  </div>
+
+                  <div>
+                    <div class="font-semibold text-gray-200">价格涨跌（价格(tf)%）</div>
+                    <div>
+                      使用 Gate 永续合约 K线：<span class="text-gray-100">pct_tf = (Close_last - Close_prev) / Close_prev × 100%</span>（取最新两根 tf K线的收盘价）。
+                    </div>
+                  </div>
+
+                  <div>
+                    <div class="font-semibold text-gray-200">OI 变化（OI(tf)%）</div>
+                    <div>
+                      使用 Gate 永续合约 contract_stats：<span class="text-gray-100">oi_change_tf = (OI_last - OI_prev) / OI_prev × 100%</span>（取最近两条同 tf 数据）。
+                      说明：OI(tf) 与上方 K线时间框架保持一致（15m/1h/1d）。
+                    </div>
+                  </div>
+
+                  <div>
+                    <div class="font-semibold text-gray-200">阈值与配置来源（可选A）</div>
+                    <div>
+                      目前评分阈值（资金费率、共振、量能、MACD/RSI 加减分、强信号阈值）写在后端 <span class="text-gray-100">main.py::_signal_score</span> 中，为固定规则。
+                      可配置项主要通过环境变量控制：
+                      <span class="text-gray-100">SIGNAL_DASHBOARD_ENABLED</span>（开关）、
+                      <span class="text-gray-100">SIGNAL_DASHBOARD_TOPN</span>（TopN）、
+                      <span class="text-gray-100">SIGNAL_DASHBOARD_WATCHLIST</span>（自选）、
+                      <span class="text-gray-100">SIGNAL_DASHBOARD_CACHE_TTL_SEC</span>（缓存）、
+                      <span class="text-gray-100">SIGNAL_PUSH_ENABLED</span>/<span class="text-gray-100">SIGNAL_PUSH_INTERVAL_SEC</span>/<span class="text-gray-100">SIGNAL_PUSH_SCORE_STRONG</span>/<span class="text-gray-100">SIGNAL_PUSH_COOLDOWN_SEC</span>（推送相关）。
+                      如果你希望“各项打分阈值”也可配置，我可以把这些阈值抽成 env 或一个 JSON 配置。
+                    </div>
+                  </div>
+
+                  <div>
+                    <div class="font-semibold text-gray-200">资金费率（funding）</div>
+                    <div>
+                      来源：Gate 永续 funding_rate。打分：
+                    </div>
+                    <div>
+                      funding ≤ -0.03%：+4；funding ≤ -0.01%：+2；funding ≥ +0.03%：-4；funding ≥ +0.01%：-2。
+                    </div>
+                  </div>
+
+                  <div>
+                    <div class="font-semibold text-gray-200">价格 × OI 共振（趋势确认）</div>
+                    <div>
+                      当 <span class="text-gray-100">OI(tf) ≥ 2.0%</span> 且 <span class="text-gray-100">价格(tf) ≥ +0.5%</span>：+3。
+                      当 <span class="text-gray-100">OI(tf) ≥ 2.0%</span> 且 <span class="text-gray-100">价格(tf) ≤ -0.5%</span>：-3。
+                    </div>
+                  </div>
+
+                  <div>
+                    <div class="font-semibold text-gray-200">量能（量能(tf/24h)）</div>
+                    <div>
+                      近似衡量“这根 tf K线成交量相对 24h 均值是否放大”：
+                      <span class="text-gray-100">vol_ratio = V_tf / (V_24h / buckets)</span>，其中 buckets = 1440 / tf_minutes。
+                      默认使用“上一根已收盘”的 tf K线成交量（避免进行中 K线导致的小时内抖动）。
+                      打分（方向敏感）：vol_ratio ≥ 2.5 时 |Δ|=2，vol_ratio ≥ 1.5 时 |Δ|=1；若价格(tf)% &gt; 0 视为“放量上涨”加分，若价格(tf)% &lt; 0 视为“放量下跌”扣分。
+                    </div>
+                  </div>
+
+                  <div>
+                    <div class="font-semibold text-gray-200">MACD（随 tf）</div>
+                    <div>
+                      使用 tf K线 close 序列计算 MACD(12,26,9)。表格中的 MACD 列展示“交叉/预警事件”：检测最近 3 根是否出现金叉/死叉（取最近一次交叉），以及“即将金叉/即将死叉”预警（偏早：距离接近 ratio≤0.75 + 连续收敛 lookback=2 + 同向斜率）。
+                      打分：金叉 +3；即将金叉 +1.5；死叉 -3；即将死叉 -1.5。
+                    </div>
+                  </div>
+
+                  <div>
+                    <div class="font-semibold text-gray-200">RSI(14)（随 tf）</div>
+                    <div>
+                      使用 tf K线 close 序列计算 RSI(14)。打分：
+                      RSI &lt; 30：+2；RSI &lt; 40：+1；RSI &gt; 70：-2；RSI &gt; 60：-1。
+                    </div>
+                  </div>
+
+                  <div>
+                    <div class="font-semibold text-gray-200">注意事项</div>
+                    <div>
+                      1) score 会被裁剪到 [-10, +10]。
+                      2) “当前价格”字段来自 ticker last（更实时），而涨跌%来自 K线收盘价变化（Close/PrevClose），两者口径不同属正常。
+                      3) 数据存在缓存与接口刷新周期，短时间内可能出现轻微不同步。
+                      4) Telegram 强信号推送默认使用 <span class="text-gray-100">1h</span> K线口径（可用环境变量 <span class="text-gray-100">SIGNAL_PUSH_K_TF</span> 修改），不一定等同于你在页面上当前选择的 K线时间框架。
+                      5) 价格×OI 共振除了 OI↑ 组合外，也会对 OI↓（减仓）组合给予较小权重，以增强震荡/反弹场景下的解释性。
+                      6) 当出现趋势确认（MACD 金叉/死叉 或 OI×价格强共振）时，RSI 的加减分会自动降权，避免在强趋势中逆势拉分。
+                    </div>
+                  </div>
+
+                  <div class="mt-2">
+                    提示：页面上的“只看有信号”会过滤掉 <span class="text-gray-100">neutral</span>，仅展示 strong_long/long/short/strong_short。
+                    Telegram 推送仍以强信号为主（需开启 SIGNAL_PUSH_ENABLED）。
+                  </div>
+                </div>
+              </details>
+            </div>
+          </section>
+        </section>
+
+        <section id="page-macd" class="hidden">
+          <header class="mb-6">
+            <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+              <div>
+                <h1 class="text-3xl font-extrabold text-blue-300">MACD 信号监控（市值前50）</h1>
+                <p class="muted mt-2">扫描 CoinGecko 市值前50（过滤稳定币），匹配 Gate USDT 永续合约，监控 15m/1h/1d 的 MACD 金叉/死叉（最近3根内，取最近一次交叉）。MACD 状态表示当前 DIF 与 DEA 的位置关系（DIF&gt;DEA 为多头，DIF&lt;DEA 为空头）。</p>
+              </div>
+
+              <div class="flex flex-wrap items-center gap-3">
+                <label class="muted text-sm">TopN</label>
+                <select id="macdTopN" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+                  <option value="50" selected>50</option>
+                  <option value="100">100</option>
+                </select>
+                <label class="muted text-sm">时间框架</label>
+                <select id="macdTf" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+                  <option value="all">全部</option>
+                  <option value="15m">15m</option>
+                  <option value="1h" selected>1h</option>
+                  <option value="1d">1d</option>
+                </select>
+                <label class="muted text-sm">刷新间隔</label>
+                <select id="macdRefreshSec" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+                  <option value="60">60s</option>
+                  <option value="120" selected>120s</option>
+                  <option value="180">180s</option>
+                </select>
+                <label class="muted text-sm flex items-center gap-2">
+                  <input id="macdSound" type="checkbox" class="accent-blue-500" />
+                  声音提醒
+                </label>
+                <button id="macdRefresh" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg font-semibold">刷新</button>
+                <span id="macdStatus" class="muted text-sm"></span>
+              </div>
+            </div>
+          </header>
+
+          <section class="mb-6">
+            <div class="flex flex-wrap items-center gap-2">
+              <button class="btn active" id="macdFilterAll">全部</button>
+              <button class="btn" id="macdFilterSignal">只显示有信号</button>
+              <button class="btn" id="macdFilterGolden">只显示金叉</button>
+              <button class="btn" id="macdFilterDeath">只显示死叉</button>
+            </div>
+          </section>
+
+          <section class="mb-10">
+            <div class="card rounded-2xl p-4">
+              <table id="macdTable" class="display" style="width:100%">
+                <thead>
+                  <tr>
+                    <th style="display:none">has_signal</th>
+                    <th style="display:none">signal_time_ts</th>
+                    <th>市值排名</th>
+                    <th>币种</th>
+                    <th>时间框架</th>
+                    <th>当前价格</th>
+                    <th>MACD状态（当前）</th>
+                    <th>最新信号时间</th>
+                    <th>信号类型（交叉）</th>
+                    <th>信号发生时价格</th>
+                    <th>信号强度</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+              <div class="muted text-xs mt-3">金叉：绿色高亮；死叉：红色高亮。只报告“最近3根K线内刚发生”的交叉（取最近一次）。MACD状态为当前 DIF/DEA 多空，可能与交叉事件不完全同步（震荡时可能频繁来回穿越）。</div>
+            </div>
+          </section>
+        </section>
+
+        <section id="page-prealert" class="hidden">
+          <header class="mb-6">
+            <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+              <div>
+                <h1 class="text-3xl font-extrabold text-blue-300">MACD 即将金叉/死叉预警（TopN）</h1>
+                <p class="muted mt-2">偏早预警：DIF/DEA 距离接近（ratio≤0.75，按最近20根归一化） + 连续收敛（lookback=2） + 同向斜率 + 柱子收敛。</p>
+              </div>
+
+              <div class="flex flex-wrap items-center gap-3">
+                <label class="muted text-sm">TopN</label>
+                <select id="preTopN" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+                  <option value="50" selected>50</option>
+                  <option value="100">100</option>
+                </select>
+                <label class="muted text-sm">时间框架</label>
+                <select id="preTf" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+                  <option value="all">全部</option>
+                  <option value="15m">15m</option>
+                  <option value="1h" selected>1h</option>
+                  <option value="1d">1d</option>
+                </select>
+                <label class="muted text-sm">刷新间隔</label>
+                <select id="preRefreshSec" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+                  <option value="60">60s</option>
+                  <option value="120" selected>120s</option>
+                  <option value="180">180s</option>
+                  <option value="300">300s</option>
+                </select>
+                <button id="preRefresh" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg font-semibold">刷新</button>
+                <span id="preStatus" class="muted text-sm"></span>
+              </div>
+            </div>
+          </header>
+
+          <section class="mb-6">
+            <div class="flex flex-wrap items-center gap-2">
+              <button class="btn active" id="preFilterAll">全部</button>
+              <button class="btn" id="preFilterWarn">只显示有预警</button>
+              <button class="btn" id="preFilterGolden">只看即将金叉</button>
+              <button class="btn" id="preFilterDeath">只看即将死叉</button>
+            </div>
+          </section>
+
+          <section class="mb-10">
+            <div class="card rounded-2xl p-4">
+              <table id="preTable" class="display" style="width:100%">
+                <thead>
+                  <tr>
+                    <th style="display:none">has_warn</th>
+                    <th style="display:none">warn_time_ts</th>
+                    <th style="display:none">status_raw</th>
+                    <th>市值排名</th>
+                    <th>币种</th>
+                    <th>当前价格</th>
+                    <th>时间框架</th>
+                    <th>预警状态</th>
+                    <th>最新预警时间</th>
+                    <th>预警类型</th>
+                    <th>距离倍数</th>
+                    <th>BAR 方向</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+              <div class="muted text-xs mt-3">点击币种可展开三周期 MACD（DIF/DEA/HIST）。</div>
+            </div>
+          </section>
+
+          <section id="preDetails" class="mb-10 hidden">
+            <div class="flex items-center justify-between mb-3">
+              <h2 id="preDetailsTitle" class="text-xl font-extrabold">预警详情</h2>
+              <button id="preCloseDetails" class="muted hover:text-white">关闭</button>
+            </div>
+            <div class="card rounded-2xl p-4 space-y-6">
+              <div id="preChart15m" style="height:320px"></div>
+              <div id="preChart1h" style="height:320px"></div>
+              <div id="preChart1d" style="height:320px"></div>
+            </div>
+          </section>
+        </section>
+
+        <section id="page-news" class="hidden">
+          <header class="mb-6">
+            <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+              <div>
+                <h1 class="text-3xl font-extrabold text-blue-300">新闻多空哨兵</h1>
+                <p class="muted mt-2">自动拉取 RSS 新闻，评估多空倾向与强度，并支持 Telegram 推送。</p>
+              </div>
+
+              <div class="flex gap-2 items-end flex-wrap">
+                <label class="muted text-sm">刷新间隔</label>
+                <select id="newsRefreshSec" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+                  <option value="60">60s</option>
+                  <option value="120" selected>120s</option>
+                  <option value="180">180s</option>
+                  <option value="300">300s</option>
+                </select>
+                <label class="muted text-sm">情绪筛选</label>
+                <select id="newsSentFilter" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+                  <option value="all" selected>全部</option>
+                  <option value="bullish">利多</option>
+                  <option value="bearish">利空</option>
+                  <option value="neutral">中性</option>
+                  <option value="unknown">未分析</option>
+                </select>
+                <button id="newsRefresh" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg font-semibold">刷新</button>
+                <button id="newsFetchNow" class="btn">立即抓取 RSS</button>
+                <button id="newsAnalyzeNow" class="btn">分析情绪/强度</button>
+                <span id="newsStatus" class="muted text-sm"></span>
+              </div>
+            </div>
+          </header>
+
+          <section class="mb-10">
+            <div class="card rounded-2xl p-4">
+              <table id="newsTable" class="display" style="width:100%">
+                <thead>
+                  <tr>
+                    <th style="display:none">time_ts</th>
+                    <th>时间</th>
+                    <th>标题</th>
+                    <th>来源</th>
+                    <th>标签</th>
+                    <th>影响币种</th>
+                    <th>情绪</th>
+                    <th>强度</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="page-telegram" class="hidden">
+          <header class="mb-6">
+            <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+              <div>
+                <h1 class="text-3xl font-extrabold text-blue-300">Telegram 推送</h1>
+                <p class="muted mt-2">公共功能：用于新闻哨兵、MACD 预警等模块的 Telegram 推送配置与推送记录。</p>
+              </div>
+            </div>
+          </header>
+
+          <section class="mb-10">
+            <div class="card rounded-2xl p-6">
+              <div class="text-xl font-extrabold mb-4">推送设置（Telegram）</div>
+              <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div>
+                  <label class="muted text-sm">Bot Token</label>
+                  <input id="tgBotToken" class="w-full mt-2 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2" placeholder="123456:ABC..." />
+                </div>
+                <div>
+                  <label class="muted text-sm">Chat ID</label>
+                  <input id="tgChatId" class="w-full mt-2 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2" placeholder="-100xxxxxx" />
+                </div>
+                <div>
+                  <label class="muted text-sm">推送阈值（强度）</label>
+                  <input id="pushThreshold" type="number" step="0.1" class="w-full mt-2 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2" placeholder="例如 0.7" />
+                </div>
+                <div class="flex items-end">
+                  <label class="muted text-sm flex items-center gap-2">
+                    <input id="pushEnabled" type="checkbox" class="accent-blue-500" />
+                    启用推送
+                  </label>
+                </div>
+                <div class="lg:col-span-2">
+                  <div class="muted text-sm font-semibold">模块开关（默认全开）</div>
+                  <div class="grid grid-cols-1 md:grid-cols-2 gap-2 mt-2">
+                    <label class="muted text-sm flex items-center gap-2">
+                      <input id="pushNewsEnabled" type="checkbox" class="accent-blue-500" />
+                      新闻哨兵
+                    </label>
+                    <label class="muted text-sm flex items-center gap-2">
+                      <input id="pushMacdPrealertEnabled" type="checkbox" class="accent-blue-500" />
+                      MACD 预警
+                    </label>
+                    <label class="muted text-sm flex items-center gap-2">
+                      <input id="pushMacdMonitorEnabled" type="checkbox" class="accent-blue-500" />
+                      MACD 监控
+                    </label>
+                    <label class="muted text-sm flex items-center gap-2">
+                      <input id="pushSignalEnabled" type="checkbox" class="accent-blue-500" />
+                      多空综合雷达（强信号）
+                    </label>
+                  </div>
+                </div>
+              </div>
+              <div class="mt-5 flex items-center gap-3">
+                <button id="newsSaveSettings" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg font-semibold">保存设置</button>
+                <span id="newsSettingsStatus" class="muted text-sm"></span>
+              </div>
+            </div>
+          </section>
+
+          <section class="mb-10">
+            <div class="card rounded-2xl p-4">
+              <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-3 mb-4">
+                <div class="text-xl font-extrabold">推送记录</div>
+                <div class="flex items-end gap-2 flex-wrap">
+                  <label class="muted text-sm">筛选</label>
+                  <select id="pushLevelFilter" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+                    <option value="all" selected>全部</option>
+                    <option value="group_news">新闻哨兵</option>
+                    <option value="group_macd">MACD 预警</option>
+                  </select>
+                  <button id="pushRefresh" class="btn">刷新</button>
+                </div>
+              </div>
+              <table id="pushTable" class="display" style="width:100%">
+                <thead>
+                  <tr>
+                    <th style="display:none">time_ts</th>
+                    <th>时间</th>
+                    <th>结果</th>
+                    <th>级别</th>
+                    <th>标题</th>
+                    <th>错误</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="page-placeholder" class="hidden">
+          <div class="card rounded-2xl p-6">
+            <div class="text-xl font-extrabold">更多功能</div>
+            <div class="muted mt-2">你后续新增功能时，我会把它们放到左侧导航里，这里作为占位区。</div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+<script>
+  const cardDefs = [
+    {
+      key: '多头获利了结',
+      desc: 'OI 减少 + 价格上涨 → 多头获利了结',
+      accent: 'bg-red-900/30 border-red-800 text-red-300'
+    },
+    {
+      key: '多头强势进场',
+      desc: 'OI 增加 + 价格上涨 → 多头强势进场',
+      accent: 'bg-green-900/30 border-green-800 text-green-300'
+    },
+    {
+      key: '空头获利了结',
+      desc: 'OI 减少 + 价格下跌 → 空头获利了结',
+      accent: 'bg-blue-900/30 border-blue-800 text-blue-300'
+    },
+    {
+      key: '空头强势进场',
+      desc: 'OI 增加 + 价格下跌 → 空头强势进场',
+      accent: 'bg-orange-900/30 border-orange-800 text-orange-300'
+    },
+  ];
+
+  function clsPct(v) {
+    if (v === null || v === undefined) return 'neu';
+    if (v > 0) return 'pos';
+    if (v < 0) return 'neg';
+    return 'neu';
+  }
+
+  function _coinsPills(coins) {
+    if (!coins) return `<span class="neu">—</span>`;
+    const arr = String(coins).split(',').map(x => x.trim()).filter(Boolean).slice(0, 8);
+    if (!arr.length) return `<span class="neu">—</span>`;
+    return arr.map(x => `<span class="pill" style="margin-right:6px">${x}</span>`).join('');
+  }
+
+  function applyNewsSentimentFilter() {
+    if (!newsDT) return;
+    const sel = document.getElementById('newsSentFilter');
+    if (!sel) return;
+    const v = sel.value || 'all';
+    const colIdx = 6; // 情绪列索引（time_ts 隐藏列 + 时间/标题/来源/标签/影响币种/情绪）
+    if (v === 'all') {
+      newsDT.column(colIdx).search('');
+      newsDT.draw(false);
+      return;
+    }
+    const map = {
+      bullish: '多',
+      bearish: '空',
+      neutral: '中性',
+      unknown: '—',
+    };
+    const kw = map[v] || '';
+    const re = kw ? `(${kw})` : '';
+    newsDT.column(colIdx).search(re, true, false);
+    newsDT.draw(false);
+  }
+
+  function fmtPct(v) {
+    if (v === null || v === undefined) return 'N/A';
+    const sign = v > 0 ? '+' : '';
+    return `${sign}${v.toFixed(4)}%`;
+  }
+
+  function fmtPrice(v) {
+    if (v === null || v === undefined) return 'N/A';
+    return v;
+  }
+
+  function signalClass(sig) {
+    if (!sig) return 'neu';
+    if (sig === '多头获利了结') return 'sig sig-bull-exit';
+    if (sig === '多头强势进场') return 'sig sig-bull-entry';
+    if (sig === '空头获利了结') return 'sig sig-bear-exit';
+    if (sig === '空头强势进场') return 'sig sig-bear-entry';
+    return 'sig';
+  }
+
+  let mainDT = null;
+  let detailDT = null;
+  let lastAnomalyPayload = null;
+  let macdDT = null;
+  let macdTimer = null;
+  let macdFilterMode = 'all';
+  let macdTfMode = '1h';
+  let macdLastSeen = new Set();
+
+  let preDT = null;
+  let preTimer = null;
+  let preFilterMode = 'all';
+  let preTfMode = '1h';
+
+  let sigDT = null;
+  let sigTimer = null;
+
+  let newsDT = null;
+  let pushDT = null;
+  let newsTimer = null;
+
+  async function fetchJson(url) {
+    const r = await fetch(url);
+    return await r.json();
+  }
+
+  function fmtNum(v, digits=2) {
+    if (v === null || v === undefined) return '—';
+    const n = Number(v);
+    if (Number.isNaN(n)) return '—';
+    return n.toFixed(digits);
+  }
+
+  function fmtFunding(v) {
+    if (v === null || v === undefined) return '—';
+    const n = Number(v);
+    if (Number.isNaN(n)) return '—';
+    return `${(n*100).toFixed(3)}%`;
+  }
+
+  function levelPill(level) {
+    const lv = String(level || '').trim();
+    if (!lv || lv === 'neutral') return `<span class="pill neu">中性</span>`;
+    if (lv === 'strong_long') return `<span class="pill pos">强多</span>`;
+    if (lv === 'long') return `<span class="pill" style="color:#86efac">偏多</span>`;
+    if (lv === 'short') return `<span class="pill" style="color:#fca5a5">偏空</span>`;
+    if (lv === 'strong_short') return `<span class="pill neg">强空</span>`;
+    return `<span class="pill neu">${lv}</span>`;
+  }
+
+  function scoreColor(score) {
+    if (score === null || score === undefined) return 'neu';
+    const s = Number(score);
+    if (Number.isNaN(s)) return 'neu';
+    if (s >= 6) return 'pos';
+    if (s <= -6) return 'neg';
+    if (s >= 3) return 'pos';
+    if (s <= -3) return 'neg';
+    return 'neu';
+  }
+
+  function fmtReasons(arr) {
+    if (!arr || !Array.isArray(arr) || !arr.length) return `<span class="neu">—</span>`;
+    return `<span class="muted">${arr.slice(0,4).join(' + ')}</span>`;
+  }
+
+  async function loadSignalDashboard() {
+    const mode = document.getElementById('sigMode').value;
+    const kTf = document.getElementById('sigKtf').value || '1h';
+    const onlySignal = document.getElementById('sigOnlySignal').checked ? 1 : 0;
+    const sort = document.getElementById('sigSort').value;
+    const url = `/api/signal_dashboard?mode=${encodeURIComponent(mode)}&limit=100&only_signal=${onlySignal}&sort=${encodeURIComponent(sort)}&k_tf=${encodeURIComponent(kTf)}`;
+    document.getElementById('sigStatus').textContent = '更新中…';
+    const data = await fetchJson(url);
+    const items = (data && data.items) ? data.items : [];
+    const rows = items.map(x => {
+      const score = x.score;
+      const macd = (x.macd && x.macd.status) ? x.macd.status : '—';
+      return [
+        score,
+        x.updated_at || 0,
+        x.market_cap_rank || '—',
+        x.contract || '—',
+        `<span class="${scoreColor(score)}">${fmtNum(score,2)}</span>`,
+        levelPill(x.level),
+        x.price === null || x.price === undefined ? '—' : x.price,
+        `<span class="${clsPct(x.pct_tf)}">${fmtPct(x.pct_tf)}</span>`,
+        `<span class="${x.funding>0 ? 'neg' : (x.funding<0 ? 'pos' : 'neu')}">${fmtFunding(x.funding)}</span>`,
+        `<span class="${clsPct(x.oi_change_tf)}">${fmtPct(x.oi_change_tf)}</span>`,
+        x.vol_ratio === null || x.vol_ratio === undefined ? '—' : `x${fmtNum(x.vol_ratio,2)}`,
+        `<span class="pill">${macd}</span>`,
+        x.rsi14 === null || x.rsi14 === undefined ? '—' : fmtNum(x.rsi14,0),
+        fmtReasons(x.reasons),
+        new Date((x.updated_at || 0) * 1000).toLocaleString(),
+      ];
+    });
+
+    if (!sigDT) {
+      sigDT = $('#sigTable').DataTable({
+        data: rows,
+        pageLength: 25,
+        order: [[0, 'desc']],
+        autoWidth: false,
+        columnDefs: [
+          { targets: [0,1], visible: false },
+          { targets: 13, width: '46%' },
+          { targets: 3, width: '10%' },
+        ]
+      });
+    } else {
+      sigDT.clear();
+      sigDT.rows.add(rows);
+      sigDT.draw(false);
+    }
+
+    const now = new Date();
+    document.getElementById('sigStatus').textContent = `更新时间：${now.toLocaleString()}（${items.length}）`;
+  }
+
+  function setSignalTimer() {
+    if (sigTimer) { clearInterval(sigTimer); sigTimer = null; }
+    const sec = Number(document.getElementById('sigRefreshSec').value || 120);
+    sigTimer = setInterval(() => {
+      const page = document.getElementById('page-signal');
+      if (!page || page.classList.contains('hidden')) return;
+      loadSignalDashboard().catch(() => {});
+    }, Math.max(30, sec) * 1000);
+  }
+
+  function showPage(pageId) {
+    const pages = ['page-dashboard', 'page-macd', 'page-prealert', 'page-signal', 'page-news', 'page-telegram', 'page-placeholder'];
+    pages.forEach(pid => {
+      const el = document.getElementById(pid);
+      if (!el) return;
+      if (pid === pageId) el.classList.remove('hidden');
+      else el.classList.add('hidden');
+    });
+
+    const navs = document.querySelectorAll('.nav-item');
+    navs.forEach(btn => {
+      const t = btn.getAttribute('data-target');
+      if (t === pageId) btn.classList.add('active');
+      else btn.classList.remove('active');
+    });
+
+    // DataTables 在隐藏状态初始化时可能列宽异常，切页后做一次调整
+    if (pageId === 'page-telegram') {
+      setTimeout(() => {
+        try {
+          if (pushDT) pushDT.columns.adjust().draw(false);
+        } catch (e) {}
+      }, 30);
+    }
+
+    if (pageId === 'page-signal') {
+      setTimeout(() => {
+        try {
+          if (sigDT) sigDT.columns.adjust().draw(false);
+        } catch (e) {}
+      }, 30);
+    }
+
+    if (pageId === 'page-prealert') {
+      setTimeout(() => {
+        try {
+          if (preDT) preDT.columns.adjust().draw(false);
+        } catch (e) {}
+      }, 30);
+    }
+  }
+
+  async function loadAll() {
+    const tf = document.getElementById('tf').value;
+    document.getElementById('status').textContent = '更新中…';
+
+    const [summary, anomalies] = await Promise.all([
+      fetchJson(`/api/summary?timeframe=${encodeURIComponent(tf)}`),
+      fetchJson(`/api/anomalies?timeframe=${encodeURIComponent(tf)}&top_n=50`)
+    ]);
+
+    lastAnomalyPayload = anomalies;
+
+    renderMain(summary.items || []);
+    renderCards(anomalies);
+
+    const now = new Date();
+    document.getElementById('status').textContent = `更新时间：${now.toLocaleString()}`;
+  }
+
+  function renderMain(items) {
+    const rows = items.map(x => ( [
+      x.contract,
+      x.timeframe,
+      fmtPrice(x.last_price),
+      `<span class="${clsPct(x.price_change_pct)}">${fmtPct(x.price_change_pct)}</span>`,
+      `<span class="${clsPct(x.oi_change_pct)}">${fmtPct(x.oi_change_pct)}</span>`,
+      `<span class="${signalClass(x.market_signal)}">${x.market_signal || 'N/A'}</span>`,
+      new Date((x.updated_at || 0) * 1000).toLocaleString(),
+    ]));
+
+    if (!mainDT) {
+      mainDT = $('#mainTable').DataTable({
+        data: rows,
+        pageLength: 10,
+        order: [[0, 'asc']],
+      });
+    } else {
+      mainDT.clear();
+      mainDT.rows.add(rows);
+      mainDT.draw(false);
+    }
+  }
+
+  function renderCards(payload) {
+    const root = document.getElementById('cards');
+    root.innerHTML = '';
+
+    const counts = (payload && payload.counts) ? payload.counts : {};
+    const top3 = (payload && payload.top3) ? payload.top3 : {};
+
+    for (const d of cardDefs) {
+      const cnt = counts[d.key] ?? 0;
+      const sym = (top3[d.key] || []).join(', ') || '无';
+
+      const el = document.createElement('div');
+      el.className = `card rounded-2xl p-5 cursor-pointer hover:scale-[1.01] transition border ${d.accent}`;
+      el.innerHTML = `
+        <div class="flex items-start justify-between">
+          <div>
+            <div class="text-lg font-extrabold">${d.key}</div>
+            <div class="muted text-sm mt-1">${d.desc}</div>
+          </div>
+          <div class="text-3xl font-extrabold">${cnt}</div>
+        </div>
+        <div class="muted text-sm mt-4">影响币种：${sym}</div>
+      `;
+
+      el.addEventListener('click', () => openDetails(d.key));
+      root.appendChild(el);
+    }
+  }
+
+  function openDetails(key) {
+    if (!lastAnomalyPayload || !lastAnomalyPayload.details) return;
+    const items = lastAnomalyPayload.details[key] || [];
+
+    document.getElementById('detailsTitle').textContent = `异动详情 - ${key}`;
+    document.getElementById('detailsSection').classList.remove('hidden');
+
+    const rows = items.map(x => ( [
+      x.contract,
+      fmtPrice(x.last_price),
+      `<span class="${clsPct(x.price_change_pct)}">${fmtPct(x.price_change_pct)}</span>`,
+      `<span class="${clsPct(x.oi_change_pct)}">${fmtPct(x.oi_change_pct)}</span>`,
+      x.timeframe,
+      new Date((x.updated_at || 0) * 1000).toLocaleString(),
+    ]));
+
+    if (!detailDT) {
+      detailDT = $('#detailTable').DataTable({
+        data: rows,
+        pageLength: 10,
+        order: [[2, 'asc']],
+      });
+    } else {
+      detailDT.clear();
+      detailDT.rows.add(rows);
+      detailDT.draw(false);
+    }
+  }
+
+  document.getElementById('refresh').addEventListener('click', loadAll);
+  document.getElementById('tf').addEventListener('change', () => {
+    document.getElementById('detailsSection').classList.add('hidden');
+    loadAll();
+  });
+  document.getElementById('closeDetails').addEventListener('click', () => {
+    document.getElementById('detailsSection').classList.add('hidden');
+  });
+
+  function setMacdFilter(mode) {
+    macdFilterMode = mode;
+    const map = {
+      all: 'macdFilterAll',
+      signal: 'macdFilterSignal',
+      golden: 'macdFilterGolden',
+      death: 'macdFilterDeath',
+    };
+    Object.keys(map).forEach(k => {
+      const el = document.getElementById(map[k]);
+      if (!el) return;
+      if (k === mode) el.classList.add('active');
+      else el.classList.remove('active');
+    });
+    if (macdDT) {
+      macdDT.draw(false);
+    }
+  }
+
+  function setMacdTf(mode) {
+    macdTfMode = mode;
+    if (macdDT) {
+      macdDT.draw(false);
+    }
+  }
+
+  function beep() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'sine';
+      o.frequency.value = 880;
+      o.connect(g);
+      g.connect(ctx.destination);
+      g.gain.setValueAtTime(0.0001, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.15, ctx.currentTime + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.25);
+      o.start();
+      o.stop(ctx.currentTime + 0.26);
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  async function loadMacd() {
+    // 同步当前 UI 选择，确保每次打开页默认是 1h
+    const tfSel = document.getElementById('macdTf');
+    if (tfSel && tfSel.value) {
+      macdTfMode = tfSel.value;
+    }
+    const sec = parseInt(document.getElementById('macdRefreshSec').value || '120', 10);
+    document.getElementById('macdStatus').textContent = '更新中…';
+
+    const topN = parseInt((document.getElementById('macdTopN') && document.getElementById('macdTopN').value) || '50', 10) || 50;
+
+    // 全部：包含无信号行；只显示有信号/金叉/死叉：让后端过滤减少 payload
+    const onlySignal = (macdFilterMode === 'signal' || macdFilterMode === 'golden' || macdFilterMode === 'death') ? 1 : 0;
+    const payload = await fetchJson(`/api/macd_signals?limit=${topN}&only_signal=${onlySignal}`);
+    const items = (payload && payload.items) ? payload.items : [];
+
+    renderMacd(items);
+
+    if (macdTimer) clearInterval(macdTimer);
+    macdTimer = setInterval(() => {
+      const page = document.getElementById('page-macd');
+      if (page && !page.classList.contains('hidden')) loadMacd();
+    }, Math.max(60, Math.min(180, sec)) * 1000);
+
+    document.getElementById('macdStatus').textContent = `更新时间：${new Date().toLocaleString()}`;
+  }
+
+  function renderMacd(items) {
+    // 过滤：timeframe
+    let filtered = items;
+    if (macdTfMode !== 'all') filtered = filtered.filter(x => x.timeframe === macdTfMode);
+
+    // 过滤：golden/death
+    if (macdFilterMode === 'golden') filtered = filtered.filter(x => x.signal_type === 'golden');
+    if (macdFilterMode === 'death') filtered = filtered.filter(x => x.signal_type === 'death');
+
+    // 新信号提醒：contract+tf+signal_time
+    const soundOn = document.getElementById('macdSound').checked;
+    const newSeen = new Set();
+    let hasNew = false;
+    for (const x of filtered) {
+      if (!x.signal_type || !x.signal_time) continue;
+      const key = `${x.contract}|${x.timeframe}|${x.signal_type}|${x.signal_time}`;
+      newSeen.add(key);
+      if (!macdLastSeen.has(key)) hasNew = true;
+    }
+    macdLastSeen = newSeen;
+    if (soundOn && hasNew) beep();
+
+    const rows = filtered.map(x => {
+      const sigTime = x.signal_time ? new Date(x.signal_time * 1000).toLocaleString() : '—';
+      const sigType = x.signal_type === 'golden' ? '金叉' : (x.signal_type === 'death' ? '死叉' : '—');
+      const hasSignal = (x.signal_type === 'golden' || x.signal_type === 'death') ? 1 : 0;
+      const sigTs = x.signal_time ? x.signal_time : 0;
+      const strength = (x.signal_strength === null || x.signal_strength === undefined) ? '—' : `${Number(x.signal_strength).toFixed(4)}%`;
+      return [
+        hasSignal,
+        sigTs,
+        x.market_cap_rank ?? '—',
+        x.symbol,
+        x.timeframe,
+        (x.current_price ?? '—'),
+        x.macd_state || '—',
+        sigTime,
+        sigType,
+        (x.signal_price ?? '—'),
+        strength,
+      ];
+    });
+
+    // DataTables 行高亮
+    const rowClassByIdx = (idx) => {
+      const x = filtered[idx];
+      if (!x || !x.signal_type) return '';
+      if (x.signal_type === 'golden') return 'row-golden';
+      if (x.signal_type === 'death') return 'row-death';
+      return '';
+    };
+
+    if (!macdDT) {
+      $.fn.dataTable.ext.search.push(function (settings, data, dataIndex) {
+        if (settings.nTable && settings.nTable.id !== 'macdTable') return true;
+        if (macdFilterMode === 'signal') {
+          return data[8] === '金叉' || data[8] === '死叉';
+        }
+        if (macdFilterMode === 'golden') return data[8] === '金叉';
+        if (macdFilterMode === 'death') return data[8] === '死叉';
+        return true;
+      });
+
+      macdDT = $('#macdTable').DataTable({
+        data: rows,
+        pageLength: 15,
+        columnDefs: [
+          { targets: [0, 1], visible: false, searchable: false },
+        ],
+        order: [[0, 'desc'], [1, 'desc']],
+        createdRow: function (row, data, dataIndex) {
+          const cls = rowClassByIdx(dataIndex);
+          if (cls) row.classList.add(cls);
+        }
+      });
+    } else {
+      macdDT.clear();
+      macdDT.rows.add(rows);
+      macdDT.draw(false);
+
+      // 重新给行着色
+      $('#macdTable tbody tr').each(function (i) {
+        this.classList.remove('row-golden');
+        this.classList.remove('row-death');
+        const cls = rowClassByIdx(i);
+        if (cls) this.classList.add(cls);
+      });
+    }
+  }
+
+  document.getElementById('macdRefresh').addEventListener('click', loadMacd);
+  document.getElementById('macdTopN').addEventListener('change', () => {
+    loadMacd();
+  });
+  document.getElementById('macdTf').addEventListener('change', () => {
+    setMacdTf(document.getElementById('macdTf').value || 'all');
+    loadMacd();
+  });
+  document.getElementById('macdRefreshSec').addEventListener('change', loadMacd);
+  document.getElementById('macdFilterAll').addEventListener('click', () => {
+    setMacdFilter('all');
+    loadMacd();
+  });
+  document.getElementById('macdFilterSignal').addEventListener('click', () => {
+    setMacdFilter('signal');
+    loadMacd();
+  });
+  document.getElementById('macdFilterGolden').addEventListener('click', () => {
+    setMacdFilter('golden');
+    loadMacd();
+  });
+  document.getElementById('macdFilterDeath').addEventListener('click', () => {
+    setMacdFilter('death');
+    loadMacd();
+  });
+
+  const _sigRefreshEl = document.getElementById('sigRefresh');
+  if (_sigRefreshEl) {
+    _sigRefreshEl.addEventListener('click', () => loadSignalDashboard().catch(() => {}));
+  }
+  const _sigRefreshSecEl = document.getElementById('sigRefreshSec');
+  if (_sigRefreshSecEl) {
+    _sigRefreshSecEl.addEventListener('change', () => setSignalTimer());
+  }
+  const _sigModeEl = document.getElementById('sigMode');
+  if (_sigModeEl) {
+    _sigModeEl.addEventListener('change', () => loadSignalDashboard().catch(() => {}));
+  }
+  const _sigKtfEl = document.getElementById('sigKtf');
+  if (_sigKtfEl) {
+    _sigKtfEl.addEventListener('change', () => loadSignalDashboard().catch(() => {}));
+  }
+  const _sigOnlySignalEl = document.getElementById('sigOnlySignal');
+  if (_sigOnlySignalEl) {
+    _sigOnlySignalEl.addEventListener('change', () => loadSignalDashboard().catch(() => {}));
+  }
+  const _sigSortEl = document.getElementById('sigSort');
+  if (_sigSortEl) {
+    _sigSortEl.addEventListener('change', () => loadSignalDashboard().catch(() => {}));
+  }
+
+  setSignalTimer();
+
+  const _preRefreshEl = document.getElementById('preRefresh');
+  if (_preRefreshEl) {
+    _preRefreshEl.addEventListener('click', () => loadPrealerts().catch(() => {}));
+  }
+  const _preRefreshSecEl = document.getElementById('preRefreshSec');
+  if (_preRefreshSecEl) {
+    _preRefreshSecEl.addEventListener('change', () => loadPrealerts().catch(() => {}));
+  }
+  const _preTopNEl = document.getElementById('preTopN');
+  if (_preTopNEl) {
+    _preTopNEl.addEventListener('change', () => loadPrealerts().catch(() => {}));
+  }
+  const _preTfEl = document.getElementById('preTf');
+  if (_preTfEl) {
+    _preTfEl.addEventListener('change', () => loadPrealerts().catch(() => {}));
+  }
+
+  const _preFilterAllEl = document.getElementById('preFilterAll');
+  if (_preFilterAllEl) {
+    _preFilterAllEl.addEventListener('click', () => { setPreFilter('all'); loadPrealerts().catch(() => {}); });
+  }
+  const _preFilterWarnEl = document.getElementById('preFilterWarn');
+  if (_preFilterWarnEl) {
+    _preFilterWarnEl.addEventListener('click', () => { setPreFilter('warn'); loadPrealerts().catch(() => {}); });
+  }
+  const _preFilterGoldenEl = document.getElementById('preFilterGolden');
+  if (_preFilterGoldenEl) {
+    _preFilterGoldenEl.addEventListener('click', () => { setPreFilter('pre_golden'); loadPrealerts().catch(() => {}); });
+  }
+  const _preFilterDeathEl = document.getElementById('preFilterDeath');
+  if (_preFilterDeathEl) {
+    _preFilterDeathEl.addEventListener('click', () => { setPreFilter('pre_death'); loadPrealerts().catch(() => {}); });
+  }
+
+  const _preCloseDetailsEl = document.getElementById('preCloseDetails');
+  if (_preCloseDetailsEl) {
+    _preCloseDetailsEl.addEventListener('click', () => {
+      const d = document.getElementById('preDetails');
+      if (d) d.classList.add('hidden');
+    });
+  }
+
+  document.querySelectorAll('.nav-item').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const pageId = btn.getAttribute('data-target');
+      showPage(pageId);
+      if (pageId === 'page-dashboard') {
+        loadAll();
+      }
+      if (pageId === 'page-macd') {
+        loadMacd();
+      }
+      if (pageId === 'page-prealert') {
+        loadPrealerts();
+      }
+      if (pageId === 'page-signal') {
+        setSignalTimer();
+        loadSignalDashboard().catch(() => {});
+      }
+      if (pageId === 'page-news') {
+        loadNews();
+      }
+      if (pageId === 'page-telegram') {
+        loadNewsSettings();
+        loadPushHistory();
+      }
+    });
+  });
+
+  function _sentCell(s) {
+    if (!s) return `<span class="neu">—</span>`;
+    if (s === 'bullish') return `<span class="pill pos">多</span>`;
+    if (s === 'bearish') return `<span class="pill neg">空</span>`;
+    if (s === 'neutral') return `<span class="pill neu">中性</span>`;
+    return `<span class="pill neu">${s}</span>`;
+  }
+
+  function _strengthBar(v, sentiment) {
+    if (v === null || v === undefined) return '—';
+    const n0 = Number(v);
+    if (Number.isNaN(n0)) return '—';
+    const n = Math.max(0, Math.min(1, n0));
+    const pct = Math.round(n * 100);
+
+    let color = '#9ca3af';
+    if (sentiment === 'bullish') color = '#22c55e';
+    if (sentiment === 'bearish') color = '#ef4444';
+    if (sentiment === 'neutral') color = '#a3a3a3';
+
+    const intensity = (n >= 0.75) ? 'font-extrabold' : ((n >= 0.5) ? 'font-bold' : 'font-semibold');
+    return `
+      <div class="min-w-[140px]">
+        <div class="w-full bg-gray-800 border border-gray-700 rounded-full h-2 overflow-hidden">
+          <div class="h-2" style="width:${pct}%; background:${color};"></div>
+        </div>
+        <div class="muted text-xs mt-1 ${intensity}">${pct}%</div>
+      </div>
+    `;
+  }
+
+  async function loadNews() {
+    const sec = parseInt(document.getElementById('newsRefreshSec').value || '120', 10);
+    document.getElementById('newsStatus').textContent = '更新中…';
+
+    const payload = await fetchJson(`/api/news/items?limit=200`);
+    const items = (payload && payload.items) ? payload.items : [];
+    renderNews(items);
+
+    if (newsTimer) clearInterval(newsTimer);
+    newsTimer = setInterval(() => {
+      const page = document.getElementById('page-news');
+      if (page && !page.classList.contains('hidden')) loadNews();
+    }, Math.max(60, Math.min(300, sec)) * 1000);
+
+    document.getElementById('newsStatus').textContent = `更新时间：${new Date().toLocaleString()}`;
+  }
+
+  function renderNews(items) {
+    const rows = (items || []).map(x => {
+      const ts = (x.published_at || x.created_at || 0);
+      const tLabel = ts ? new Date(ts * 1000).toLocaleString() : '—';
+      const title = (x.title || '—');
+      const link = x.link || '';
+      const titleHtml = link ? `<a href="${link}" target="_blank" class="text-blue-300 hover:underline news-title">${title}</a>` : `<span class="news-title">${title}</span>`;
+      const tags = x.tags || '—';
+      return [
+        ts,
+        tLabel,
+        titleHtml,
+        (x.source || '—'),
+        tags,
+        _coinsPills(x.coins),
+        _sentCell(x.sentiment),
+        _strengthBar(x.strength, x.sentiment),
+      ];
+    });
+
+    if (!newsDT) {
+      newsDT = $('#newsTable').DataTable({
+        data: rows,
+        pageLength: 15,
+        autoWidth: false,
+        columnDefs: [
+          { targets: [0], visible: false, searchable: false },
+          { targets: [2], width: '46%' },
+        ],
+        order: [[0, 'desc']],
+      });
+    } else {
+      newsDT.clear();
+      newsDT.rows.add(rows);
+      newsDT.draw(false);
+    }
+
+    // 应用情绪筛选（对“情绪”列做列搜索）
+    applyNewsSentimentFilter();
+  }
+
+  async function loadNewsSettings() {
+    const payload = await fetchJson('/api/news/settings');
+    const s = (payload && payload.settings) ? payload.settings : {};
+    document.getElementById('tgBotToken').value = s.tg_bot_token || '';
+    document.getElementById('tgChatId').value = s.tg_chat_id || '';
+    document.getElementById('pushThreshold').value = (s.push_threshold === null || s.push_threshold === undefined) ? '' : s.push_threshold;
+    document.getElementById('pushEnabled').checked = !!s.push_enabled;
+    document.getElementById('pushNewsEnabled').checked = (s.push_news_enabled === undefined) ? true : !!s.push_news_enabled;
+    document.getElementById('pushMacdPrealertEnabled').checked = (s.push_macd_prealert_enabled === undefined) ? true : !!s.push_macd_prealert_enabled;
+    document.getElementById('pushMacdMonitorEnabled').checked = (s.push_macd_monitor_enabled === undefined) ? true : !!s.push_macd_monitor_enabled;
+    document.getElementById('pushSignalEnabled').checked = (s.push_signal_enabled === undefined) ? true : !!s.push_signal_enabled;
+  }
+
+  async function saveNewsSettings() {
+    const s = {
+      tg_bot_token: (document.getElementById('tgBotToken').value || '').trim(),
+      tg_chat_id: (document.getElementById('tgChatId').value || '').trim(),
+      push_threshold: (document.getElementById('pushThreshold').value === '') ? null : Number(document.getElementById('pushThreshold').value),
+      push_enabled: !!document.getElementById('pushEnabled').checked,
+      push_news_enabled: !!document.getElementById('pushNewsEnabled').checked,
+      push_macd_prealert_enabled: !!document.getElementById('pushMacdPrealertEnabled').checked,
+      push_macd_monitor_enabled: !!document.getElementById('pushMacdMonitorEnabled').checked,
+      push_signal_enabled: !!document.getElementById('pushSignalEnabled').checked,
+    };
+    document.getElementById('newsSettingsStatus').textContent = '保存中…';
+    const r = await fetch('/api/news/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ settings: s }),
+    });
+    const out = await r.json();
+    if (out && out.ok) {
+      document.getElementById('newsSettingsStatus').textContent = `已保存：${new Date().toLocaleString()}`;
+    } else {
+      document.getElementById('newsSettingsStatus').textContent = (out && out.error) ? out.error : '保存失败';
+    }
+  }
+
+  async function loadPushHistory() {
+    const payload = await fetchJson('/api/news/push_history?limit=200');
+    const items = (payload && payload.items) ? payload.items : [];
+
+    rebuildPushLevelOptions(items);
+
+    const rows = items.map(x => {
+      const ts = x.created_at || 0;
+      const tLabel = ts ? new Date(ts * 1000).toLocaleString() : '—';
+      const ok = (x.ok === 1 || x.ok === true) ? `<span class="pill pos">OK</span>` : `<span class="pill neg">FAIL</span>`;
+      const title = x.title || '—';
+      const link = x.link || '';
+      const titleHtml = link ? `<a href="${link}" target="_blank" class="text-blue-300 hover:underline">${title}</a>` : title;
+      return [
+        ts,
+        tLabel,
+        ok,
+        (x.level || '—'),
+        titleHtml,
+        (x.error || '—'),
+      ];
+    });
+
+    if (!pushDT) {
+      pushDT = $('#pushTable').DataTable({
+        data: rows,
+        pageLength: 10,
+        autoWidth: false,
+        columnDefs: [
+          { targets: [0], visible: false, searchable: false },
+          { targets: [4], width: '46%' },
+          { targets: [5], width: '22%' },
+        ],
+        order: [[0, 'desc']],
+      });
+    } else {
+      pushDT.clear();
+      pushDT.rows.add(rows);
+      pushDT.draw(false);
+    }
+
+    applyPushLevelFilter();
+  }
+
+  function rebuildPushLevelOptions(items) {
+    const sel = document.getElementById('pushLevelFilter');
+    if (!sel) return;
+
+    const prev = sel.value || 'all';
+    const levels = new Map();
+    (items || []).forEach(x => {
+      const lv = (x && x.level) ? String(x.level) : '';
+      if (!lv) return;
+      levels.set(lv, (levels.get(lv) || 0) + 1);
+    });
+
+    // 重新构建 options（保留分组 + 具体 level 列表）
+    sel.innerHTML = '';
+    const addOpt = (v, label) => {
+      const opt = document.createElement('option');
+      opt.value = v;
+      opt.textContent = label;
+      sel.appendChild(opt);
+    };
+
+    addOpt('all', '全部');
+    addOpt('group_news', '新闻哨兵');
+    addOpt('group_macd', 'MACD 预警');
+
+    const sorted = Array.from(levels.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+    if (sorted.length) {
+      // 分割线（用不可选项模拟）
+      const sep = document.createElement('option');
+      sep.value = '__sep__';
+      sep.textContent = '────────';
+      sep.disabled = true;
+      sel.appendChild(sep);
+    }
+    for (const [lv, cnt] of sorted) {
+      addOpt(`level:${lv}`, `${lv} (${cnt})`);
+    }
+
+    // 恢复之前选择
+    const exists = Array.from(sel.options).some(o => o.value === prev);
+    sel.value = exists ? prev : 'all';
+  }
+
+  function applyPushLevelFilter() {
+    if (!pushDT) return;
+    const sel = document.getElementById('pushLevelFilter');
+    if (!sel) return;
+    const v = sel.value || 'all';
+    const colIdx = 3;
+    if (v === 'all') {
+      pushDT.column(colIdx).search('');
+      pushDT.draw(false);
+      return;
+    }
+    if (v === 'group_news') {
+      // 新闻哨兵：历史记录 level 是 sentiment（bullish/bearish/neutral）以及可能的 news_* 扩展
+      pushDT.column(colIdx).search('^(bullish|bearish|neutral|news)', true, false);
+      pushDT.draw(false);
+      return;
+    }
+    if (v === 'group_macd') {
+      pushDT.column(colIdx).search('^(macd_prealert)', true, false);
+      pushDT.draw(false);
+      return;
+    }
+
+    if (v.startsWith('level:')) {
+      const lv = v.slice('level:'.length);
+      const re = `^(${lv.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})$`;
+      pushDT.column(colIdx).search(re, true, false);
+      pushDT.draw(false);
+      return;
+    }
+  }
+
+  document.getElementById('newsRefresh').addEventListener('click', () => {
+    loadNews();
+  });
+  document.getElementById('newsRefreshSec').addEventListener('change', loadNews);
+  document.getElementById('newsSaveSettings').addEventListener('click', saveNewsSettings);
+
+  const _pushLevelFilterEl = document.getElementById('pushLevelFilter');
+  if (_pushLevelFilterEl) {
+    _pushLevelFilterEl.addEventListener('change', applyPushLevelFilter);
+  }
+  const _pushRefreshEl = document.getElementById('pushRefresh');
+  if (_pushRefreshEl) {
+    _pushRefreshEl.addEventListener('click', loadPushHistory);
+  }
+  document.getElementById('newsFetchNow').addEventListener('click', async () => {
+    document.getElementById('newsStatus').textContent = '抓取中…';
+    const out = await fetchJson('/api/news/refresh?max_per_feed=30');
+    const ins = (out && out.inserted !== undefined) ? out.inserted : '—';
+    const skp = (out && out.skipped !== undefined) ? out.skipped : '—';
+    const an = (out && out.analyze && out.analyze.analyzed !== undefined) ? out.analyze.analyzed : '—';
+    document.getElementById('newsStatus').textContent = `抓取完成：新增 ${ins}，跳过 ${skp}；分析 ${an}`;
+    await loadNews();
+  });
+
+  document.getElementById('newsSentFilter').addEventListener('change', async () => {
+    if (!newsDT) {
+      await loadNews();
+      return;
+    }
+    applyNewsSentimentFilter();
+  });
+  document.getElementById('newsAnalyzeNow').addEventListener('click', async () => {
+    document.getElementById('newsStatus').textContent = '分析中…';
+    const r = await fetch('/api/news/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ limit: 30 }),
+    });
+    try {
+      await r.json();
+    } catch (e) {}
+    await loadNews();
+  });
+
+  function setPreFilter(mode) {
+    preFilterMode = mode;
+    const map = {
+      all: 'preFilterAll',
+      warn: 'preFilterWarn',
+      pre_golden: 'preFilterGolden',
+      pre_death: 'preFilterDeath',
+    };
+    Object.keys(map).forEach(k => {
+      const el = document.getElementById(map[k]);
+      if (!el) return;
+      if (k === mode) el.classList.add('active');
+      else el.classList.remove('active');
+    });
+    if (preDT) preDT.draw(false);
+  }
+
+  function _statusCell(s) {
+    if (s === '即将金叉') return `<span class="pill pos">↑ 即将金叉</span>`;
+    if (s === '即将死叉') return `<span class="pill neg">↓ 即将死叉</span>`;
+    return `<span class="neu">—</span>`;
+  }
+
+  function _warnTypeLabel(t) {
+    if (t === 'pre_golden') return '即将金叉';
+    if (t === 'pre_death') return '即将死叉';
+    return '—';
+  }
+
+  async function loadPrealerts() {
+    const sec = parseInt(document.getElementById('preRefreshSec').value || '120', 10);
+    document.getElementById('preStatus').textContent = '更新中…';
+
+    const topN = parseInt((document.getElementById('preTopN') && document.getElementById('preTopN').value) || '50', 10) || 50;
+    const tfSel = document.getElementById('preTf');
+    preTfMode = (tfSel && tfSel.value) ? tfSel.value : 'all';
+
+    const onlyWarn = (preFilterMode === 'warn' || preFilterMode === 'pre_golden' || preFilterMode === 'pre_death') ? 1 : 0;
+    const warnType = (preFilterMode === 'pre_golden' || preFilterMode === 'pre_death') ? preFilterMode : 'all';
+    const payload = await fetchJson(`/api/macd_prealerts?limit=${topN}&only_warn=${onlyWarn}&warn_type=${warnType}`);
+    const items = (payload && payload.items) ? payload.items : [];
+    renderPrealerts(items);
+
+    if (preTimer) clearInterval(preTimer);
+    preTimer = setInterval(() => {
+      const page = document.getElementById('page-prealert');
+      if (page && !page.classList.contains('hidden')) loadPrealerts();
+    }, Math.max(60, Math.min(300, sec)) * 1000);
+
+    document.getElementById('preStatus').textContent = `更新时间：${new Date().toLocaleString()}`;
+  }
+
+  function renderPrealerts(items) {
+    const expectedCols = 12;
+    if (preDT && preDT.columns && preDT.columns().count && preDT.columns().count() !== expectedCols) {
+      try {
+        preDT.destroy();
+      } catch (e) {}
+      preDT = null;
+      $('#preTable tbody').empty();
+    }
+
+    const tfs = (preTfMode === 'all') ? ['15m', '1h', '1d'] : [preTfMode];
+    const tfField = (tf) => {
+      if (tf === '15m') return 'status_15m';
+      if (tf === '1h') return 'status_1h';
+      if (tf === '1d') return 'status_1d';
+      return null;
+    };
+
+    const rows = [];
+    for (const x of items) {
+      for (const tf of tfs) {
+        const f = tfField(tf);
+        if (!f) continue;
+        const st = x[f];
+        const hasWarn = (st === '即将金叉' || st === '即将死叉') ? 1 : 0;
+        const wt = x.latest_warn_time ? x.latest_warn_time : 0;
+        const wTime = x.latest_warn_time ? new Date(x.latest_warn_time * 1000).toLocaleString() : '—';
+        const ratio = (x.latest_ratio === null || x.latest_ratio === undefined) ? '—' : Number(x.latest_ratio).toFixed(4);
+        const barDir = x.latest_bar_dir === 'up' ? '↑' : (x.latest_bar_dir === 'down' ? '↓' : '—');
+        const symHtml = `<a href="#" class="pre-sym" data-contract="${x.contract}" data-symbol="${x.symbol}">${x.symbol}</a>`;
+        rows.push([
+          hasWarn,
+          wt,
+          (st || '—'),
+          x.market_cap_rank ?? '—',
+          symHtml,
+          (x.current_price ?? '—'),
+          tf,
+          _statusCell(st),
+          wTime,
+          _warnTypeLabel(x.latest_warn_type),
+          ratio,
+          barDir,
+        ]);
+      }
+    }
+
+    if (!preDT) {
+      $.fn.dataTable.ext.search.push(function (settings, data, dataIndex) {
+        if (settings.nTable && settings.nTable.id !== 'preTable') return true;
+        const stRaw = (settings.aoData && settings.aoData[dataIndex] && settings.aoData[dataIndex]._aData) ? settings.aoData[dataIndex]._aData[2] : data[2];
+        if (preFilterMode === 'warn') return stRaw === '即将金叉' || stRaw === '即将死叉';
+        if (preFilterMode === 'pre_golden') return stRaw === '即将金叉';
+        if (preFilterMode === 'pre_death') return stRaw === '即将死叉';
+        return true;
+      });
+
+      preDT = $('#preTable').DataTable({
+        data: rows,
+        pageLength: 15,
+        columnDefs: [
+          { targets: [0, 1, 2], visible: false, searchable: false },
+        ],
+        order: [[0, 'desc'], [1, 'desc']],
+      });
+    } else {
+      preDT.clear();
+      preDT.rows.add(rows);
+      preDT.draw(false);
+    }
+  }
+
+  async function _loadPreChart(contract, tf, mountId, title) {
+    const payload = await fetchJson(`/api/macd_prealert_detail?contract=${encodeURIComponent(contract)}&tf=${encodeURIComponent(tf)}&limit=200`);
+    const t = (payload && payload.t) ? payload.t : [];
+    const close = (payload && payload.close) ? payload.close : [];
+    const dif = (payload && payload.dif) ? payload.dif : [];
+    const dea = (payload && payload.dea) ? payload.dea : [];
+    const hist = (payload && payload.hist) ? payload.hist : [];
+    const x = t.map(ts => new Date(ts * 1000));
+
+    const traces = [
+      { x, y: close, type: 'scatter', mode: 'lines', name: 'Close', yaxis: 'y1', line: { color: '#93c5fd' } },
+      { x, y: dif, type: 'scatter', mode: 'lines', name: 'DIF', yaxis: 'y2', line: { color: '#22c55e' } },
+      { x, y: dea, type: 'scatter', mode: 'lines', name: 'DEA', yaxis: 'y2', line: { color: '#f59e0b' } },
+      { x, y: hist, type: 'bar', name: 'HIST', yaxis: 'y3', marker: { color: 'rgba(255,255,255,0.35)' } },
+    ];
+
+    const layout = {
+      title: { text: title, font: { color: 'rgba(255,255,255,0.85)', size: 14 } },
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      margin: { l: 40, r: 20, t: 40, b: 30 },
+      font: { color: 'rgba(255,255,255,0.75)' },
+      xaxis: { showgrid: false },
+      yaxis: { domain: [0.45, 1.0], title: '' },
+      yaxis2: { domain: [0.20, 0.42], title: '' },
+      yaxis3: { domain: [0.0, 0.18], title: '' },
+      legend: { orientation: 'h' },
+    };
+
+    Plotly.newPlot(mountId, traces, layout, { displayModeBar: false, responsive: true });
+  }
+
+  document.addEventListener('click', async (e) => {
+    const a = e.target && e.target.closest ? e.target.closest('.pre-sym') : null;
+    if (!a) return;
+    e.preventDefault();
+    const contract = a.getAttribute('data-contract');
+    const symbol = a.getAttribute('data-symbol');
+    document.getElementById('preDetailsTitle').textContent = `预警详情：${symbol}（${contract}）`;
+    document.getElementById('preDetails').classList.remove('hidden');
+    await _loadPreChart(contract, '15m', 'preChart15m', `${symbol} 15m`);
+    await _loadPreChart(contract, '1h', 'preChart1h', `${symbol} 1h`);
+    await _loadPreChart(contract, '1d', 'preChart1d', `${symbol} 1d`);
+
+  });
+
+  // 默认显示仪表板
+  showPage('page-dashboard');
+
+  // 60 秒自动刷新
+  setInterval(loadAll, 60 * 1000);
+
+  loadAll();
+</script>
+</body>
+</html>
