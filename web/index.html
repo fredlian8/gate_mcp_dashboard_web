@@ -39,6 +39,11 @@
     .btn.active { background: rgba(37, 99, 235, 0.25); border-color: rgba(59, 130, 246, 0.55); color: rgb(191, 219, 254); }
     .row-golden td { background: rgba(20, 83, 45, 0.25) !important; }
     .row-death td { background: rgba(127, 29, 29, 0.25) !important; }
+
+    @media (max-width: 768px) {
+      .dataTables_wrapper { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      table.dataTable { width: max-content !important; }
+    }
   </style>
 </head>
 <body class="bg-gray-900 text-white">
@@ -302,7 +307,7 @@
                       来源：Gate 永续 funding_rate。打分：
                     </div>
                     <div>
-                      funding ≤ -0.03%：+4；funding ≤ -0.01%：+2；funding ≥ +0.03%：-4；funding ≥ +0.01%：-2。
+                      funding ≤ -0.03%：+4（需 OI(tf) 幅度确认，否则降档为 +2）；funding ≤ -0.01%：+2；funding ≥ +0.03%：-4（需 OI(tf) 幅度确认，否则降档为 -2）；funding ≥ +0.01%：-2。
                     </div>
                   </div>
 
@@ -373,8 +378,8 @@
               <div class="flex flex-wrap items-center gap-3">
                 <label class="muted text-sm">TopN</label>
                 <select id="macdTopN" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
-                  <option value="50" selected>50</option>
-                  <option value="100">100</option>
+                  <option value="50">50</option>
+                  <option value="100" selected>100</option>
                 </select>
                 <label class="muted text-sm">时间框架</label>
                 <select id="macdTf" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
@@ -401,8 +406,8 @@
 
           <section class="mb-6">
             <div class="flex flex-wrap items-center gap-2">
-              <button class="btn active" id="macdFilterAll">全部</button>
-              <button class="btn" id="macdFilterSignal">只显示有信号</button>
+              <button class="btn" id="macdFilterAll">全部</button>
+              <button class="btn active" id="macdFilterSignal">只显示有信号</button>
               <button class="btn" id="macdFilterGolden">只显示金叉</button>
               <button class="btn" id="macdFilterDeath">只显示死叉</button>
             </div>
@@ -444,8 +449,8 @@
               <div class="flex flex-wrap items-center gap-3">
                 <label class="muted text-sm">TopN</label>
                 <select id="preTopN" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
-                  <option value="50" selected>50</option>
-                  <option value="100">100</option>
+                  <option value="50">50</option>
+                  <option value="100" selected>100</option>
                 </select>
                 <label class="muted text-sm">时间框架</label>
                 <select id="preTf" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
@@ -469,8 +474,8 @@
 
           <section class="mb-6">
             <div class="flex flex-wrap items-center gap-2">
-              <button class="btn active" id="preFilterAll">全部</button>
-              <button class="btn" id="preFilterWarn">只显示有预警</button>
+              <button class="btn" id="preFilterAll">全部</button>
+              <button class="btn active" id="preFilterWarn">只显示有预警</button>
               <button class="btn" id="preFilterGolden">只看即将金叉</button>
               <button class="btn" id="preFilterDeath">只看即将死叉</button>
             </div>
@@ -755,13 +760,13 @@
   let lastAnomalyPayload = null;
   let macdDT = null;
   let macdTimer = null;
-  let macdFilterMode = 'all';
+  let macdFilterMode = 'signal';
   let macdTfMode = '1h';
   let macdLastSeen = new Set();
 
   let preDT = null;
   let preTimer = null;
-  let preFilterMode = 'all';
+  let preFilterMode = 'warn';
   let preTfMode = '1h';
 
   let sigDT = null;
