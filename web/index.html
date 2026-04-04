@@ -39,10 +39,25 @@
     .btn.active { background: rgba(37, 99, 235, 0.25); border-color: rgba(59, 130, 246, 0.55); color: rgb(191, 219, 254); }
     .row-golden td { background: rgba(20, 83, 45, 0.25) !important; }
     .row-death td { background: rgba(127, 29, 29, 0.25) !important; }
+    /* 多空综合雷达：主要原因列强制加宽并允许换行 */
+    #sigTable td.sig-reasons, #sigTable th.sig-reasons {
+      min-width: 170px;
+      white-space: normal !important;
+      word-break: break-word;
+    }
+    /* 只把“主要原因”的结果内容调小（td），表头 th 保持正常 */
+    #sigTable td.sig-reasons {
+      font-size: 11px;
+      line-height: 1.15;
+      color: rgba(255,255,255,0.70);
+    }
+    #sigTable {
+      width: 100% !important;
+    }
   </style>
 </head>
 <body class="bg-gray-900 text-white">
-  <div class="max-w-7xl mx-auto px-4 py-8">
+  <div class="w-full max-w-none px-2 sm:px-4 lg:px-6 py-6">
     <div class="flex flex-col lg:flex-row gap-6">
       <aside class="w-full lg:w-64">
         <div class="card rounded-2xl p-4 sticky top-6">
@@ -559,6 +574,7 @@
                     <th>影响币种</th>
                     <th>情绪</th>
                     <th>强度</th>
+                    <th>原因</th>
                   </tr>
                 </thead>
                 <tbody></tbody>
@@ -712,7 +728,7 @@
     const sel = document.getElementById('newsSentFilter');
     if (!sel) return;
     const v = sel.value || 'all';
-    const colIdx = 6; // 情绪列索引（time_ts 隐藏列 + 时间/标题/来源/标签/影响币种/情绪）
+    const colIdx = 6; // 情绪列索引（time_ts 隐藏列 + 时间/标题/来源/标签/影响币种/情绪/强度/原因）
     if (v === 'all') {
       newsDT.column(colIdx).search('');
       newsDT.draw(false);
@@ -855,7 +871,7 @@
         autoWidth: false,
         columnDefs: [
           { targets: [0,1], visible: false },
-          { targets: 13, width: '46%' },
+          { targets: 13, className: 'sig-reasons' },
           { targets: 3, width: '10%' },
         ]
       });
@@ -1370,6 +1386,7 @@
       const link = x.link || '';
       const titleHtml = link ? `<a href="${link}" target="_blank" class="text-blue-300 hover:underline news-title">${title}</a>` : `<span class="news-title">${title}</span>`;
       const tags = x.tags || '—';
+      const reason = x.reason || '—';
       return [
         ts,
         tLabel,
@@ -1379,6 +1396,7 @@
         _coinsPills(x.coins),
         _sentCell(x.sentiment),
         _strengthBar(x.strength, x.sentiment),
+        `<span class="muted">${reason}</span>`,
       ];
     });
 

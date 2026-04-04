@@ -1,18 +1,18 @@
 import os
-import time
-from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import re
+import sqlite3
 import threading
+import time
+import warnings
+from urllib.parse import parse_qs, unquote, urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 import base64
 import datetime
 import hashlib
 import json
 import math
-import os
-import re
-import sqlite3
-from urllib.parse import urlparse, parse_qs, unquote
 
 import requests
 try:
@@ -76,10 +76,28 @@ else:
         HTTP.trust_env = True
 
 NEWS_DB_PATH = os.getenv("NEWS_DB_PATH", os.path.join(os.path.dirname(__file__), "news_sentinel.sqlite3"))
-NEWS_RSS_FEEDS = os.getenv(
-    "NEWS_RSS_FEEDS",
-    "https://news.google.com/rss/search?q=cryptocurrency%20OR%20bitcoin%20OR%20ethereum%20when%3A1d&hl=en-US&gl=US&ceid=US:en;https://news.google.com/rss/search?q=%E5%8A%A0%E5%AF%86%E8%B4%A7%E5%B8%81%20OR%20%E6%AF%94%E7%89%B9%E5%B8%81%20OR%20%E4%BB%A5%E5%A4%AA%E5%9D%8A%20when%3A1d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans;https://cointelegraph.com/rss;https://decrypt.co/feed;https://www.8btc.com/feed;https://www.odaily.news/rss;https://www.jinse.com/rss",
-)
+NEWS_HTTP_VERIFY = (os.getenv("NEWS_HTTP_VERIFY", "1") or "1").strip() in ("1", "true", "True", "yes", "YES")
+NEWS_HTTP_USER_AGENT = (
+    os.getenv(
+        "NEWS_HTTP_USER_AGENT",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    )
+    or ""
+).strip()
+COINDESK_FEED_URL = (
+    os.getenv("COINDESK_FEED_URL", "https://www.coindesk.com/arc/outboundfeeds/rss/") or ""
+).strip()
+COINTELEGRAPH_FEED_URL = (os.getenv("COINTELEGRAPH_FEED_URL", "https://cointelegraph.com/rss") or "").strip()
+THEBLOCK_FEED_URL = (os.getenv("THEBLOCK_FEED_URL", "https://www.theblock.co/rss.xml") or "").strip()
+
+# If certificate verification is disabled (NEWS_HTTP_VERIFY=0), suppress noisy warnings.
+if not NEWS_HTTP_VERIFY:
+    try:
+        import urllib3  # type: ignore
+
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    except Exception:
+        warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 
 TELEGRAM_API_BASE = os.getenv("TELEGRAM_API_BASE", "https://api.telegram.org").strip() or "https://api.telegram.org"
 TELEGRAM_CONNECT_TIMEOUT = float(os.getenv("TELEGRAM_CONNECT_TIMEOUT", "10") or "10")
@@ -176,6 +194,7 @@ def _db_init() -> None:
                 tags TEXT,
                 coins TEXT,
                 sentiment TEXT,
+                reason TEXT,
                 strength REAL,
                 created_at INTEGER,
                 translated_at INTEGER
@@ -259,6 +278,8 @@ def _db_init() -> None:
             cur.execute("ALTER TABLE news_items ADD COLUMN translated_at INTEGER")
         if "coins" not in cols:
             cur.execute("ALTER TABLE news_items ADD COLUMN coins TEXT")
+        if "reason" not in cols:
+            cur.execute("ALTER TABLE news_items ADD COLUMN reason TEXT")
 
         # 索引：加速列表查询与去重
         cur.execute("CREATE INDEX IF NOT EXISTS idx_news_items_pub ON news_items(published_at)")
@@ -973,7 +994,7 @@ def push_telegram_for_news(limit: int = 50) -> dict:
     try:
         rows = conn.execute(
             """
-            SELECT uniq, title, link, coins, sentiment, strength
+            SELECT uniq, title, link, coins, sentiment, strength, reason
             FROM news_items
             WHERE sentiment IN ('bullish','bearish')
               AND strength IS NOT NULL
@@ -1004,12 +1025,14 @@ def push_telegram_for_news(limit: int = 50) -> dict:
                 coins = (r["coins"] or "").strip()
                 sentiment = (r["sentiment"] or "").strip()
                 strength = r["strength"]
+                reason = (r["reason"] or "").strip()
 
                 sent_cn = "利多" if sentiment == "bullish" else "利空"
                 coins_cn = coins if coins else "—"
                 msg = (
                     f"【新闻多空哨兵】{sent_cn} 强度 {float(strength):.2f}\n"
                     f"币种: {coins_cn}\n"
+                    f"原因: {reason or '—'}\n"
                     f"{title}\n"
                     f"{link}"
                 )
@@ -1079,11 +1102,13 @@ def _safe_int(v: Any) -> Optional[int]:
 
 
 def _rss_feeds_list() -> List[str]:
-    feeds = []
-    for x in (NEWS_RSS_FEEDS or "").split(";"):
-        u = (x or "").strip()
-        if u:
-            feeds.append(u)
+    feeds: List[str] = []
+    if COINTELEGRAPH_FEED_URL:
+        feeds.append(COINTELEGRAPH_FEED_URL)
+    if COINDESK_FEED_URL:
+        feeds.append(COINDESK_FEED_URL)
+    if THEBLOCK_FEED_URL:
+        feeds.append(THEBLOCK_FEED_URL)
     return feeds
 
 
@@ -1361,7 +1386,22 @@ def _normalize_strength(v: Any) -> Optional[float]:
     return float(x)
 
 
-def _rule_sentiment(title: str, summary: str) -> Tuple[str, float]:
+def _normalize_reason(v: Any) -> Optional[str]:
+    if v is None:
+        return None
+    try:
+        s = str(v).strip()
+    except Exception:
+        return None
+    if not s:
+        return None
+    s = re.sub(r"\s+", " ", s)
+    if len(s) > 120:
+        s = s[:120].rstrip() + "…"
+    return s
+
+
+def _rule_sentiment(title: str, summary: str) -> Tuple[str, float, str]:
     text = f"{title}\n{summary}".lower()
     bull_words = [
         "surge",
@@ -1412,18 +1452,24 @@ def _rule_sentiment(title: str, summary: str) -> Tuple[str, float]:
     ]
 
     score = 0
+    hit_bull: List[str] = []
+    hit_bear: List[str] = []
     for w in bull_words:
         if w in text:
             score += 1
+            hit_bull.append(w)
     for w in bear_words:
         if w in text:
             score -= 1
+            hit_bear.append(w)
 
     if score > 0:
-        return "bullish", min(1.0, 0.35 + 0.10 * score)
+        top = ",".join(hit_bull[:3])
+        return "bullish", min(1.0, 0.35 + 0.10 * score), (f"关键词:{top}" if top else "规则:利多关键词")
     if score < 0:
-        return "bearish", min(1.0, 0.35 + 0.10 * abs(score))
-    return "neutral", 0.30
+        top = ",".join(hit_bear[:3])
+        return "bearish", min(1.0, 0.35 + 0.10 * abs(score)), (f"关键词:{top}" if top else "规则:利空关键词")
+    return "neutral", 0.30, "关键词不足/偏中性"
 
 
 def _llm_prompt(title: str, summary: str, source: str, tags: str) -> str:
@@ -1434,7 +1480,8 @@ def _llm_prompt(title: str, summary: str, source: str, tags: str) -> str:
         "输出 JSON Schema:\n"
         "{\n"
         '  "sentiment": "bullish|bearish|neutral",\n'
-        '  "strength": 0.0-1.0\n'
+        '  "strength": 0.0-1.0,\n'
+        '  "reason": "不超过60字的简要原因"\n'
         "}\n\n"
         f"标题: {title}\n"
         f"摘要: {summary}\n"
@@ -1505,7 +1552,7 @@ def _analyze_with_anthropic(prompt: str, timeout_sec: int = 25) -> Optional[dict
     return obj
 
 
-def analyze_news_item(title: str, summary: str, source: str, tags: str) -> Tuple[str, float, str]:
+def analyze_news_item(title: str, summary: str, source: str, tags: str) -> Tuple[str, float, str, str]:
     prompt = _llm_prompt(title=title, summary=summary, source=source, tags=tags)
     provider = "rules"
     obj = None
@@ -1528,11 +1575,12 @@ def analyze_news_item(title: str, summary: str, source: str, tags: str) -> Tuple
     if obj and isinstance(obj, dict):
         sent = _normalize_sentiment(obj.get("sentiment"))
         strength = _normalize_strength(obj.get("strength"))
+        reason = _normalize_reason(obj.get("reason"))
         if sent and strength is not None:
-            return sent, float(strength), provider
+            return sent, float(strength), (reason or ""), provider
 
-    sent2, str2 = _rule_sentiment(title=title, summary=summary)
-    return sent2, float(str2), provider
+    sent2, str2, reason2 = _rule_sentiment(title=title, summary=summary)
+    return sent2, float(str2), reason2, provider
 
 
 def _translate_prompt(title: str, summary: str) -> str:
@@ -1647,7 +1695,7 @@ def analyze_pending_news(limit: int = 20, force: int = 0) -> dict:
                 """
                 SELECT id, source, title, link, summary, tags
                 FROM news_items
-                WHERE sentiment IS NULL OR sentiment = ''
+                WHERE sentiment IS NULL OR sentiment = '' OR reason IS NULL OR reason = ''
                 ORDER BY COALESCE(published_at, created_at) DESC
                 LIMIT ?
                 """,
@@ -1662,15 +1710,15 @@ def analyze_pending_news(limit: int = 20, force: int = 0) -> dict:
                 summary = r["summary"] or ""
                 tags = r["tags"] or ""
 
-                sent, strength, provider = analyze_news_item(
+                sent, strength, reason, provider = analyze_news_item(
                     title=title,
                     summary=summary,
                     source=source,
                     tags=tags,
                 )
                 conn.execute(
-                    "UPDATE news_items SET sentiment=?, strength=? WHERE id=?",
-                    (sent, float(strength), rid),
+                    "UPDATE news_items SET sentiment=?, strength=?, reason=? WHERE id=?",
+                    (sent, float(strength), (reason or ""), rid),
                 )
                 analyzed += 1
             except Exception as e:
@@ -1686,26 +1734,25 @@ def refresh_news(max_per_feed: int = 30, timeout_sec: int = 12) -> dict:
     max_per_feed = max(1, min(200, int(max_per_feed)))
     timeout_sec = max(3, min(60, int(timeout_sec)))
     feeds = _rss_feeds_list()
+    errors: List[str] = []
     if not feeds:
-        return {"feeds": 0, "inserted": 0, "skipped": 0, "errors": ["NEWS_RSS_FEEDS 为空"]}
-
-    if feedparser is None:
-        return {
-            "feeds": len(feeds),
-            "inserted": 0,
-            "skipped": 0,
-            "errors": ["缺少依赖 feedparser，请先安装 requirements.txt 后再抓取 RSS"],
-        }
+        return {"feeds": 0, "inserted": 0, "skipped": 0, "errors": ["未配置 CoinDesk / Cointelegraph / The Block 来源"]}
 
     inserted = 0
     skipped = 0
-    errors: List[str] = []
     now_ts = int(time.time())
+
+    all_rows: List[Tuple[str, str, str, str, Optional[int], str, str, str, int]] = []
 
     def _fetch_one(feed_url: str) -> Tuple[List[Tuple[str, str, str, str, Optional[int], str, str, str, int]], Optional[str]]:
         try:
             # 更快失败：连接超时更短，读取超时按 timeout_sec
-            r = HTTP.get(feed_url, timeout=(4, timeout_sec))
+            r = HTTP.get(
+                feed_url,
+                timeout=(4, timeout_sec),
+                headers={"User-Agent": NEWS_HTTP_USER_AGENT or "python-requests"},
+                verify=NEWS_HTTP_VERIFY,
+            )
             r.raise_for_status()
             parsed = feedparser.parse(r.text)
 
@@ -1731,16 +1778,20 @@ def refresh_news(max_per_feed: int = 30, timeout_sec: int = 12) -> dict:
         except Exception as e:
             return [], f"{feed_url}: {e}"
 
-    all_rows: List[Tuple[str, str, str, str, Optional[int], str, str, str, int]] = []
-    max_workers = min(6, max(1, len(feeds)))
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs = [ex.submit(_fetch_one, u) for u in feeds]
-        for f in as_completed(futs):
-            rows, err = f.result()
-            if err:
-                errors.append(err)
-            if rows:
-                all_rows.extend(rows)
+    # 2) CoinDesk / Cointelegraph（补充来源，仅这两个）
+    if feeds:
+        if feedparser is None:
+            errors.append("缺少依赖 feedparser，请先安装 requirements.txt 后再抓取 CoinDesk/Cointelegraph")
+        else:
+            max_workers = min(6, max(1, len(feeds)))
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futs = [ex.submit(_fetch_one, u) for u in feeds]
+                for f in as_completed(futs):
+                    rows, err = f.result()
+                    if err:
+                        errors.append(err)
+                    if rows:
+                        all_rows.extend(rows)
 
     conn = _db_connect()
     try:
@@ -3319,7 +3370,7 @@ def api_news_items(limit: int = 100, since_ts: int = 0) -> JSONResponse:
     try:
         rows = conn.execute(
             """
-            SELECT id, source, title, title_zh, link, published_at, summary, summary_zh, tags, coins, sentiment, strength, created_at, translated_at
+            SELECT id, source, title, title_zh, link, published_at, summary, summary_zh, tags, coins, sentiment, strength, reason, created_at, translated_at
             FROM news_items
             WHERE published_at IS NULL OR published_at >= ?
             ORDER BY COALESCE(published_at, created_at) DESC
