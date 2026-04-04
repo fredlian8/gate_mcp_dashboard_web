@@ -47,7 +47,7 @@
     }
     /* 只把“主要原因”的结果内容调小（td），表头 th 保持正常 */
     #sigTable td.sig-reasons {
-      font-size: 11px;
+      font-size: 12px;
       line-height: 1.15;
       color: rgba(255,255,255,0.70);
     }
@@ -829,7 +829,7 @@
 
   function fmtReasons(arr) {
     if (!arr || !Array.isArray(arr) || !arr.length) return `<span class="neu">—</span>`;
-    return `<span class="muted">${arr.slice(0,4).join(' + ')}</span>`;
+    return `<span class="muted">${arr.slice(0,4).join('+')}</span>`;
   }
 
   async function loadSignalDashboard() {
