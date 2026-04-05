@@ -30,25 +30,39 @@ def _load_dotenv_if_present() -> None:
         env_path = os.path.join(base_dir, ".env")
         if not os.path.exists(env_path):
             return
+        raw_kv: Dict[str, str] = {}
+
+        def _parse_line(raw: str) -> Optional[Tuple[str, str]]:
+            line = (raw or "").strip()
+            if not line:
+                return None
+            if line.startswith("#"):
+                return None
+            if "=" not in line:
+                return None
+            k, v = line.split("=", 1)
+            k = (k or "").strip()
+            v = (v or "").strip()
+            if not k:
+                return None
+            if len(v) >= 2 and ((v[0] == '"' and v[-1] == '"') or (v[0] == "'" and v[-1] == "'")):
+                v = v[1:-1]
+            return k, v
+
         with open(env_path, "r", encoding="utf-8") as f:
             for raw in f:
-                line = (raw or "").strip()
-                if not line:
+                kv = _parse_line(raw)
+                if not kv:
                     continue
-                if line.startswith("#"):
-                    continue
-                if "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                k = (k or "").strip()
-                v = (v or "").strip()
-                if not k:
-                    continue
-                if k in os.environ and (os.environ.get(k) or "") != "":
-                    continue
-                if len(v) >= 2 and ((v[0] == '"' and v[-1] == '"') or (v[0] == "'" and v[-1] == "'")):
-                    v = v[1:-1]
-                os.environ[k] = v
+                k, v = kv
+                raw_kv[k] = v
+
+        override = (raw_kv.get("DOTENV_OVERRIDE", "") or "").strip() in ("1", "true", "True", "yes", "YES")
+
+        for k, v in raw_kv.items():
+            if (not override) and k in os.environ and (os.environ.get(k) or "") != "":
+                continue
+            os.environ[k] = v
     except Exception:
         return
 
@@ -57,9 +71,6 @@ _load_dotenv_if_present()
 
 
 APP_TITLE = "Gate 永续合约仪表板"
-
-GATE_MCP_SERVER_URL = os.getenv("GATE_MCP_SERVER_URL", "https://api.gatemcp.ai/mcp")
-GATE_MCP_TOKEN = os.getenv("GATE_MCP_TOKEN", "").strip()
 
 GATE_REST_FUTURES_USDT_BASE = "https://api.gateio.ws/api/v4/futures/usdt"
 
@@ -131,6 +142,22 @@ SIGNAL_PUSH_SCORE_STRONG = float(os.getenv("SIGNAL_PUSH_SCORE_STRONG", "6") or "
 SIGNAL_PUSH_COOLDOWN_SEC = int(float(os.getenv("SIGNAL_PUSH_COOLDOWN_SEC", "600") or "600"))
 SIGNAL_PUSH_REPEAT_SAME_DIRECTION = os.getenv("SIGNAL_PUSH_REPEAT_SAME_DIRECTION", "0").strip() in ("1", "true", "True", "yes", "YES")
 SIGNAL_PUSH_K_TF = (os.getenv("SIGNAL_PUSH_K_TF", "1h") or "1h").strip() or "1h"
+
+TRI_SIGNAL_ENABLED = os.getenv("TRI_SIGNAL_ENABLED", "1").strip() in ("1", "true", "True", "yes", "YES")
+TRI_SIGNAL_CONTRACTS = (
+    os.getenv(
+        "TRI_SIGNAL_CONTRACTS",
+        "BTC_USDT,XAUT_USDT,XAGU_USDT,QQQX_USDT,SPYX_USDT,XBR_USDT,ETH_USDT,SOL_USDT,TSLAX_USDT,CRCLX_USDT,AAPLX_USDT,NVDAX_USDT,MSTRX_USDT,INTC_USDT,GOOGLX_USDT,TSM_USDT,ORCL_USDT,MSFT_USDT,XTI_USDT,NGU_USDT",
+    )
+    or ""
+).strip()
+TRI_SIGNAL_CACHE_TTL_SEC = int(float(os.getenv("TRI_SIGNAL_CACHE_TTL_SEC", "60") or "60"))
+TRI_SIGNAL_MAX_WORKERS = int(float(os.getenv("TRI_SIGNAL_MAX_WORKERS", "3") or "3"))
+
+TRI_SIGNAL_PUSH_ENABLED = os.getenv("TRI_SIGNAL_PUSH_ENABLED", "0").strip() in ("1", "true", "True", "yes", "YES")
+TRI_SIGNAL_PUSH_INTERVAL_SEC = int(float(os.getenv("TRI_SIGNAL_PUSH_INTERVAL_SEC", "300") or "300"))
+TRI_SIGNAL_PUSH_COOLDOWN_SEC = int(float(os.getenv("TRI_SIGNAL_PUSH_COOLDOWN_SEC", "3600") or "3600"))
+TRI_SIGNAL_PUSH_ONLY_GRADE_A = os.getenv("TRI_SIGNAL_PUSH_ONLY_GRADE_A", "1").strip() in ("1", "true", "True", "yes", "YES")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
@@ -251,6 +278,36 @@ def _db_init() -> None:
 
         try:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_signal_push_history_symbol ON signal_push_history(symbol, created_at)")
+        except Exception:
+            pass
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tri_signal_push_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at INTEGER,
+                uniq TEXT,
+                contract TEXT,
+                side TEXT,
+                grade TEXT,
+                high_prob INTEGER,
+                reasons TEXT,
+                entry REAL,
+                sl REAL,
+                tp REAL,
+                atr REAL,
+                message TEXT,
+                ok INTEGER,
+                error TEXT
+            )
+            """
+        )
+        try:
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_tri_signal_push_history_uniq ON tri_signal_push_history(uniq)")
+        except Exception:
+            pass
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_tri_signal_push_history_contract ON tri_signal_push_history(contract, created_at)")
         except Exception:
             pass
 
@@ -1961,6 +2018,112 @@ def _ema(values: List[float], span: int) -> List[float]:
     return out
 
 
+def _sma(values: List[float], window: int) -> List[Optional[float]]:
+    if not values or window <= 0:
+        return []
+    out: List[Optional[float]] = [None] * len(values)
+    s = 0.0
+    for i, v in enumerate(values):
+        s += float(v)
+        if i >= window:
+            s -= float(values[i - window])
+        if i >= window - 1:
+            out[i] = s / float(window)
+    return out
+
+
+def _atr(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> List[Optional[float]]:
+    n = min(len(highs), len(lows), len(closes))
+    if n <= period:
+        return []
+    trs: List[float] = []
+    for i in range(n):
+        h = float(highs[i])
+        l = float(lows[i])
+        if i == 0:
+            trs.append(h - l)
+            continue
+        pc = float(closes[i - 1])
+        tr = max(h - l, abs(h - pc), abs(l - pc))
+        trs.append(tr)
+    out: List[Optional[float]] = [None] * n
+    atr0 = sum(trs[1 : period + 1]) / float(period)
+    out[period] = atr0
+    prev = atr0
+    for i in range(period + 1, n):
+        prev = (prev * (period - 1) + trs[i]) / float(period)
+        out[i] = prev
+    return out
+
+
+def _adx(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> List[Optional[float]]:
+    n = min(len(highs), len(lows), len(closes))
+    if n <= period + 2:
+        return []
+    tr: List[float] = [0.0] * n
+    plus_dm: List[float] = [0.0] * n
+    minus_dm: List[float] = [0.0] * n
+    for i in range(1, n):
+        up_move = float(highs[i]) - float(highs[i - 1])
+        down_move = float(lows[i - 1]) - float(lows[i])
+        plus_dm[i] = up_move if (up_move > down_move and up_move > 0) else 0.0
+        minus_dm[i] = down_move if (down_move > up_move and down_move > 0) else 0.0
+        h = float(highs[i])
+        l = float(lows[i])
+        pc = float(closes[i - 1])
+        tr[i] = max(h - l, abs(h - pc), abs(l - pc))
+
+    tr14: List[Optional[float]] = [None] * n
+    pdm14: List[Optional[float]] = [None] * n
+    mdm14: List[Optional[float]] = [None] * n
+    tr_sum = sum(tr[1 : period + 1])
+    pdm_sum = sum(plus_dm[1 : period + 1])
+    mdm_sum = sum(minus_dm[1 : period + 1])
+    tr14[period] = tr_sum
+    pdm14[period] = pdm_sum
+    mdm14[period] = mdm_sum
+    for i in range(period + 1, n):
+        tr_sum = tr_sum - (tr_sum / float(period)) + tr[i]
+        pdm_sum = pdm_sum - (pdm_sum / float(period)) + plus_dm[i]
+        mdm_sum = mdm_sum - (mdm_sum / float(period)) + minus_dm[i]
+        tr14[i] = tr_sum
+        pdm14[i] = pdm_sum
+        mdm14[i] = mdm_sum
+
+    pdi: List[Optional[float]] = [None] * n
+    mdi: List[Optional[float]] = [None] * n
+    dx: List[Optional[float]] = [None] * n
+    for i in range(period, n):
+        t = tr14[i]
+        if t is None or t == 0:
+            continue
+        p = pdm14[i] or 0.0
+        m = mdm14[i] or 0.0
+        pdi[i] = 100.0 * (p / float(t))
+        mdi[i] = 100.0 * (m / float(t))
+        den = (pdi[i] or 0.0) + (mdi[i] or 0.0)
+        if den == 0:
+            continue
+        dx[i] = 100.0 * abs((pdi[i] or 0.0) - (mdi[i] or 0.0)) / den
+
+    out: List[Optional[float]] = [None] * n
+    start = period * 2
+    if start >= n:
+        return out
+    init_vals = [x for x in dx[period : start + 1] if isinstance(x, (int, float))]
+    if len(init_vals) < period:
+        return out
+    adx0 = sum(init_vals[-period:]) / float(period)
+    out[start] = adx0
+    prev = adx0
+    for i in range(start + 1, n):
+        if dx[i] is None:
+            continue
+        prev = (prev * (period - 1) + float(dx[i])) / float(period)
+        out[i] = prev
+    return out
+
+
 def _macd(values: List[float], fast: int = 12, slow: int = 26, signal: int = 9) -> Tuple[List[float], List[float], List[float]]:
     # DIF=EMA(fast)-EMA(slow), DEA=EMA(DIF,signal), HIST=2*(DIF-DEA)
     if len(values) < slow + signal:
@@ -1992,64 +2155,18 @@ def _rest_get_full_url(url: str, params: Optional[dict] = None, timeout: int = 1
     return r.json()
 
 
-# ==========================
-# MCP client (HTTP)
-# ==========================
-
-def _mcp_headers() -> Dict[str, str]:
-    hdrs = {"Content-Type": "application/json"}
-    if GATE_MCP_TOKEN:
-        hdrs["Authorization"] = f"Bearer {GATE_MCP_TOKEN}"
-    return hdrs
-
-
-def _mcp_post(payload: dict) -> dict:
-    r = HTTP.post(GATE_MCP_SERVER_URL, json=payload, headers=_mcp_headers(), timeout=12)
-    if r.status_code != 200:
-        raise RuntimeError(f"MCP HTTP {r.status_code}: {r.text[:200]}")
-    data = r.json()
-    if "error" in data and data["error"]:
-        raise RuntimeError(str(data["error"]))
-    return data
-
-
-def mcp_tools_list() -> List[dict]:
-    data = _mcp_post({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-    res = data.get("result") or {}
-    tools = res.get("tools")
-    return tools if isinstance(tools, list) else []
-
-
-def mcp_tools_call(name: str, arguments: dict) -> Any:
-    data = _mcp_post({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {"name": name, "arguments": arguments},
-    })
-    res = data.get("result") or {}
-    # MCP 结果常见格式：content 为 list，其中包含 text/json
-    if "content" in res:
-        return res["content"]
-    return res
-
-
-def _content_to_json(content: Any) -> Any:
-    # content 可能是: [{"type":"text","text":"..."}] 或 [{"type":"json","json":{...}}]
-    if isinstance(content, list):
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "json":
-                return item.get("json")
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                # 尝试解析 text 为 JSON
-                txt = item.get("text")
-                if isinstance(txt, str):
-                    try:
-                        return requests.utils.json.loads(txt)
-                    except Exception:
-                        return txt
-    return content
+def get_tri_candles(contract: str, tf: str, limit: int) -> List[dict]:
+    interval = tf
+    if tf == "1M":
+        interval = "30d"
+    ck = f"tri:candles:{contract}:{interval}:{int(limit)}:rest"
+    cached = _cache_get(ck, ttl=max(10, int(TRI_SIGNAL_CACHE_TTL_SEC)))
+    if cached is not None:
+        return cached
+    data = _rest_get("/candlesticks", params={"contract": contract, "interval": interval, "limit": int(limit)})
+    out = data if isinstance(data, list) else []
+    _cache_set(ck, out)
+    return out
 
 
 # ==========================
@@ -2577,16 +2694,16 @@ def _signal_score(item: Dict[str, Any]) -> Tuple[float, List[str], str]:
     funding = item.get("funding")
     if isinstance(funding, (int, float)):
         if funding <= -0.0003:
-            score += 4.0 if oi_confirm else 2.0
+            score += 2.0 if oi_confirm else 1.0
             reasons.append(f"资费率 {funding*100:.2f}%（极负）" + ("（无OI确认，降档）" if not oi_confirm else ""))
         elif funding <= -0.0001:
-            score += 2.0
+            score += 1.0
             reasons.append(f"资费率 {funding*100:.2f}%（负）")
         elif funding >= 0.0003:
-            score -= 4.0 if oi_confirm else 2.0
+            score -= 2.0 if oi_confirm else 1.0
             reasons.append(f"资费率 {funding*100:.2f}%（极正）" + ("（无OI确认，降档）" if not oi_confirm else ""))
         elif funding >= 0.0001:
-            score -= 2.0
+            score -= 1.0
             reasons.append(f"资费率 {funding*100:.2f}%（正）")
 
     px_tf = item.get("pct_tf")
@@ -2630,9 +2747,9 @@ def _signal_score(item: Dict[str, Any]) -> Tuple[float, List[str], str]:
         vr = float(vol_ratio)
         vscore = 0.0
         if vr >= 2.5:
-            vscore = 2.0
+            vscore = 2.5
         elif vr >= 1.5:
-            vscore = 1.0
+            vscore = 1.5
 
         if vscore != 0.0:
             px_for_vol = item.get("pct_tf")
@@ -2653,18 +2770,18 @@ def _signal_score(item: Dict[str, Any]) -> Tuple[float, List[str], str]:
     macd = item.get("macd") if isinstance(item.get("macd"), dict) else {}
     macd_status = (macd.get("status") or "—")
     if macd_status == "金叉":
-        score += 3.0
+        score += 3.5
         trend_confirm = True
         reasons.append("MACD 金叉")
     elif macd_status == "即将金叉":
-        score += 1.5
+        score += 2
         reasons.append("MACD 即将金叉")
     elif macd_status == "死叉":
-        score -= 3.0
+        score -= 3.5
         trend_confirm = True
         reasons.append("MACD 死叉")
     elif macd_status == "即将死叉":
-        score -= 1.5
+        score -= 2
         reasons.append("MACD 即将死叉")
 
     rsi = item.get("rsi14")
@@ -2866,6 +2983,595 @@ def api_signal_dashboard(
         return JSONResponse(payload)
     except Exception as e:
         return JSONResponse({"items": [], "errors": [str(e)]}, status_code=200)
+
+
+def _parse_contracts_csv(raw: str) -> List[str]:
+    out: List[str] = []
+    for x in (raw or "").split(","):
+        s = (x or "").strip().upper()
+        if not s:
+            continue
+        if "_" not in s:
+            s = f"{s}_USDT"
+        out.append(s)
+    seen = set()
+    dedup: List[str] = []
+    for c in out:
+        if c in seen:
+            continue
+        seen.add(c)
+        dedup.append(c)
+    return dedup
+
+
+class SignalEngine:
+    def __init__(self, contracts: List[str]):
+        self.contracts = contracts
+
+    def _candles(self, contract: str, tf: str, limit: int) -> List[dict]:
+        return get_tri_candles(contract=contract, tf=tf, limit=int(limit))
+
+    def _series(self, candles: List[dict]) -> Tuple[List[int], List[float], List[float], List[float], List[float]]:
+        # IMPORTANT: Keep OHLC arrays aligned (same indices belong to same candle).
+        seq = [x for x in candles if isinstance(x, dict)]
+        seq.sort(key=lambda x: int(x.get("t") or 0))
+        ts: List[int] = []
+        o: List[float] = []
+        h: List[float] = []
+        l: List[float] = []
+        c: List[float] = []
+        for x in seq:
+            t = x.get("t")
+            oo = _safe_float(x.get("o"))
+            hh = _safe_float(x.get("h"))
+            ll = _safe_float(x.get("l"))
+            cc = _safe_float(x.get("c"))
+            if t is None or oo is None or hh is None or ll is None or cc is None:
+                continue
+            try:
+                ts.append(int(t))
+                o.append(float(oo))
+                h.append(float(hh))
+                l.append(float(ll))
+                c.append(float(cc))
+            except Exception:
+                continue
+        return ts, o, h, l, c
+
+    def _monthly_background(self, closes: List[float]) -> Dict[str, Any]:
+        # MACD(12,26,9) needs at least slow + signal bars to be meaningful.
+        # Using 30d as "monthly" approximation, many contracts don't have 40 bars (3.3y).
+        if len(closes) < 35:
+            return {"state": "—", "reason": ""}
+        sma10 = _sma(closes, 10)
+        dif, dea, hist = _macd(closes, 12, 26, 9)
+        if not sma10 or not hist:
+            return {"state": "—", "reason": ""}
+        last_close = closes[-1]
+        last_sma = sma10[-1]
+        last_hist = hist[-1]
+        if last_sma is None:
+            return {"state": "—", "reason": ""}
+        above = last_close > float(last_sma)
+        macd_pos = float(last_hist) > 0
+        if above and macd_pos:
+            return {"state": "bull", "reason": "Close>SMA10 & MACD偏多"}
+        if (not above) and (not macd_pos):
+            return {"state": "bear", "reason": "Close<SMA10 & MACD偏空"}
+        return {"state": "neutral", "reason": "SMA/MACD冲突(过渡)"}
+
+    def _daily_trend(self, highs: List[float], lows: List[float], closes: List[float]) -> Dict[str, Any]:
+        if len(closes) < 60:
+            return {"direction": "—", "strength": "—", "adx": None, "reason": ""}
+        ema20 = _ema(closes, 20)
+        ema50 = _ema(closes, 50)
+        adx = _adx(highs, lows, closes, 14)
+        if not ema20 or not ema50:
+            return {"direction": "—", "strength": "—", "adx": None, "reason": ""}
+        direction = "up" if ema20[-1] > ema50[-1] else "down"
+        adx_last = None
+        if adx:
+            adx_last = adx[-1]
+        strength = "weak"
+        try:
+            if adx_last is not None and float(adx_last) > 25:
+                strength = "strong"
+        except Exception:
+            strength = "weak"
+        return {
+            "direction": direction,
+            "strength": strength,
+            "adx": float(adx_last) if isinstance(adx_last, (int, float)) else None,
+            "reason": f"EMA20{'>' if direction == 'up' else '<'}EMA50, ADX={float(adx_last):.1f}" if isinstance(adx_last, (int, float)) else f"EMA20{'>' if direction == 'up' else '<'}EMA50",
+        }
+
+    def _hourly_exec(self, highs: List[float], lows: List[float], closes: List[float]) -> Dict[str, Any]:
+        if len(closes) < 220:
+            return {"signal": "none", "reason": "数据不足", "setup": "none", "setup_reason": "数据不足", "rsi": None, "ema200": None, "entry": None, "sl": None, "tp": None, "atr": None}
+        ema200 = _ema(closes, 200)
+        # For the crossing event, only prev/last RSI are needed.
+        rsi_last = _rsi14(closes)
+        rsi_prev = _rsi14(closes[:-1]) if len(closes) >= 16 else None
+        last_close = closes[-1]
+        e200 = ema200[-1] if ema200 else None
+
+        setup = "none"
+        setup_reason = ""
+        if rsi_last is not None and e200 is not None:
+            try:
+                if last_close > e200 and float(rsi_last) < 30.0:
+                    setup = "setup_long"
+                    setup_reason = "Close>EMA200 & RSI<30（等待上穿）"
+                elif last_close < e200 and float(rsi_last) > 70.0:
+                    setup = "setup_short"
+                    setup_reason = "Close<EMA200 & RSI>70（等待下穿）"
+            except Exception:
+                setup = "none"
+                setup_reason = ""
+
+        signal = "none"
+        reason = ""
+        if rsi_prev is not None and rsi_last is not None and e200 is not None:
+            if last_close > e200 and float(rsi_prev) < 30.0 and float(rsi_last) >= 30.0:
+                signal = "long"
+                reason = "Close>EMA200 & RSI上穿30"
+            elif last_close < e200 and float(rsi_prev) > 70.0 and float(rsi_last) <= 70.0:
+                signal = "short"
+                reason = "Close<EMA200 & RSI下穿70"
+
+        atr_series = _atr(highs, lows, closes, 14)
+        atr_last = atr_series[-1] if atr_series else None
+        entry = last_close
+        sl = None
+        tp = None
+        if isinstance(atr_last, (int, float)) and atr_last > 0 and signal in ("long", "short"):
+            if signal == "long":
+                sl = entry - 1.5 * float(atr_last)
+                tp = entry + 3.0 * float(atr_last)
+            else:
+                sl = entry + 1.5 * float(atr_last)
+                tp = entry - 3.0 * float(atr_last)
+        return {
+            "signal": signal,
+            "reason": reason,
+            "setup": setup,
+            "setup_reason": setup_reason,
+            "rsi": float(rsi_last) if isinstance(rsi_last, (int, float)) else None,
+            "ema200": float(e200) if isinstance(e200, (int, float)) else None,
+            "entry": float(entry) if isinstance(entry, (int, float)) else None,
+            "sl": float(sl) if isinstance(sl, (int, float)) else None,
+            "tp": float(tp) if isinstance(tp, (int, float)) else None,
+            "atr": float(atr_last) if isinstance(atr_last, (int, float)) else None,
+        }
+
+    def analyze_one(self, contract: str) -> Dict[str, Any]:
+        now_ts = int(time.time())
+        monthly = self._candles(contract, "1M", limit=120)
+        daily = self._candles(contract, "1d", limit=160)
+        hourly = self._candles(contract, "1h", limit=260)
+
+        m_ts, _mo, _mh, _ml, m_c = self._series(monthly)
+        d_ts, _do, d_h, d_l, d_c = self._series(daily)
+        h_ts, _ho, h_h, h_l, h_c = self._series(hourly)
+
+        m_bg = self._monthly_background(m_c)
+        d_tr = self._daily_trend(d_h, d_l, d_c)
+        h_ex = self._hourly_exec(h_h, h_l, h_c)
+
+        hi_prob = False
+        grade = "C"
+        if h_ex.get("signal") in ("long", "short") and d_tr.get("direction") in ("up", "down"):
+            want = "up" if h_ex.get("signal") == "long" else "down"
+            if want == d_tr.get("direction"):
+                hi_prob = True
+                grade = "A" if d_tr.get("strength") == "strong" else "B"
+
+        return {
+            "contract": contract,
+            "symbol": contract.replace("_USDT", ""),
+            "updated_at": now_ts,
+            "monthly": m_bg,
+            "daily": d_tr,
+            "hourly": h_ex,
+            "high_prob": bool(hi_prob),
+            "grade": grade,
+            "last_price": float(h_c[-1]) if h_c else (float(d_c[-1]) if d_c else None),
+            "ts": {"1M": (m_ts[-1] if m_ts else None), "1d": (d_ts[-1] if d_ts else None), "1h": (h_ts[-1] if h_ts else None)},
+        }
+
+    def matrix(self) -> dict:
+        if not TRI_SIGNAL_ENABLED:
+            return {"items": [], "errors": ["disabled"]}
+        ck = f"tri_signal:matrix:{','.join(self.contracts)}"
+        cached = _cache_get(ck, ttl=max(5, int(TRI_SIGNAL_CACHE_TTL_SEC)))
+        if cached is not None:
+            return cached
+        errors: List[str] = []
+        items: List[dict] = []
+
+        contract_set = set(get_all_futures_contract_names())
+        targets = [c for c in self.contracts if c in contract_set]
+
+        max_workers = max(1, min(int(TRI_SIGNAL_MAX_WORKERS), max(1, len(targets))))
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futs = {ex.submit(self.analyze_one, c): c for c in targets}
+            for f in as_completed(futs):
+                c = futs[f]
+                try:
+                    items.append(f.result())
+                except Exception as e:
+                    errors.append(f"{c}: {e}")
+
+        items.sort(key=lambda x: str(x.get("contract") or ""))
+        payload = {"items": items, "errors": errors}
+        _cache_set(ck, payload)
+        return payload
+
+
+_TRI_ENGINE = SignalEngine(_parse_contracts_csv(TRI_SIGNAL_CONTRACTS))
+
+
+@app.get("/api/tri_signal/matrix")
+def api_tri_signal_matrix() -> JSONResponse:
+    try:
+        return JSONResponse(_TRI_ENGINE.matrix())
+    except Exception as e:
+        return JSONResponse({"items": [], "errors": [str(e)]}, status_code=200)
+
+
+@app.get("/api/tri_signal/candles")
+def api_tri_signal_candles(contract: str = "BTC_USDT", tf: str = "1h", limit: int = 200) -> JSONResponse:
+    try:
+        contract = (contract or "BTC_USDT").strip().upper()
+        tf = (tf or "1h").strip()
+        if tf not in ("1h", "1d", "1M"):
+            tf = "1h"
+        limit = max(50, min(500, int(limit)))
+        candles = _TRI_ENGINE._candles(contract, tf, limit=limit)
+        ts, o, h, l, c = _TRI_ENGINE._series(candles)
+        payload = {
+            "contract": contract,
+            "tf": tf,
+            "items": [{"t": ts[i], "o": o[i], "h": h[i], "l": l[i], "c": c[i]} for i in range(min(len(ts), len(c)))],
+        }
+        return JSONResponse(payload)
+    except Exception as e:
+        return JSONResponse({"contract": contract, "tf": tf, "items": [], "errors": [str(e)]}, status_code=200)
+
+
+_TRI_SIGNAL_PUSH_THREAD: Optional[threading.Thread] = None
+_TRI_SIGNAL_PUSH_THREAD_LOCK = threading.Lock()
+_TRI_SIGNAL_PUSH_LAST_RUN_TS: Optional[int] = None
+_TRI_SIGNAL_PUSH_LAST_PUSH: Optional[dict] = None
+_TRI_SIGNAL_PUSH_LAST_ERROR: str = ""
+
+
+def _tri_signal_push_history_add(
+    uniq: str,
+    contract: str,
+    side: str,
+    grade: str,
+    high_prob: bool,
+    reasons: List[str],
+    entry: Optional[float],
+    sl: Optional[float],
+    tp: Optional[float],
+    atr: Optional[float],
+    message: str,
+    ok: bool,
+    error: str,
+) -> None:
+    conn = _db_connect()
+    try:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO tri_signal_push_history(created_at, uniq, contract, side, grade, high_prob, reasons, entry, sl, tp, atr, message, ok, error)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                int(time.time()),
+                uniq,
+                contract,
+                side,
+                grade,
+                1 if high_prob else 0,
+                json.dumps(reasons, ensure_ascii=False),
+                entry,
+                sl,
+                tp,
+                atr,
+                message,
+                1 if ok else 0,
+                error or "",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _tri_signal_last_push_ts(contract: str, side: str) -> Optional[int]:
+    conn = _db_connect()
+    try:
+        row = conn.execute(
+            """
+            SELECT created_at FROM tri_signal_push_history
+            WHERE contract=? AND side=?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (contract, side),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            return int(row[0])
+        except Exception:
+            return None
+    finally:
+        conn.close()
+
+
+def _tri_signal_has_uniq(uniq: str) -> bool:
+    conn = _db_connect()
+    try:
+        row = conn.execute("SELECT 1 FROM tri_signal_push_history WHERE uniq=? LIMIT 1", (uniq,)).fetchone()
+        return bool(row)
+    finally:
+        conn.close()
+
+
+def push_tg_tri_signal(force: int = 0) -> dict:
+    s = _news_settings()
+    bot_token = (s.get("tg_bot_token") or "").strip()
+    chat_id = (s.get("tg_chat_id") or "").strip()
+    if not bot_token or not chat_id:
+        return {"ok": False, "pushed": 0, "skipped": 0, "errors": ["未配置 Telegram Bot Token 或 Chat ID"]}
+
+    data = _TRI_ENGINE.matrix()
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return {"ok": False, "pushed": 0, "skipped": 0, "errors": ["invalid tri matrix"]}
+
+    now_ts = int(time.time())
+    bucket = int(now_ts / max(60, int(TRI_SIGNAL_PUSH_INTERVAL_SEC)))
+
+    pushed = 0
+    skipped = 0
+    errors: List[str] = []
+
+    # 只推：1H 触发信号 + 高胜率(1D 同向)
+    candidates: List[dict] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        hourly = it.get("hourly") if isinstance(it.get("hourly"), dict) else {}
+        side = str(hourly.get("signal") or "none")
+        if side not in ("long", "short"):
+            continue
+        if not bool(it.get("high_prob")):
+            continue
+        grade = str(it.get("grade") or "C")
+        if TRI_SIGNAL_PUSH_ONLY_GRADE_A and grade != "A":
+            continue
+        candidates.append(it)
+
+    if not candidates:
+        return {"ok": True, "pushed": 0, "skipped": 0, "errors": []}
+
+    # 合并成一条消息（避免刷屏）
+    ts_txt = datetime.datetime.fromtimestamp(now_ts).strftime("%Y-%m-%d %H:%M")
+    header = f"<b>三周期信号｜高胜率触发</b>\n时间：{ts_txt}｜合约数：{len(candidates)}"
+    lines: List[str] = [header]
+
+    def _fmt(v: Any) -> str:
+        try:
+            if v is None:
+                return "—"
+            x = float(v)
+            if abs(x) >= 1000:
+                return f"{x:,.2f}"
+            return f"{x:.6g}"
+        except Exception:
+            return "—"
+
+    will_log: List[dict] = []
+    for it in candidates[:20]:
+        try:
+            contract = str(it.get("contract") or "").strip()
+            hourly = it.get("hourly") if isinstance(it.get("hourly"), dict) else {}
+            monthly = it.get("monthly") if isinstance(it.get("monthly"), dict) else {}
+            daily = it.get("daily") if isinstance(it.get("daily"), dict) else {}
+
+            side = str(hourly.get("signal") or "none")
+            grade = str(it.get("grade") or "C")
+            uniq = f"tri:{contract}:{side}:{grade}:{bucket}"
+            if not force and _tri_signal_has_uniq(uniq):
+                skipped += 1
+                continue
+            if not force:
+                last_ts = _tri_signal_last_push_ts(contract, side)
+                if last_ts is not None and (now_ts - int(last_ts)) < int(TRI_SIGNAL_PUSH_COOLDOWN_SEC):
+                    skipped += 1
+                    continue
+
+            entry = hourly.get("entry")
+            sl = hourly.get("sl")
+            tp = hourly.get("tp")
+            atr = hourly.get("atr")
+
+            reason_1m = str(monthly.get("reason") or "").strip()
+            reason_1d = str(daily.get("reason") or "").strip()
+            reason_1h = str(hourly.get("reason") or "").strip()
+            reasons = [x for x in [reason_1m, reason_1d, reason_1h] if x]
+            rs_txt = " | ".join([f"{x}" for x in reasons[:3]])
+
+            line = f"- {contract}  <b>{side.upper()}</b>  <b>Grade {grade}</b>\n  Entry:{_fmt(entry)} SL:{_fmt(sl)} TP:{_fmt(tp)} ATR:{_fmt(atr)}"
+            if rs_txt:
+                line += f"\n  {rs_txt}"
+            lines.append(line)
+            will_log.append({
+                "uniq": uniq,
+                "contract": contract,
+                "side": side,
+                "grade": grade,
+                "high_prob": True,
+                "reasons": reasons,
+                "entry": _safe_float(entry),
+                "sl": _safe_float(sl),
+                "tp": _safe_float(tp),
+                "atr": _safe_float(atr),
+            })
+        except Exception:
+            skipped += 1
+
+    if not will_log:
+        return {"ok": True, "pushed": 0, "skipped": skipped, "errors": []}
+
+    msg = "\n".join(lines)
+    if len(msg) > 3500:
+        msg = msg[:3500] + "\n…(truncated)"
+
+    ok, err = _tg_send(bot_token=bot_token, chat_id=chat_id, text=msg, parse_mode="HTML")
+
+    for x in will_log:
+        try:
+            _tri_signal_push_history_add(
+                uniq=str(x.get("uniq") or ""),
+                contract=str(x.get("contract") or ""),
+                side=str(x.get("side") or ""),
+                grade=str(x.get("grade") or ""),
+                high_prob=bool(x.get("high_prob")),
+                reasons=x.get("reasons") if isinstance(x.get("reasons"), list) else [],
+                entry=_safe_float(x.get("entry")),
+                sl=_safe_float(x.get("sl")),
+                tp=_safe_float(x.get("tp")),
+                atr=_safe_float(x.get("atr")),
+                message=msg,
+                ok=ok,
+                error=err,
+            )
+        except Exception:
+            pass
+
+    if ok:
+        pushed = len(will_log)
+    else:
+        errors.append(err or "send failed")
+
+    return {"ok": ok, "pushed": pushed, "skipped": skipped, "errors": errors}
+
+
+def _tri_signal_push_loop() -> None:
+    interval = max(60, min(3600, int(TRI_SIGNAL_PUSH_INTERVAL_SEC)))
+    while True:
+        try:
+            s = _news_settings()
+            enabled_mod = _setting_bool(s, "push_tri_signal_enabled", True)
+            if TRI_SIGNAL_PUSH_ENABLED and enabled_mod:
+                global _TRI_SIGNAL_PUSH_LAST_RUN_TS, _TRI_SIGNAL_PUSH_LAST_PUSH, _TRI_SIGNAL_PUSH_LAST_ERROR
+                _TRI_SIGNAL_PUSH_LAST_RUN_TS = int(time.time())
+                _TRI_SIGNAL_PUSH_LAST_ERROR = ""
+                _TRI_SIGNAL_PUSH_LAST_PUSH = push_tg_tri_signal(force=0)
+        except Exception as e:
+            try:
+                _TRI_SIGNAL_PUSH_LAST_ERROR = str(e)
+            except Exception:
+                pass
+        time.sleep(interval)
+
+
+@app.get("/api/tri_signal_push/auto_status")
+def api_tri_signal_push_auto_status() -> JSONResponse:
+    alive = False
+    name = None
+    try:
+        alive = bool(_TRI_SIGNAL_PUSH_THREAD is not None and _TRI_SIGNAL_PUSH_THREAD.is_alive())
+        name = _TRI_SIGNAL_PUSH_THREAD.name if _TRI_SIGNAL_PUSH_THREAD is not None else None
+    except Exception:
+        alive = False
+        name = None
+    s = _news_settings()
+    payload = {
+        "enabled_env": bool(TRI_SIGNAL_PUSH_ENABLED),
+        "interval_sec": int(TRI_SIGNAL_PUSH_INTERVAL_SEC),
+        "cooldown_sec": int(TRI_SIGNAL_PUSH_COOLDOWN_SEC),
+        "only_grade_a": bool(TRI_SIGNAL_PUSH_ONLY_GRADE_A),
+        "thread_alive": alive,
+        "thread_name": name,
+        "enabled_mod": _setting_bool(s, "push_tri_signal_enabled", True),
+        "has_bot_token": bool((s.get("tg_bot_token") or "").strip()),
+        "has_chat_id": bool((s.get("tg_chat_id") or "").strip()),
+        "last_run_ts": _TRI_SIGNAL_PUSH_LAST_RUN_TS,
+        "last_error": _TRI_SIGNAL_PUSH_LAST_ERROR,
+        "last_push": _TRI_SIGNAL_PUSH_LAST_PUSH,
+    }
+    return JSONResponse(payload)
+
+
+@app.get("/api/telegram/push_history")
+def api_telegram_push_history(limit: int = 100) -> JSONResponse:
+    limit = max(1, min(100, int(limit)))
+    conn = _db_connect()
+    try:
+        items: List[dict] = []
+
+        # news
+        rows1 = conn.execute(
+            """
+            SELECT created_at, uniq, level, title, link, message, ok, error
+            FROM news_push_history
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        for r in rows1:
+            d = dict(r)
+            d["module"] = "news"
+            items.append(d)
+
+        # signal dashboard
+        rows2 = conn.execute(
+            """
+            SELECT created_at, uniq, level, contract AS title, '' AS link, message, ok, error
+            FROM signal_push_history
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        for r in rows2:
+            d = dict(r)
+            d["module"] = "signal"
+            items.append(d)
+
+        # tri signal
+        rows3 = conn.execute(
+            """
+            SELECT created_at, uniq,
+                   ('tri_' || grade || '_' || UPPER(side)) AS level,
+                   contract AS title,
+                   '' AS link,
+                   message,
+                   ok,
+                   error
+            FROM tri_signal_push_history
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        for r in rows3:
+            d = dict(r)
+            d["module"] = "tri_signal"
+            items.append(d)
+
+        items.sort(key=lambda x: int(x.get("created_at") or 0), reverse=True)
+        items = items[:limit]
+        return JSONResponse({"items": items})
+    finally:
+        conn.close()
 
 
 _SIGNAL_PUSH_THREAD: Optional[threading.Thread] = None
@@ -3231,6 +3937,15 @@ def _startup() -> None:
                 _SIGNAL_PUSH_THREAD = t4
                 t4.start()
 
+    # 三周期信号：后台推送（默认只推 Grade A）
+    if TRI_SIGNAL_PUSH_ENABLED:
+        global _TRI_SIGNAL_PUSH_THREAD
+        with _TRI_SIGNAL_PUSH_THREAD_LOCK:
+            if _TRI_SIGNAL_PUSH_THREAD is None or not _TRI_SIGNAL_PUSH_THREAD.is_alive():
+                t5 = threading.Thread(target=_tri_signal_push_loop, name="tri_signal_push", daemon=True)
+                _TRI_SIGNAL_PUSH_THREAD = t5
+                t5.start()
+
 static_dir = os.path.join(os.path.dirname(__file__), "web")
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
@@ -3245,21 +3960,7 @@ def index() -> str:
 def health() -> dict:
     return {
         "ok": True,
-        "mcp_configured": bool(GATE_MCP_TOKEN),
-        "mcp_server_url": GATE_MCP_SERVER_URL,
     }
-
-
-@app.get("/api/tools")
-def tools() -> JSONResponse:
-    if not GATE_MCP_TOKEN:
-        return JSONResponse({"error": "未设置 GATE_MCP_TOKEN"}, status_code=200)
-    try:
-        tools = mcp_tools_list()
-        names = [t.get("name") for t in tools if isinstance(t, dict)]
-        return JSONResponse({"items": names})
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=200)
 
 
 @app.get("/api/summary")

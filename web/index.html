@@ -47,7 +47,7 @@
     }
     /* 只把“主要原因”的结果内容调小（td），表头 th 保持正常 */
     #sigTable td.sig-reasons {
-      font-size: 12px;
+      font-size: 13px;
       line-height: 1.15;
       color: rgba(255,255,255,0.70);
     }
@@ -69,8 +69,8 @@
             <button class="nav-item" data-target="page-prealert" id="nav-prealert">MACD 预警</button>
             <button class="nav-item" data-target="page-signal" id="nav-signal">多空综合雷达</button>
             <button class="nav-item" data-target="page-news" id="nav-news">新闻多空哨兵</button>
+            <button class="nav-item" data-target="page-tri-signal" id="nav-tri-signal">三周期信号矩阵</button>
             <button class="nav-item" data-target="page-telegram" id="nav-telegram">Telegram 推送</button>
-            <button class="nav-item" data-target="page-placeholder" id="nav-placeholder">更多功能（待新增）</button>
           </div>
         </div>
       </aside>
@@ -317,15 +317,29 @@
                       来源：Gate 永续 funding_rate。打分：
                     </div>
                     <div>
-                      funding ≤ -0.03%：+4（需 OI(tf) 幅度确认，否则降档为 +2）；funding ≤ -0.01%：+2；funding ≥ +0.03%：-4（需 OI(tf) 幅度确认，否则降档为 -2）；funding ≥ +0.01%：-2。
+                      funding ≤ -0.03%：+2（需 OI(tf) 幅度确认，否则降档为 +1）；funding ≤ -0.01%：+1；funding ≥ +0.03%：-2（需 OI(tf) 幅度确认，否则降档为 -1）；funding ≥ +0.01%：-1。
+                    </div>
+                    <div class="mt-1">
+                      OI(tf) 幅度确认阈值会随 tf 切换：15m≥1.0%，1h≥2.0%，1d≥5.0%（取绝对值）。
                     </div>
                   </div>
 
                   <div>
                     <div class="font-semibold text-gray-200">价格 × OI 共振（趋势确认）</div>
                     <div>
-                      当 <span class="text-gray-100">OI(tf) ≥ 2.0%</span> 且 <span class="text-gray-100">价格(tf) ≥ +0.5%</span>：+3。
-                      当 <span class="text-gray-100">OI(tf) ≥ 2.0%</span> 且 <span class="text-gray-100">价格(tf) ≤ -0.5%</span>：-3。
+                      含义：把 <span class="text-gray-100">OI(tf)%</span> 与 <span class="text-gray-100">价格(tf)%</span> 同时作为“趋势推进/趋势衰减”的判据。
+                      只有当两者都达到阈值时才计入“强共振”，并按方向给出加减分。
+                    </div>
+                    <div class="mt-1">
+                      阈值会跟随上方 K线时间框架（tf）自动切换：
+                      15m：OI≥1.0%、价格≥0.3%；1h：OI≥2.0%、价格≥0.5%；1d：OI≥5.0%、价格≥1.5%。
+                    </div>
+                    <div class="mt-1">
+                      打分（四种组合，均要求 |OI(tf)%| 与 |价格(tf)%| 同时过阈值）：
+                      OI↑ 且 价格↑：+3；OI↑ 且 价格↓：-3；OI↓ 且 价格↑：+1.5；OI↓ 且 价格↓：-1.5。
+                    </div>
+                    <div class="mt-1">
+                      说明：当出现 OI↑ 的两种组合（增仓共振）时，后端会标记为“趋势确认”，并对 RSI 加减分自动降权，避免强趋势里 RSI 逆势拉分。
                     </div>
                   </div>
 
@@ -335,7 +349,7 @@
                       近似衡量“这根 tf K线成交量相对 24h 均值是否放大”：
                       <span class="text-gray-100">vol_ratio = V_tf / (V_24h / buckets)</span>，其中 buckets = 1440 / tf_minutes。
                       默认使用“上一根已收盘”的 tf K线成交量（避免进行中 K线导致的小时内抖动）。
-                      打分（方向敏感）：vol_ratio ≥ 2.5 时 |Δ|=2，vol_ratio ≥ 1.5 时 |Δ|=1；若价格(tf)% &gt; 0 视为“放量上涨”加分，若价格(tf)% &lt; 0 视为“放量下跌”扣分。
+                      打分（方向敏感）：vol_ratio ≥ 2.5 时 |Δ|=2.5，vol_ratio ≥ 1.5 时 |Δ|=1.5；若价格(tf)% &gt; 0 视为“放量上涨”加分，若价格(tf)% &lt; 0 视为“放量下跌”扣分。
                     </div>
                   </div>
 
@@ -343,7 +357,7 @@
                     <div class="font-semibold text-gray-200">MACD（随 tf）</div>
                     <div>
                       使用 tf K线 close 序列计算 MACD(12,26,9)。表格中的 MACD 列展示“交叉/预警事件”：检测最近 3 根是否出现金叉/死叉（取最近一次交叉），以及“即将金叉/即将死叉”预警（偏早：距离接近 ratio≤0.75 + 连续收敛 lookback=2 + 同向斜率）。
-                      打分：金叉 +3；即将金叉 +1.5；死叉 -3；即将死叉 -1.5。
+                      打分：金叉 +3.5；即将金叉 +2；死叉 -3.5；即将死叉 -2。
                     </div>
                   </div>
 
@@ -352,6 +366,9 @@
                     <div>
                       使用 tf K线 close 序列计算 RSI(14)。打分：
                       RSI &lt; 30：+2；RSI &lt; 40：+1；RSI &gt; 70：-2；RSI &gt; 60：-1。
+                    </div>
+                    <div class="mt-1">
+                      当出现趋势确认（MACD 金叉/死叉 或 OI↑ 的强共振）时，RSI 加减分会自动降权为 0.5 倍。
                     </div>
                   </div>
 
@@ -634,6 +651,10 @@
                       <input id="pushSignalEnabled" type="checkbox" class="accent-blue-500" />
                       多空综合雷达（强信号）
                     </label>
+                    <label class="muted text-sm flex items-center gap-2">
+                      <input id="pushTriSignalEnabled" type="checkbox" class="accent-blue-500" />
+                      三周期信号（高胜率）
+                    </label>
                   </div>
                 </div>
               </div>
@@ -654,6 +675,7 @@
                     <option value="all" selected>全部</option>
                     <option value="group_news">新闻哨兵</option>
                     <option value="group_macd">MACD 预警</option>
+                    <option value="group_tri">三周期信号</option>
                   </select>
                   <button id="pushRefresh" class="btn">刷新</button>
                 </div>
@@ -675,11 +697,129 @@
           </section>
         </section>
 
-        <section id="page-placeholder" class="hidden">
-          <div class="card rounded-2xl p-6">
-            <div class="text-xl font-extrabold">更多功能</div>
-            <div class="muted mt-2">你后续新增功能时，我会把它们放到左侧导航里，这里作为占位区。</div>
-          </div>
+        <section id="page-tri-signal" class="hidden">
+          <header class="mb-6">
+            <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+              <div>
+                <h1 class="text-3xl font-extrabold text-blue-300">多资产三周期信号监控（Gate 永续）</h1>
+                <p class="muted mt-2">1M：SMA10 + MACD 背景；1D：EMA20/50 定方向 + ADX(14) 判趋势强度；1H：EMA200 + RSI(14) 触发。1H 与 1D 同向标记“高胜率”，并按 Grade A/B/C 分级。</p>
+              </div>
+              <div class="flex flex-wrap items-center gap-3">
+                <button id="triRefresh" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg font-semibold">刷新矩阵</button>
+                <span id="triStatus" class="muted text-sm"></span>
+              </div>
+            </div>
+          </header>
+
+          <details class="mb-6">
+            <summary class="muted text-sm cursor-pointer">查看计算规则说明（信号定义 / 准备态 / 高胜率分级 / ATR 风控）</summary>
+            <div class="muted text-xs mt-3 space-y-3 leading-relaxed">
+              <div>
+                <div class="font-semibold text-gray-200">三周期共振逻辑</div>
+                <div>
+                  1M（战略层）：使用 <span class="text-gray-100">SMA(10)</span> 与 <span class="text-gray-100">MACD(12,26,9)</span> 判断大背景：
+                  bull=Close&gt;SMA10 且 MACD 偏多；bear=Close&lt;SMA10 且 MACD 偏空；其余为 neutral/过渡。若历史不足会显示 <span class="text-gray-100">—</span>。
+                </div>
+                <div class="mt-2">
+                  1D（战术层）：使用 <span class="text-gray-100">EMA(20/50)</span> 判方向（EMA20&gt;EMA50 为 up；反之 down），
+                  用 <span class="text-gray-100">ADX(14)</span> 判强度（ADX 越大表示趋势越“强”，与上涨/下跌方向无关；常见参考：ADX&lt;20=弱趋势/震荡，ADX≥25=趋势成立（strong），ADX≥40=强趋势/单边更明显）。
+                </div>
+                <div class="mt-2">
+                  1H（执行层）：使用 <span class="text-gray-100">EMA200</span> + <span class="text-gray-100">RSI(14)</span>。
+                  本页面把 1H 分成两种状态：
+                </div>
+              </div>
+
+              <div>
+                <div class="font-semibold text-gray-200">1H Setup（准备态） vs 1H Signal（触发态）</div>
+                <div>
+                  Setup（准备态）：
+                  <span class="text-gray-100">setup_long</span>=Close&gt;EMA200 且 RSI&lt;30；
+                  <span class="text-gray-100">setup_short</span>=Close&lt;EMA200 且 RSI&gt;70。
+                  该状态表示“接近触发”，用于观察，不会频繁变化。
+                </div>
+                <div class="mt-2">
+                  Signal（触发态，穿越事件）：
+                  <span class="text-gray-100">long</span>=Close&gt;EMA200 且 RSI 从 &lt;30 上穿到 ≥30；
+                  <span class="text-gray-100">short</span>=Close&lt;EMA200 且 RSI 从 &gt;70 下穿到 ≤70。
+                  因为是“事件”，所以大多数时间显示 <span class="text-gray-100">none</span> 属正常。
+                </div>
+              </div>
+
+              <div>
+                <div class="font-semibold text-gray-200">高胜率分级（Grade）</div>
+                <div>
+                  当 1H Signal 与 1D 趋势同向时，标记为“高胜率”：
+                  Grade A = 同向且 ADX&gt;25（强趋势，优先级最高）；
+                  Grade B = 同向但 ADX≤25（趋势不够强，胜率折扣）；
+                  Grade C = 非同向或无明确触发（仅作观察）。
+                </div>
+              </div>
+
+              <div>
+                <div class="font-semibold text-gray-200">风控点位（ATR）</div>
+                <div>
+                  当触发 1H Signal 时：
+                  止损 SL = 1.5×ATR(14)；止盈 TP = 3×ATR(14)（均以 1H ATR 计算）。图表会自动标注 Entry/SL/TP。
+                </div>
+              </div>
+            </div>
+          </details>
+
+          <section class="mb-8">
+            <div class="card rounded-2xl p-4">
+              <div class="text-xl font-extrabold mb-3">实时信号矩阵</div>
+              <div class="muted text-sm mb-4">点击某一行可加载 K 线图，并自动标注入场/止损/止盈（若触发 1H 信号）。</div>
+              <div class="overflow-x-auto">
+                <table class="min-w-[900px] w-full text-sm" id="triMatrixTable">
+                  <thead>
+                    <tr class="text-left muted">
+                      <th class="py-2">合约</th>
+                      <th class="py-2">最新价</th>
+                      <th class="py-2">1M 背景</th>
+                      <th class="py-2">1D 趋势</th>
+                      <th class="py-2">ADX</th>
+                      <th class="py-2">1H Setup</th>
+                      <th class="py-2">1H 执行</th>
+                      <th class="py-2">等级</th>
+                      <th class="py-2">理由（摘要）</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+
+          <section class="mb-10">
+            <div class="card rounded-2xl p-4">
+              <div class="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4 mb-4">
+                <div>
+                  <div class="text-xl font-extrabold">K 线图（交互）</div>
+                  <div class="muted text-sm mt-1">默认显示 1H。你也可以切换到 1D / 1M 查看背景。</div>
+                </div>
+                <div class="flex flex-wrap items-end gap-3">
+                  <div>
+                    <label class="muted text-sm">合约</label>
+                    <select id="triContract" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 mt-2">
+                      <option value="BTC_USDT">BTC_USDT</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="muted text-sm">周期</label>
+                    <select id="triTf" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 mt-2">
+                      <option value="1h" selected>1H</option>
+                      <option value="1d">1D</option>
+                      <option value="1M">1M</option>
+                    </select>
+                  </div>
+                  <button id="triLoadChart" class="btn">加载图表</button>
+                  <span id="triChartStatus" class="muted text-sm"></span>
+                </div>
+              </div>
+              <div id="triChart" style="height:520px;"></div>
+            </div>
+          </section>
         </section>
       </main>
     </div>
@@ -896,7 +1036,7 @@
   }
 
   function showPage(pageId) {
-    const pages = ['page-dashboard', 'page-macd', 'page-prealert', 'page-signal', 'page-news', 'page-telegram', 'page-placeholder'];
+    const pages = ['page-dashboard', 'page-macd', 'page-prealert', 'page-signal', 'page-news', 'page-telegram', 'page-tri-signal'];
     pages.forEach(pid => {
       const el = document.getElementById(pid);
       if (!el) return;
@@ -1327,8 +1467,205 @@
         loadNewsSettings();
         loadPushHistory();
       }
+      if (pageId === 'page-tri-signal') {
+        loadTriMatrix();
+      }
     });
   });
+
+  const triRefreshBtn = document.getElementById('triRefresh');
+  if (triRefreshBtn) triRefreshBtn.addEventListener('click', () => loadTriMatrix());
+  const triLoadChartBtn = document.getElementById('triLoadChart');
+  if (triLoadChartBtn) triLoadChartBtn.addEventListener('click', () => loadTriChart());
+
+  function _pill(text, cls) {
+    const t = (text === null || text === undefined) ? '—' : String(text);
+    return `<span class="pill ${cls || ''}">${t}</span>`;
+  }
+
+  function _triColorMonthly(state) {
+    if (state === 'bull') return 'pos';
+    if (state === 'bear') return 'neg';
+    if (state === 'neutral') return 'neu';
+    return 'neu';
+  }
+
+  function _triColorDaily(direction, strength) {
+    if (direction === 'up') return strength === 'strong' ? 'pos' : 'pos';
+    if (direction === 'down') return strength === 'strong' ? 'neg' : 'neg';
+    return 'neu';
+  }
+
+  function _triColorHourly(sig) {
+    if (sig === 'long') return 'pos';
+    if (sig === 'short') return 'neg';
+    return 'neu';
+  }
+
+  function _triColorSetup(setup) {
+    if (setup === 'setup_long') return 'pos';
+    if (setup === 'setup_short') return 'neg';
+    return 'neu';
+  }
+
+  function _triGradeBadge(grade, highProb) {
+    if (highProb) {
+      const cls = grade === 'A' ? 'sig sig-bull-entry' : 'sig sig-bear-entry';
+      return `<span class="${cls}">高胜率 ${grade}</span>`;
+    }
+    return _pill(grade || 'C', 'neu');
+  }
+
+  let _triLatestMap = {};
+
+  function _rebuildTriContractOptions(items) {
+    const sel = document.getElementById('triContract');
+    if (!sel) return;
+
+    const prev = sel.value || '';
+    const contracts = [];
+    (items || []).forEach(x => {
+      if (!x || !x.contract) return;
+      const c = String(x.contract);
+      contracts.push(c);
+    });
+
+    const uniq = Array.from(new Set(contracts)).sort((a, b) => a.localeCompare(b));
+    if (!uniq.length) return;
+
+    sel.innerHTML = '';
+    uniq.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c;
+      opt.textContent = c;
+      sel.appendChild(opt);
+    });
+
+    const exists = uniq.includes(prev);
+    sel.value = exists ? prev : uniq[0];
+  }
+
+  async function loadTriMatrix() {
+    document.getElementById('triStatus').textContent = '更新中…';
+    const data = await fetchJson('/api/tri_signal/matrix');
+    const items = (data && data.items) ? data.items : [];
+    const errors = (data && data.errors) ? data.errors : [];
+
+    _rebuildTriContractOptions(items);
+
+    _triLatestMap = {};
+    items.forEach(x => { _triLatestMap[x.contract] = x; });
+
+    const tb = document.querySelector('#triMatrixTable tbody');
+    tb.innerHTML = '';
+    items.forEach(x => {
+      const m = x.monthly || {};
+      const d = x.daily || {};
+      const h = x.hourly || {};
+      const mState = m.state || '—';
+      const dDir = d.direction || '—';
+      const dStr = d.strength || '—';
+      const adx = (d.adx === null || d.adx === undefined) ? '—' : Number(d.adx).toFixed(1);
+      const hSetup = h.setup || 'none';
+      const hSetupReason = h.setup_reason || '';
+      const hSig = h.signal || 'none';
+      const grade = x.grade || 'C';
+      const highProb = !!x.high_prob;
+
+      const reason = [
+        m.reason ? `1M:${m.reason}` : '',
+        d.reason ? `1D:${d.reason}` : '',
+        h.reason ? `1H:${h.reason}` : ''
+      ].filter(Boolean).join(' | ');
+
+      const tr = document.createElement('tr');
+      tr.className = 'hover:bg-white/5 cursor-pointer';
+      tr.innerHTML = `
+        <td class="py-2 font-semibold text-gray-100">${x.contract}</td>
+        <td class="py-2">${(x.last_price === null || x.last_price === undefined) ? '—' : Number(x.last_price).toFixed(4)}</td>
+        <td class="py-2">${_pill(mState, _triColorMonthly(mState))}</td>
+        <td class="py-2">${_pill(`${dDir}/${dStr}`, _triColorDaily(dDir, dStr))}</td>
+        <td class="py-2">${_pill(adx, 'neu')}</td>
+        <td class="py-2" title="${hSetupReason ? String(hSetupReason).replace(/\"/g,'&quot;') : ''}">${_pill(hSetup, _triColorSetup(hSetup))}</td>
+        <td class="py-2">${_pill(hSig, _triColorHourly(hSig))}</td>
+        <td class="py-2">${_triGradeBadge(grade, highProb)}</td>
+        <td class="py-2 muted">${reason || '—'}</td>
+      `;
+      tr.addEventListener('click', () => {
+        const sel = document.getElementById('triContract');
+        if (sel) sel.value = x.contract;
+        const tfSel = document.getElementById('triTf');
+        if (tfSel) tfSel.value = '1h';
+        loadTriChart();
+      });
+      tb.appendChild(tr);
+    });
+
+    document.getElementById('triStatus').textContent = errors && errors.length ? (`部分失败：${errors.slice(0,2).join(' ; ')}`) : `已更新：${items.length} 个合约`;
+  }
+
+  async function loadTriChart() {
+    const contract = document.getElementById('triContract').value || 'BTC_USDT';
+    const tf = document.getElementById('triTf').value || '1h';
+    document.getElementById('triChartStatus').textContent = '加载中…';
+    const url = `/api/tri_signal/candles?contract=${encodeURIComponent(contract)}&tf=${encodeURIComponent(tf)}&limit=220`;
+    const data = await fetchJson(url);
+    const items = (data && data.items) ? data.items : [];
+    const errs = (data && data.errors) ? data.errors : [];
+    if (errs && errs.length) {
+      document.getElementById('triChartStatus').textContent = errs[0];
+      return;
+    }
+
+    const xs = items.map(x => new Date((x.t || 0) * 1000));
+    const open = items.map(x => x.o);
+    const high = items.map(x => x.h);
+    const low = items.map(x => x.l);
+    const close = items.map(x => x.c);
+
+    const traces = [{
+      type: 'candlestick',
+      x: xs,
+      open: open,
+      high: high,
+      low: low,
+      close: close,
+      name: contract,
+      increasing: { line: { color: '#22c55e' } },
+      decreasing: { line: { color: '#ef4444' } }
+    }];
+
+    const layout = {
+      margin: { l: 40, r: 20, t: 30, b: 40 },
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      xaxis: { gridcolor: 'rgba(255,255,255,0.06)' },
+      yaxis: { gridcolor: 'rgba(255,255,255,0.06)' },
+      font: { color: 'rgba(255,255,255,0.85)' },
+      title: `${contract} / ${tf}`,
+      shapes: []
+    };
+
+    const latest = _triLatestMap[contract];
+    const h = latest ? (latest.hourly || {}) : {};
+    if (tf === '1h' && h && (h.signal === 'long' || h.signal === 'short') && h.entry && h.sl && h.tp) {
+      const yEntry = Number(h.entry);
+      const ySl = Number(h.sl);
+      const yTp = Number(h.tp);
+      const x0 = xs.length ? xs[0] : null;
+      const x1 = xs.length ? xs[xs.length - 1] : null;
+      if (x0 && x1) {
+        layout.shapes.push({ type: 'line', x0, x1, y0: yEntry, y1: yEntry, line: { color: 'rgba(59,130,246,0.9)', width: 1, dash: 'dot' } });
+        layout.shapes.push({ type: 'line', x0, x1, y0: ySl, y1: ySl, line: { color: 'rgba(239,68,68,0.9)', width: 1 } });
+        layout.shapes.push({ type: 'line', x0, x1, y0: yTp, y1: yTp, line: { color: 'rgba(34,197,94,0.9)', width: 1 } });
+      }
+      document.getElementById('triChartStatus').textContent = `已标注：Entry/SL/TP（ATR=${(h.atr ? Number(h.atr).toFixed(4) : '—')}）`;
+    } else {
+      document.getElementById('triChartStatus').textContent = `已加载 ${items.length} 根K线`;
+    }
+
+    Plotly.newPlot('triChart', traces, layout, { responsive: true, displayModeBar: true });
+  }
 
   function _sentCell(s) {
     if (!s) return `<span class="neu">—</span>`;
@@ -1432,6 +1769,7 @@
     document.getElementById('pushMacdPrealertEnabled').checked = (s.push_macd_prealert_enabled === undefined) ? true : !!s.push_macd_prealert_enabled;
     document.getElementById('pushMacdMonitorEnabled').checked = (s.push_macd_monitor_enabled === undefined) ? true : !!s.push_macd_monitor_enabled;
     document.getElementById('pushSignalEnabled').checked = (s.push_signal_enabled === undefined) ? true : !!s.push_signal_enabled;
+    document.getElementById('pushTriSignalEnabled').checked = (s.push_tri_signal_enabled === undefined) ? true : !!s.push_tri_signal_enabled;
   }
 
   async function saveNewsSettings() {
@@ -1444,6 +1782,7 @@
       push_macd_prealert_enabled: !!document.getElementById('pushMacdPrealertEnabled').checked,
       push_macd_monitor_enabled: !!document.getElementById('pushMacdMonitorEnabled').checked,
       push_signal_enabled: !!document.getElementById('pushSignalEnabled').checked,
+      push_tri_signal_enabled: !!document.getElementById('pushTriSignalEnabled').checked,
     };
     document.getElementById('newsSettingsStatus').textContent = '保存中…';
     const r = await fetch('/api/news/settings', {
@@ -1460,7 +1799,7 @@
   }
 
   async function loadPushHistory() {
-    const payload = await fetchJson('/api/news/push_history?limit=200');
+    const payload = await fetchJson('/api/telegram/push_history?limit=100');
     const items = (payload && payload.items) ? payload.items : [];
 
     rebuildPushLevelOptions(items);
@@ -1527,6 +1866,7 @@
     addOpt('all', '全部');
     addOpt('group_news', '新闻哨兵');
     addOpt('group_macd', 'MACD 预警');
+    addOpt('group_tri', '三周期信号');
 
     const sorted = Array.from(levels.entries()).sort((a, b) => a[0].localeCompare(b[0]));
     if (sorted.length) {
@@ -1558,14 +1898,20 @@
       return;
     }
     if (v === 'group_news') {
-      // 新闻哨兵：历史记录 level 是 sentiment（bullish/bearish/neutral）以及可能的 news_* 扩展
-      pushDT.column(colIdx).search('^(bullish|bearish|neutral|news)', true, false);
-      pushDT.draw(false);
+      // 新闻哨兵：news_* / group_news
+      pushDT.column(3).search('news', true, false);
+      pushDT.draw();
       return;
     }
     if (v === 'group_macd') {
-      pushDT.column(colIdx).search('^(macd_prealert)', true, false);
-      pushDT.draw(false);
+      // MACD：macd_*
+      pushDT.column(3).search('macd', true, false);
+      pushDT.draw();
+      return;
+    }
+    if (v === 'group_tri') {
+      pushDT.column(3).search('tri_', true, false);
+      pushDT.draw();
       return;
     }
 
