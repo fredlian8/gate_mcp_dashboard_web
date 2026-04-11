@@ -37,6 +37,9 @@
     .btn { padding: 8px 12px; border-radius: 12px; font-weight: 800; border: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.04); }
     .btn:hover { background: rgba(255,255,255,0.08); }
     .btn.active { background: rgba(37, 99, 235, 0.25); border-color: rgba(59, 130, 246, 0.55); color: rgb(191, 219, 254); }
+    .input { background: rgba(17,24,39,0.75); color: rgba(255,255,255,0.9); border: 1px solid rgba(255,255,255,0.12); border-radius: 12px; }
+    .input:focus { outline: none; border-color: rgba(59,130,246,0.65); box-shadow: 0 0 0 3px rgba(59,130,246,0.30); }
+    select.input option { background: rgb(17,24,39); color: rgba(255,255,255,0.92); }
     .row-golden td { background: rgba(20, 83, 45, 0.25) !important; }
     .row-death td { background: rgba(127, 29, 29, 0.25) !important; }
     /* 多空综合雷达：主要原因列强制加宽并允许换行 */
@@ -70,6 +73,7 @@
             <button class="nav-item" data-target="page-signal" id="nav-signal">多空综合雷达</button>
             <button class="nav-item" data-target="page-news" id="nav-news">新闻多空哨兵</button>
             <button class="nav-item" data-target="page-tri-signal" id="nav-tri-signal">三周期信号矩阵</button>
+            <button class="nav-item" data-target="page-master-a" id="nav-master-a">量化策略</button>
             <button class="nav-item" data-target="page-telegram" id="nav-telegram">Telegram 推送</button>
           </div>
         </div>
@@ -655,6 +659,14 @@
                       <input id="pushTriSignalEnabled" type="checkbox" class="accent-blue-500" />
                       三周期信号（高胜率）
                     </label>
+                    <label class="muted text-sm flex items-center gap-2">
+                      <input id="pushMasterAEnabled" type="checkbox" class="accent-blue-500" />
+                      量化策略A（触发）
+                    </label>
+                    <label class="muted text-sm flex items-center gap-2">
+                      <input id="pushMasterBEnabled" type="checkbox" class="accent-blue-500" />
+                      量化策略B（触发）
+                    </label>
                   </div>
                 </div>
               </div>
@@ -702,7 +714,7 @@
             <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
               <div>
                 <h1 class="text-3xl font-extrabold text-blue-300">多资产三周期信号监控（Gate 永续）</h1>
-                <p class="muted mt-2">1M：SMA10 + MACD 背景；1D：EMA20/50 定方向 + ADX(14) 判趋势强度；1H：EMA200 + RSI(14) 触发。1H 与 1D 同向标记“高胜率”，并按 Grade A/B/C 分级。</p>
+                <p class="muted mt-2">1D：SMA10 + MACD 背景；4H：EMA20/50 定方向 + ADX(14) 判趋势强度；1H：EMA200 + RSI(14) 触发。1H 与 4H 同向标记“高胜率”，并按 Grade A/B/C 分级。</p>
               </div>
               <div class="flex flex-wrap items-center gap-3">
                 <button id="triRefresh" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg font-semibold">刷新矩阵</button>
@@ -717,11 +729,11 @@
               <div>
                 <div class="font-semibold text-gray-200">三周期共振逻辑</div>
                 <div>
-                  1M（战略层）：使用 <span class="text-gray-100">SMA(10)</span> 与 <span class="text-gray-100">MACD(12,26,9)</span> 判断大背景：
+                  1D（战略层）：使用 <span class="text-gray-100">SMA(10)</span> 与 <span class="text-gray-100">MACD(12,26,9)</span> 判断大背景：
                   bull=Close&gt;SMA10 且 MACD 偏多；bear=Close&lt;SMA10 且 MACD 偏空；其余为 neutral/过渡。若历史不足会显示 <span class="text-gray-100">—</span>。
                 </div>
                 <div class="mt-2">
-                  1D（战术层）：使用 <span class="text-gray-100">EMA(20/50)</span> 判方向（EMA20&gt;EMA50 为 up；反之 down），
+                  4H（战术层）：使用 <span class="text-gray-100">EMA(20/50)</span> 判方向（EMA20&gt;EMA50 为 up；反之 down），
                   用 <span class="text-gray-100">ADX(14)</span> 判强度（ADX 越大表示趋势越“强”，与上涨/下跌方向无关；常见参考：ADX&lt;20=弱趋势/震荡，ADX≥25=趋势成立（strong），ADX≥40=强趋势/单边更明显）。
                 </div>
                 <div class="mt-2">
@@ -768,7 +780,21 @@
 
           <section class="mb-8">
             <div class="card rounded-2xl p-4">
-              <div class="text-xl font-extrabold mb-3">实时信号矩阵</div>
+              <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 mb-3">
+                <div class="text-xl font-extrabold">实时信号矩阵</div>
+                <div class="flex flex-wrap items-center gap-2">
+                  <div class="muted text-xs">每页</div>
+                  <select id="triPageSize" class="input px-2 py-1 text-sm">
+                    <option value="20" selected>20</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                    <option value="200">200</option>
+                  </select>
+                  <button id="triPagePrev" class="btn px-3 py-1 text-sm">上一页</button>
+                  <div class="muted text-xs" id="triPageInfo">—</div>
+                  <button id="triPageNext" class="btn px-3 py-1 text-sm">下一页</button>
+                </div>
+              </div>
               <div class="muted text-sm mb-4">点击某一行可加载 K 线图，并自动标注入场/止损/止盈（若触发 1H 信号）。</div>
               <div class="overflow-x-auto">
                 <table class="min-w-[900px] w-full text-sm" id="triMatrixTable">
@@ -776,8 +802,8 @@
                     <tr class="text-left muted">
                       <th class="py-2">合约</th>
                       <th class="py-2">最新价</th>
-                      <th class="py-2">1M 背景</th>
-                      <th class="py-2">1D 趋势</th>
+                      <th class="py-2">1D 背景</th>
+                      <th class="py-2">4H 趋势</th>
                       <th class="py-2">ADX</th>
                       <th class="py-2">1H Setup</th>
                       <th class="py-2">1H 执行</th>
@@ -809,8 +835,8 @@
                     <label class="muted text-sm">周期</label>
                     <select id="triTf" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 mt-2">
                       <option value="1h" selected>1H</option>
+                      <option value="4h">4H</option>
                       <option value="1d">1D</option>
-                      <option value="1M">1M</option>
                     </select>
                   </div>
                   <button id="triLoadChart" class="btn">加载图表</button>
@@ -818,6 +844,126 @@
                 </div>
               </div>
               <div id="triChart" style="height:520px;"></div>
+            </div>
+          </section>
+        </section>
+
+        <section id="page-master-a" class="hidden">
+          <header class="mb-6">
+            <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+              <div>
+                <h1 class="text-3xl font-extrabold text-blue-300">量化策略（Master Prompt）</h1>
+                <p class="muted mt-2">策略 A / B 信号矩阵 + 图表联动。数据源：Gate 永续合约 REST。</p>
+              </div>
+              <div class="flex flex-wrap items-center gap-3">
+                <div class="inline-flex rounded-xl bg-white/5 p-1">
+                  <button id="mpBtnA" class="btn active">策略A（短线）</button>
+                  <button id="mpBtnB" class="btn">策略B（波段）</button>
+                </div>
+                <button id="mpRefresh" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg font-semibold">刷新</button>
+                <span id="mpStatus" class="muted text-sm"></span>
+              </div>
+            </div>
+          </header>
+
+          <details class="mb-6" id="mpDetails">
+            <summary class="muted text-sm cursor-pointer">查看策略计算规则说明（环境 / 预警 / 触发 / 风控）</summary>
+            <div class="card rounded-2xl p-4 mt-3">
+              <div class="text-xl font-extrabold mb-2">策略说明</div>
+              <div class="muted text-sm leading-relaxed" id="mpDesc">
+                <div class="font-semibold text-gray-200">策略A（短线）规则</div>
+                <div class="mt-1">
+                  1) <span class="font-semibold">环境（1H）</span>：EMA200 定方向。
+                  Close&gt;EMA200 → <span class="font-semibold">long_only</span>（只找做多）；Close&lt;EMA200 → <span class="font-semibold">short_only</span>（只找做空）。
+                </div>
+                <div class="mt-1">
+                  2) <span class="font-semibold">预警（1H）</span>：TTM Squeeze ON + RSI 回钩。
+                  Squeeze ON：<span class="font-semibold">BB_Width &lt; KC_Width</span>（波动收敛）。
+                  <span class="font-semibold">pre_long</span>（Bullish Hook）：RSI(14) 前一根&lt;35，且当前 RSI&gt;前一根，且当前 RSI≥40（35→40 回钩）；
+                  <span class="font-semibold">pre_short</span>（Bearish Hook）：RSI(14) 前一根&gt;65，且当前 RSI&lt;前一根，且当前 RSI≤60（65→60 回钩）。
+                </div>
+                <div class="mt-1">
+                  3) <span class="font-semibold">触发（15M）</span>：突破近 3 根已收盘K线的高/低。
+                  <span class="font-semibold">trigger_long</span>：收盘价&gt;过去3根最高；<span class="font-semibold">trigger_short</span>：收盘价&lt;过去3根最低。
+                </div>
+                <div class="mt-2">
+                  <span class="font-semibold">风控</span>：Entry=触发周期最新收盘价；
+                  SL=Entry±1.5×ATR（主周期）；TP1=1:2，TP2=1:3（R=|Entry-SL|）。
+                </div>
+                <div class="mt-2 text-xs">
+                  说明：<span class="font-semibold">none</span> 表示当前未满足该步骤条件。
+                  本页面信号为研究用途，不构成投资建议。
+                </div>
+              </div>
+            </div>
+          </details>
+
+          <section class="mb-8">
+            <div class="card rounded-2xl p-4">
+              <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 mb-3">
+                <div class="text-xl font-extrabold" id="mpTableTitle">策略A 信号列表</div>
+                <div class="flex flex-wrap items-center gap-2">
+                  <div class="muted text-xs">每页</div>
+                  <select id="mpPageSize" class="input px-2 py-1 text-sm">
+                    <option value="20" selected>20</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                    <option value="200">200</option>
+                  </select>
+                  <button id="mpPagePrev" class="btn px-3 py-1 text-sm">上一页</button>
+                  <div class="muted text-xs" id="mpPageInfo">—</div>
+                  <button id="mpPageNext" class="btn px-3 py-1 text-sm">下一页</button>
+                </div>
+              </div>
+              <div class="muted text-sm mb-4" id="mpTableHint">点击某一行将加载右侧图表，并标注 Entry/SL/TP1/TP2（如已触发）。</div>
+              <div class="overflow-x-auto">
+                <table class="min-w-[1100px] w-full text-sm" id="mpTable">
+                  <thead>
+                    <tr class="text-left muted">
+                      <th class="py-2">合约</th>
+                      <th class="py-2">方向</th>
+                      <th class="py-2" id="mpColEnv">环境</th>
+                      <th class="py-2" id="mpColPre">预警</th>
+                      <th class="py-2" id="mpColTrig">触发</th>
+                      <th class="py-2">Entry</th>
+                      <th class="py-2">SL</th>
+                      <th class="py-2">TP1(1:2)</th>
+                      <th class="py-2">TP2(1:3)</th>
+                      <th class="py-2">理由（摘要）</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+
+          <section class="mb-10">
+            <div class="card rounded-2xl p-4">
+              <div class="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4 mb-4">
+                <div>
+                  <div class="text-xl font-extrabold">K 线图（交互）</div>
+                  <div class="muted text-sm mt-1" id="mpChartHint">默认显示主周期。你也可以切换到触发周期查看结构。</div>
+                </div>
+                <div class="flex flex-wrap items-end gap-3">
+                  <div>
+                    <label class="muted text-sm">合约</label>
+                    <select id="mpContract" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 mt-2">
+                      <option value="BTC_USDT">BTC_USDT</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="muted text-sm">周期</label>
+                    <select id="mpTf" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 mt-2">
+                      <option value="1h" selected>1H</option>
+                      <option value="15m">15M</option>
+                    </select>
+                  </div>
+                  <button id="mpLoadChart" class="btn">加载图表</button>
+                  <span id="mpChartStatus" class="muted text-sm"></span>
+                </div>
+              </div>
+              <div id="mpChart" style="height:520px;"></div>
             </div>
           </section>
         </section>
@@ -919,6 +1065,8 @@
   let preTimer = null;
   let preFilterMode = 'warn';
   let preTfMode = '1h';
+
+  let mpADT = null;
 
   let sigDT = null;
   let sigTimer = null;
@@ -1036,7 +1184,7 @@
   }
 
   function showPage(pageId) {
-    const pages = ['page-dashboard', 'page-macd', 'page-prealert', 'page-signal', 'page-news', 'page-telegram', 'page-tri-signal'];
+    const pages = ['page-dashboard', 'page-macd', 'page-prealert', 'page-signal', 'page-news', 'page-telegram', 'page-tri-signal', 'page-master-a'];
     pages.forEach(pid => {
       const el = document.getElementById(pid);
       if (!el) return;
@@ -1072,6 +1220,14 @@
       setTimeout(() => {
         try {
           if (preDT) preDT.columns.adjust().draw(false);
+        } catch (e) {}
+      }, 30);
+    }
+
+    if (pageId === 'page-master-a') {
+      setTimeout(() => {
+        try {
+          if (mpADT) mpADT.columns.adjust().draw(false);
         } catch (e) {}
       }, 30);
     }
@@ -1470,6 +1626,9 @@
       if (pageId === 'page-tri-signal') {
         loadTriMatrix();
       }
+      if (pageId === 'page-master-a') {
+        loadMpMatrix();
+      }
     });
   });
 
@@ -1477,6 +1636,38 @@
   if (triRefreshBtn) triRefreshBtn.addEventListener('click', () => loadTriMatrix());
   const triLoadChartBtn = document.getElementById('triLoadChart');
   if (triLoadChartBtn) triLoadChartBtn.addEventListener('click', () => loadTriChart());
+
+  let _mpStrategy = 'A';
+  const mpBtnA = document.getElementById('mpBtnA');
+  const mpBtnB = document.getElementById('mpBtnB');
+  const mpDetails = document.getElementById('mpDetails');
+  const mpRefreshBtn = document.getElementById('mpRefresh');
+  const mpLoadChartBtn = document.getElementById('mpLoadChart');
+  const mpPageSizeSel = document.getElementById('mpPageSize');
+  const mpPagePrevBtn = document.getElementById('mpPagePrev');
+  const mpPageNextBtn = document.getElementById('mpPageNext');
+  if (mpBtnA) mpBtnA.addEventListener('click', () => setMpStrategy('A'));
+  if (mpBtnB) mpBtnB.addEventListener('click', () => setMpStrategy('B'));
+  if (mpDetails) mpDetails.addEventListener('toggle', () => {
+    try {
+      if (mpDetails.open) setMpStrategy(_mpStrategy);
+    } catch (e) {}
+  });
+  if (mpRefreshBtn) mpRefreshBtn.addEventListener('click', () => loadMpMatrix());
+  if (mpLoadChartBtn) mpLoadChartBtn.addEventListener('click', () => loadMpChart());
+  if (mpPageSizeSel) mpPageSizeSel.addEventListener('change', () => {
+    _mpPageSize = Number(mpPageSizeSel.value) || 50;
+    _mpPage = 1;
+    _renderMpTablePage();
+  });
+  if (mpPagePrevBtn) mpPagePrevBtn.addEventListener('click', () => {
+    _mpPage = Math.max(1, (Number(_mpPage) || 1) - 1);
+    _renderMpTablePage();
+  });
+  if (mpPageNextBtn) mpPageNextBtn.addEventListener('click', () => {
+    _mpPage = (Number(_mpPage) || 1) + 1;
+    _renderMpTablePage();
+  });
 
   function _pill(text, cls) {
     const t = (text === null || text === undefined) ? '—' : String(text);
@@ -1509,14 +1700,275 @@
   }
 
   function _triGradeBadge(grade, highProb) {
+    const g = String(grade || 'C').toUpperCase();
+    const cls = highProb ? 'badge badge-gold' : 'badge badge-gray';
     if (highProb) {
-      const cls = grade === 'A' ? 'sig sig-bull-entry' : 'sig sig-bear-entry';
-      return `<span class="${cls}">高胜率 ${grade}</span>`;
+      return `<span class="${cls}">高胜率 ${g}</span>`;
     }
-    return _pill(grade || 'C', 'neu');
+    return _pill(g || 'C', 'neu');
   }
 
-  let _triLatestMap = {};
+  function _smaArr(xs, period) {
+    const n = Math.max(1, parseInt(period || 1, 10));
+    const out = new Array(xs.length).fill(null);
+    if (!Array.isArray(xs) || xs.length < n) return out;
+    let sum = 0;
+    for (let i = 0; i < xs.length; i++) {
+      const v = Number(xs[i]);
+      if (!isFinite(v)) return out;
+      sum += v;
+      if (i >= n) sum -= Number(xs[i - n]);
+      if (i >= n - 1) out[i] = sum / n;
+    }
+    return out;
+  }
+
+  function _adxArr(highs, lows, closes, period) {
+    const n = Math.max(1, parseInt(period || 14, 10));
+    const out = new Array(closes.length).fill(null);
+    if (!Array.isArray(highs) || !Array.isArray(lows) || !Array.isArray(closes)) return out;
+    if (highs.length !== lows.length || lows.length !== closes.length) return out;
+    if (closes.length < n + 2) return out;
+
+    const tr = new Array(closes.length).fill(null);
+    const plusDm = new Array(closes.length).fill(null);
+    const minusDm = new Array(closes.length).fill(null);
+    for (let i = 1; i < closes.length; i++) {
+      const hi = Number(highs[i]);
+      const lo = Number(lows[i]);
+      const ph = Number(highs[i - 1]);
+      const pl = Number(lows[i - 1]);
+      const pc = Number(closes[i - 1]);
+      if (!isFinite(hi) || !isFinite(lo) || !isFinite(ph) || !isFinite(pl) || !isFinite(pc)) return out;
+
+      const upMove = hi - ph;
+      const downMove = pl - lo;
+      plusDm[i] = (upMove > downMove && upMove > 0) ? upMove : 0;
+      minusDm[i] = (downMove > upMove && downMove > 0) ? downMove : 0;
+
+      const a = hi - lo;
+      const b = Math.abs(hi - pc);
+      const c = Math.abs(lo - pc);
+      tr[i] = Math.max(a, b, c);
+    }
+
+    let atr = 0;
+    let pDm = 0;
+    let mDm = 0;
+    for (let i = 1; i <= n; i++) {
+      if (tr[i] === null || plusDm[i] === null || minusDm[i] === null) return out;
+      atr += Number(tr[i]);
+      pDm += Number(plusDm[i]);
+      mDm += Number(minusDm[i]);
+    }
+
+    atr = atr / n;
+    pDm = pDm / n;
+    mDm = mDm / n;
+
+    const dx = new Array(closes.length).fill(null);
+    for (let i = n; i < closes.length; i++) {
+      if (i > n) {
+        const trv = tr[i];
+        const pd = plusDm[i];
+        const md = minusDm[i];
+        if (trv === null || pd === null || md === null) return out;
+        atr = ((atr * (n - 1)) + Number(trv)) / n;
+        pDm = ((pDm * (n - 1)) + Number(pd)) / n;
+        mDm = ((mDm * (n - 1)) + Number(md)) / n;
+      }
+      if (atr <= 0) continue;
+      const pdi = 100 * (pDm / atr);
+      const mdi = 100 * (mDm / atr);
+      const den = pdi + mdi;
+      if (den <= 0) continue;
+      dx[i] = 100 * (Math.abs(pdi - mdi) / den);
+    }
+
+    // ADX = SMA of DX with Wilder smoothing
+    let adx = null;
+    let sumDx = 0;
+    let countDx = 0;
+    for (let i = 0; i < dx.length; i++) {
+      const v = dx[i];
+      if (v === null || v === undefined) continue;
+      sumDx += Number(v);
+      countDx += 1;
+      if (countDx === n) {
+        adx = sumDx / n;
+        out[i] = adx;
+        break;
+      }
+    }
+    if (adx === null) return out;
+    for (let i = 0; i < dx.length; i++) {
+      if (out[i] !== null) {
+        for (let j = i + 1; j < dx.length; j++) {
+          const v = dx[j];
+          if (v === null || v === undefined) continue;
+          adx = ((adx * (n - 1)) + Number(v)) / n;
+          out[j] = adx;
+        }
+        break;
+      }
+    }
+    return out;
+  }
+
+  function _emaArr(xs, period) {
+    const n = Math.max(1, parseInt(period || 1, 10));
+    const out = new Array(xs.length).fill(null);
+    if (!Array.isArray(xs) || xs.length < n) return out;
+    const k = 2 / (n + 1);
+    // seed with SMA
+    const sma = _smaArr(xs.slice(0, n), n);
+    let ema = sma[n - 1];
+    out[n - 1] = ema;
+    for (let i = n; i < xs.length; i++) {
+      const v = Number(xs[i]);
+      if (!isFinite(v)) return out;
+      ema = v * k + ema * (1 - k);
+      out[i] = ema;
+    }
+    return out;
+  }
+
+  function _rsi14Arr(xs, period) {
+    const n = Math.max(1, parseInt(period || 14, 10));
+    const out = new Array(xs.length).fill(null);
+    if (!Array.isArray(xs) || xs.length < n + 1) return out;
+
+    let gainSum = 0;
+    let lossSum = 0;
+    for (let i = 1; i <= n; i++) {
+      const d = Number(xs[i]) - Number(xs[i - 1]);
+      if (!isFinite(d)) return out;
+      if (d >= 0) gainSum += d;
+      else lossSum += -d;
+    }
+    let avgGain = gainSum / n;
+    let avgLoss = lossSum / n;
+    const rs0 = (avgLoss === 0) ? Infinity : (avgGain / avgLoss);
+    out[n] = 100 - (100 / (1 + rs0));
+
+    for (let i = n + 1; i < xs.length; i++) {
+      const d = Number(xs[i]) - Number(xs[i - 1]);
+      if (!isFinite(d)) return out;
+      const gain = (d > 0) ? d : 0;
+      const loss = (d < 0) ? -d : 0;
+      avgGain = (avgGain * (n - 1) + gain) / n;
+      avgLoss = (avgLoss * (n - 1) + loss) / n;
+      const rs = (avgLoss === 0) ? Infinity : (avgGain / avgLoss);
+      out[i] = 100 - (100 / (1 + rs));
+    }
+    return out;
+  }
+
+  function _stdArr(xs, period) {
+    const n = Math.max(1, parseInt(period || 20, 10));
+    const out = new Array(xs.length).fill(null);
+    if (!Array.isArray(xs) || xs.length < n) return out;
+    for (let i = n - 1; i < xs.length; i++) {
+      let sum = 0;
+      let sum2 = 0;
+      let ok = true;
+      for (let j = i - n + 1; j <= i; j++) {
+        const v = Number(xs[j]);
+        if (!isFinite(v)) { ok = false; break; }
+        sum += v;
+        sum2 += v * v;
+      }
+      if (!ok) continue;
+      const mean = sum / n;
+      const var0 = Math.max(0, (sum2 / n) - mean * mean);
+      out[i] = Math.sqrt(var0);
+    }
+    return out;
+  }
+
+  function _atrArr(highs, lows, closes, period) {
+    const n = Math.max(1, parseInt(period || 14, 10));
+    const out = new Array(closes.length).fill(null);
+    if (!Array.isArray(highs) || !Array.isArray(lows) || !Array.isArray(closes)) return out;
+    if (closes.length < n + 1 || highs.length !== closes.length || lows.length !== closes.length) return out;
+
+    const tr = new Array(closes.length).fill(null);
+    for (let i = 1; i < closes.length; i++) {
+      const h = Number(highs[i]);
+      const l = Number(lows[i]);
+      const pc = Number(closes[i - 1]);
+      if (!isFinite(h) || !isFinite(l) || !isFinite(pc)) return out;
+      const a = h - l;
+      const b = Math.abs(h - pc);
+      const c = Math.abs(l - pc);
+      tr[i] = Math.max(a, b, c);
+    }
+
+    let sum = 0;
+    for (let i = 1; i <= n; i++) {
+      const v = tr[i];
+      if (v === null || v === undefined) return out;
+      sum += Number(v);
+    }
+    let atr = sum / n;
+    out[n] = atr;
+    for (let i = n + 1; i < closes.length; i++) {
+      const v = tr[i];
+      if (v === null || v === undefined) return out;
+      atr = ((atr * (n - 1)) + Number(v)) / n;
+      out[i] = atr;
+    }
+    return out;
+  }
+
+  function _macdArr(xs, fast, slow, signal) {
+    const f = Math.max(1, parseInt(fast || 12, 10));
+    const s = Math.max(1, parseInt(slow || 26, 10));
+    const g = Math.max(1, parseInt(signal || 9, 10));
+    const macd = new Array(xs.length).fill(null);
+    const sig = new Array(xs.length).fill(null);
+    const hist = new Array(xs.length).fill(null);
+    if (!Array.isArray(xs) || xs.length < Math.max(f, s) + g) return { macd, signal: sig, hist };
+
+    const emaFast = _emaArr(xs, f);
+    const emaSlow = _emaArr(xs, s);
+    for (let i = 0; i < xs.length; i++) {
+      if (emaFast[i] === null || emaSlow[i] === null) continue;
+      macd[i] = Number(emaFast[i]) - Number(emaSlow[i]);
+    }
+
+    // signal line: EMA of MACD line (handle nulls; do NOT feed NaN into _emaArr)
+    const k = 2 / (g + 1);
+    // find first index where we have g consecutive macd values
+    let seedIdx = -1;
+    for (let i = 0; i < macd.length; i++) {
+      if (macd[i] === null || macd[i] === undefined) continue;
+      let ok = true;
+      if (i - (g - 1) < 0) continue;
+      for (let j = i - (g - 1); j <= i; j++) {
+        if (macd[j] === null || macd[j] === undefined) { ok = false; break; }
+      }
+      if (ok) { seedIdx = i; break; }
+    }
+    if (seedIdx >= 0) {
+      let sum = 0;
+      for (let j = seedIdx - (g - 1); j <= seedIdx; j++) sum += Number(macd[j]);
+      let ema = sum / g;
+      sig[seedIdx] = ema;
+      for (let i = seedIdx + 1; i < macd.length; i++) {
+        const v = macd[i];
+        if (v === null || v === undefined) continue;
+        ema = Number(v) * k + ema * (1 - k);
+        sig[i] = ema;
+      }
+    }
+
+    for (let i = 0; i < xs.length; i++) {
+      if (macd[i] === null || sig[i] === null) continue;
+      hist[i] = Number(macd[i]) - Number(sig[i]);
+    }
+    return { macd, signal: sig, hist };
+  }
 
   function _rebuildTriContractOptions(items) {
     const sel = document.getElementById('triContract');
@@ -1545,20 +1997,57 @@
     sel.value = exists ? prev : uniq[0];
   }
 
-  async function loadTriMatrix() {
-    document.getElementById('triStatus').textContent = '更新中…';
-    const data = await fetchJson('/api/tri_signal/matrix');
-    const items = (data && data.items) ? data.items : [];
-    const errors = (data && data.errors) ? data.errors : [];
+  let _triLatestMap = {};
+  let _triAllItems = [];
+  let _triPage = 1;
+  let _triPageSize = 20;
 
-    _rebuildTriContractOptions(items);
+  function _triItemPriority(x) {
+    try {
+      const h = (x && x.hourly) ? x.hourly : {};
+      const sig = String(h.signal || 'none');
+      const setup = String(h.setup || 'none');
+      const highProb = !!(x && x.high_prob);
+      if (sig && sig !== 'none') return 3;
+      if (highProb) return 2;
+      if (setup && setup !== 'none') return 1;
+      return 0;
+    } catch (e) {
+      return 0;
+    }
+  }
 
-    _triLatestMap = {};
-    items.forEach(x => { _triLatestMap[x.contract] = x; });
+  function _triGradeRank(g) {
+    const s = String(g || 'C').toUpperCase();
+    if (s === 'A') return 3;
+    if (s === 'B') return 2;
+    return 1;
+  }
 
+  function _renderTriTablePage() {
     const tb = document.querySelector('#triMatrixTable tbody');
-    tb.innerHTML = '';
-    items.forEach(x => {
+    if (tb) tb.innerHTML = '';
+
+    const infoEl = document.getElementById('triPageInfo');
+
+    const items = Array.isArray(_triAllItems) ? _triAllItems : [];
+    const pageSize = Math.max(1, Number(_triPageSize) || 20);
+    const total = items.length;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    _triPage = Math.min(Math.max(1, Number(_triPage) || 1), totalPages);
+
+    const start = (_triPage - 1) * pageSize;
+    const end = Math.min(total, start + pageSize);
+    const slice = items.slice(start, end);
+
+    const _fmtP = (v) => {
+      if (v === null || v === undefined) return '—';
+      const n = Number(v);
+      if (!isFinite(n)) return '—';
+      return n.toFixed(4);
+    };
+
+    (slice || []).forEach(x => {
       const m = x.monthly || {};
       const d = x.daily || {};
       const h = x.hourly || {};
@@ -1573,8 +2062,9 @@
       const highProb = !!x.high_prob;
 
       const reason = [
-        m.reason ? `1M:${m.reason}` : '',
-        d.reason ? `1D:${d.reason}` : '',
+        m.reason ? `1D:${m.reason}` : '',
+        d.reason ? `4H:${d.reason}` : '',
+        hSetupReason ? `Setup:${hSetupReason}` : '',
         h.reason ? `1H:${h.reason}` : ''
       ].filter(Boolean).join(' | ');
 
@@ -1582,7 +2072,7 @@
       tr.className = 'hover:bg-white/5 cursor-pointer';
       tr.innerHTML = `
         <td class="py-2 font-semibold text-gray-100">${x.contract}</td>
-        <td class="py-2">${(x.last_price === null || x.last_price === undefined) ? '—' : Number(x.last_price).toFixed(4)}</td>
+        <td class="py-2">${_fmtP(x.last_price)}</td>
         <td class="py-2">${_pill(mState, _triColorMonthly(mState))}</td>
         <td class="py-2">${_pill(`${dDir}/${dStr}`, _triColorDaily(dDir, dStr))}</td>
         <td class="py-2">${_pill(adx, 'neu')}</td>
@@ -1598,11 +2088,61 @@
         if (tfSel) tfSel.value = '1h';
         loadTriChart();
       });
-      tb.appendChild(tr);
+      if (tb) tb.appendChild(tr);
     });
+
+    if (infoEl) infoEl.textContent = `第 ${_triPage}/${totalPages} 页（${total ? (start + 1) : 0}-${end} / ${total}）`;
+    const prevBtn = document.getElementById('triPagePrev');
+    const nextBtn = document.getElementById('triPageNext');
+    if (prevBtn) prevBtn.disabled = (_triPage <= 1);
+    if (nextBtn) nextBtn.disabled = (_triPage >= totalPages);
+  }
+
+  async function loadTriMatrix() {
+    document.getElementById('triStatus').textContent = '更新中…';
+    const data = await fetchJson('/api/tri_signal/matrix');
+    const items = (data && data.items) ? data.items : [];
+    const errors = (data && data.errors) ? data.errors : [];
+
+    _rebuildTriContractOptions(items);
+
+    _triLatestMap = {};
+    (items || []).forEach(x => { _triLatestMap[x.contract] = x; });
+
+    _triAllItems = Array.isArray(items) ? items.slice() : [];
+    _triAllItems.sort((a, b) => {
+      const pa = _triItemPriority(a);
+      const pb = _triItemPriority(b);
+      if (pa !== pb) return pb - pa;
+      const ga = _triGradeRank(a && a.grade);
+      const gb = _triGradeRank(b && b.grade);
+      if (ga !== gb) return gb - ga;
+      return String((a && a.contract) || '').localeCompare(String((b && b.contract) || ''));
+    });
+
+    _triPage = 1;
+    _renderTriTablePage();
 
     document.getElementById('triStatus').textContent = errors && errors.length ? (`部分失败：${errors.slice(0,2).join(' ; ')}`) : `已更新：${items.length} 个合约`;
   }
+
+  // tri matrix pagination
+  const triPageSizeSel = document.getElementById('triPageSize');
+  const triPagePrevBtn = document.getElementById('triPagePrev');
+  const triPageNextBtn = document.getElementById('triPageNext');
+  if (triPageSizeSel) triPageSizeSel.addEventListener('change', () => {
+    _triPageSize = Number(triPageSizeSel.value) || 20;
+    _triPage = 1;
+    _renderTriTablePage();
+  });
+  if (triPagePrevBtn) triPagePrevBtn.addEventListener('click', () => {
+    _triPage = Math.max(1, (Number(_triPage) || 1) - 1);
+    _renderTriTablePage();
+  });
+  if (triPageNextBtn) triPageNextBtn.addEventListener('click', () => {
+    _triPage = (Number(_triPage) || 1) + 1;
+    _renderTriTablePage();
+  });
 
   async function loadTriChart() {
     const contract = document.getElementById('triContract').value || 'BTC_USDT';
@@ -1631,6 +2171,8 @@
       low: low,
       close: close,
       name: contract,
+      xaxis: 'x',
+      yaxis: 'y',
       increasing: { line: { color: '#22c55e' } },
       decreasing: { line: { color: '#ef4444' } }
     }];
@@ -1643,11 +2185,136 @@
       yaxis: { gridcolor: 'rgba(255,255,255,0.06)' },
       font: { color: 'rgba(255,255,255,0.85)' },
       title: `${contract} / ${tf}`,
-      shapes: []
+      dragmode: 'pan',
+      shapes: [],
+      annotations: [],
+      showlegend: true,
+      legend: { orientation: 'h', y: -0.25 },
+      hovermode: 'x unified',
+      hoverlabel: {
+        bgcolor: 'rgba(15,23,42,0.92)',
+        bordercolor: 'rgba(148,163,184,0.35)',
+        font: { color: 'rgba(255,255,255,0.92)' }
+      }
     };
+
+    // Indicators by tf
+    try {
+      if (tf === '1d') {
+        const sma10 = _smaArr(close, 10);
+        traces.push({ type: 'scatter', mode: 'lines', x: xs, y: sma10, name: 'SMA10', line: { color: 'rgba(251,191,36,0.95)', width: 1 }, hovertemplate: '%{x}<br>%{y:.6f}<extra>SMA10</extra>' });
+
+        const m = _macdArr(close, 12, 26, 9);
+        const hist = (m && m.hist) ? m.hist : [];
+        const macd = (m && m.macd) ? m.macd : [];
+        const sig = (m && m.signal) ? m.signal : [];
+        const histColors = (hist || []).map(v => {
+          const n = Number(v);
+          if (!isFinite(n)) return 'rgba(148,163,184,0.35)';
+          return (n >= 0) ? 'rgba(34,197,94,0.65)' : 'rgba(239,68,68,0.65)';
+        });
+
+        layout.yaxis = { ...layout.yaxis, domain: [0.28, 1] };
+        layout.yaxis2 = { domain: [0, 0.22], gridcolor: 'rgba(255,255,255,0.06)', title: 'MACD', zerolinecolor: 'rgba(255,255,255,0.10)' };
+        layout.xaxis = { ...layout.xaxis, domain: [0, 1], rangeslider: { visible: false } };
+        layout.xaxis2 = { domain: [0, 1], overlaying: 'x', anchor: 'y2', matches: 'x', showgrid: false, showticklabels: false };
+        traces.push({ type: 'bar', x: xs, y: hist, name: 'MACD Hist (12,26,9)', yaxis: 'y2', xaxis: 'x2', marker: { color: histColors }, hovertemplate: '%{x}<br>%{y:.6f}<extra>MACD Hist</extra>' });
+        // DIF = MACD line, DEA = Signal line (DIF red, DEA blue)
+        traces.push({ type: 'scatter', mode: 'lines', x: xs, y: macd, name: 'DIF', yaxis: 'y2', xaxis: 'x2', line: { color: 'rgba(239,68,68,0.90)', width: 1 }, hovertemplate: '%{x}<br>%{y:.6f}<extra>DIF</extra>' });
+        traces.push({ type: 'scatter', mode: 'lines', x: xs, y: sig, name: 'DEA', yaxis: 'y2', xaxis: 'x2', line: { color: 'rgba(59,130,246,0.95)', width: 1 }, hovertemplate: '%{x}<br>%{y:.6f}<extra>DEA</extra>' });
+      }
+
+      if (tf === '4h') {
+        const ema20 = _emaArr(close, 20);
+        const ema50 = _emaArr(close, 50);
+        traces.push({ type: 'scatter', mode: 'lines', x: xs, y: ema20, name: 'EMA20', line: { color: 'rgba(59,130,246,0.95)', width: 1 }, hovertemplate: '%{x}<br>%{y:.6f}<extra>EMA20</extra>' });
+        traces.push({ type: 'scatter', mode: 'lines', x: xs, y: ema50, name: 'EMA50', line: { color: 'rgba(168,85,247,0.85)', width: 1 }, hovertemplate: '%{x}<br>%{y:.6f}<extra>EMA50</extra>' });
+
+        const adx14 = _adxArr(high, low, close, 14);
+        layout.yaxis = { ...layout.yaxis, domain: [0.28, 1] };
+        layout.yaxis2 = { domain: [0, 0.22], gridcolor: 'rgba(255,255,255,0.06)', title: 'ADX14' };
+        layout.xaxis = { ...layout.xaxis, domain: [0, 1], rangeslider: { visible: false } };
+        layout.xaxis2 = { domain: [0, 1], overlaying: 'x', anchor: 'y2', matches: 'x', showgrid: false, showticklabels: false };
+        traces.push({ type: 'scatter', mode: 'lines', x: xs, y: adx14, name: 'ADX14', yaxis: 'y2', xaxis: 'x2', line: { color: 'rgba(34,197,94,0.95)', width: 1 }, hovertemplate: '%{x}<br>%{y:.2f}<extra>ADX14</extra>' });
+
+        try {
+          layout.shapes.push({ type: 'line', xref: 'paper', yref: 'y2', x0: 0, x1: 1, y0: 25, y1: 25, line: { color: 'rgba(148,163,184,0.55)', width: 1, dash: 'dot' } });
+        } catch (e) {}
+      }
+
+      if (tf === '1h') {
+        const ema200 = _emaArr(close, 200);
+        traces.push({ type: 'scatter', mode: 'lines', x: xs, y: ema200, name: 'EMA200', line: { color: 'rgba(147,197,253,0.95)', width: 1 }, hovertemplate: '%{x}<br>%{y:.6f}<extra>EMA200</extra>' });
+
+        const rsi14 = _rsi14Arr(close, 14);
+        layout.yaxis = { ...layout.yaxis, domain: [0.28, 1] };
+        layout.yaxis2 = { domain: [0, 0.22], gridcolor: 'rgba(255,255,255,0.06)', title: 'RSI14' };
+        layout.xaxis = { ...layout.xaxis, domain: [0, 1], rangeslider: { visible: false } };
+        layout.xaxis2 = { domain: [0, 1], overlaying: 'x', anchor: 'y2', matches: 'x', showgrid: false, showticklabels: false };
+        traces.push({ type: 'scatter', mode: 'lines', x: xs, y: rsi14, name: 'RSI14', yaxis: 'y2', xaxis: 'x2', line: { color: 'rgba(251,191,36,0.95)', width: 1 }, hovertemplate: '%{x}<br>%{y:.2f}<extra>RSI14</extra>' });
+
+        try {
+          layout.shapes.push({ type: 'line', xref: 'paper', yref: 'y2', x0: 0, x1: 1, y0: 30, y1: 30, line: { color: 'rgba(148,163,184,0.55)', width: 1, dash: 'dot' } });
+          layout.shapes.push({ type: 'line', xref: 'paper', yref: 'y2', x0: 0, x1: 1, y0: 70, y1: 70, line: { color: 'rgba(148,163,184,0.55)', width: 1, dash: 'dot' } });
+        } catch (e) {}
+      }
+    } catch (e) {}
 
     const latest = _triLatestMap[contract];
     const h = latest ? (latest.hourly || {}) : {};
+
+    // 三周期信号图标：仅在 1H 图上显示
+    try {
+      if (tf === '1h' && xs && xs.length) {
+        const xLast = xs[xs.length - 1];
+        const hiLast = (high && high.length) ? Number(high[high.length - 1]) : null;
+        const loLast = (low && low.length) ? Number(low[low.length - 1]) : null;
+        const yShift = (hiLast !== null && hiLast !== undefined) ? (Math.abs(hiLast) * 0.002 + 1e-9) : 0;
+
+        const setup = String(h.setup || 'none');
+        const sig = String(h.signal || 'none');
+
+        const setupSide = (setup === 'setup_short') ? 'short' : ((setup === 'setup_long') ? 'long' : 'none');
+        const sigSide = (sig === 'short') ? 'short' : ((sig === 'long') ? 'long' : 'none');
+
+        if (setupSide !== 'none' && hiLast !== null && loLast !== null) {
+          const color = (setupSide === 'short') ? 'rgba(239,68,68,0.95)' : 'rgba(34,197,94,0.95)';
+          const y = (setupSide === 'short') ? (loLast - yShift) : (hiLast + yShift);
+          layout.annotations.push({
+            x: xLast,
+            y,
+            text: `1H Setup`,
+            showarrow: true,
+            arrowhead: 2,
+            ax: 0,
+            ay: (setupSide === 'short') ? 18 : -18,
+            bgcolor: color,
+            bordercolor: 'rgba(0,0,0,0)',
+            font: { color: '#0b1220', size: 10 },
+            opacity: 0.95
+          });
+        }
+
+        if (sigSide !== 'none' && hiLast !== null && loLast !== null) {
+          const color = (sigSide === 'short') ? 'rgba(239,68,68,0.95)' : 'rgba(34,197,94,0.95)';
+          const y = (sigSide === 'short') ? (loLast - 2 * yShift) : (hiLast + 2 * yShift);
+          layout.annotations.push({
+            x: xLast,
+            y,
+            text: `1H 执行`,
+            showarrow: true,
+            arrowhead: 2,
+            ax: 0,
+            ay: (sigSide === 'short') ? 18 : -18,
+            bgcolor: color,
+            bordercolor: 'rgba(0,0,0,0)',
+            font: { color: '#0b1220', size: 10 },
+            opacity: 0.95
+          });
+        }
+      }
+    } catch (e) {}
+
     if (tf === '1h' && h && (h.signal === 'long' || h.signal === 'short') && h.entry && h.sl && h.tp) {
       const yEntry = Number(h.entry);
       const ySl = Number(h.sl);
@@ -1664,7 +2331,629 @@
       document.getElementById('triChartStatus').textContent = `已加载 ${items.length} 根K线`;
     }
 
-    Plotly.newPlot('triChart', traces, layout, { responsive: true, displayModeBar: true });
+    Plotly.newPlot('triChart', traces, layout, { responsive: true, displayModeBar: true, scrollZoom: true });
+  }
+
+  let _mpLatestMap = {};
+  let _mpAllItems = [];
+  let _mpPage = 1;
+  let _mpPageSize = 20;
+
+  function _mpItemPriority(x) {
+    try {
+      const trig = (x && x.trigger) ? x.trigger : {};
+      const pre = (x && x.prealert) ? x.prealert : {};
+      const trigState = String(trig.state || 'none');
+      const preState = String(pre.state || 'none');
+      const hasTrig = trigState && trigState !== 'none';
+      const hasPre = preState && preState !== 'none';
+      if (hasTrig) return 2;
+      if (hasPre) return 1;
+      return 0;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  function _renderMpTablePage() {
+    const tb = document.querySelector('#mpTable tbody');
+    if (tb) tb.innerHTML = '';
+
+    const infoEl = document.getElementById('mpPageInfo');
+
+    const items = Array.isArray(_mpAllItems) ? _mpAllItems : [];
+    const pageSize = Math.max(1, Number(_mpPageSize) || 50);
+    const total = items.length;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    _mpPage = Math.min(Math.max(1, Number(_mpPage) || 1), totalPages);
+
+    const start = (_mpPage - 1) * pageSize;
+    const end = Math.min(total, start + pageSize);
+    const slice = items.slice(start, end);
+
+    function _fmt(v) {
+      if (v === null || v === undefined) return '—';
+      const n = Number(v);
+      if (!isFinite(n)) return '—';
+      return n.toFixed(6).replace(/0+$/,'').replace(/\.$/,'');
+    }
+
+    function _fmt2(v) {
+      if (v === null || v === undefined) return '—';
+      const n = Number(v);
+      if (!isFinite(n)) return '—';
+      return n.toFixed(2);
+    }
+
+    (slice || []).forEach(x => {
+      const tr = document.createElement('tr');
+      tr.className = 'hover:bg-white/5 cursor-pointer';
+
+      const side = x.side || '—';
+      const env = x.env || {};
+      const pre = x.prealert || {};
+      const trig = x.trigger || {};
+      const reason = (x.reasons && x.reasons.length) ? x.reasons.slice(0, 3).join(' | ') : '—';
+
+      tr.innerHTML = `
+        <td class="py-2 font-semibold text-gray-100">${x.contract}</td>
+        <td class="py-2">${_pill(side, side === 'long' ? 'pos' : (side === 'short' ? 'neg' : 'neu'))}</td>
+        <td class="py-2">${_pill(env.state || '—', (env.state === 'long_only') ? 'pos' : ((env.state === 'short_only') ? 'neg' : 'neu'))}</td>
+        <td class="py-2">${_pill(pre.state || 'none', pre.state === 'pre_long' ? 'pos' : (pre.state === 'pre_short' ? 'neg' : 'neu'))}</td>
+        <td class="py-2">${_pill(trig.state || 'none', trig.state === 'trigger_long' ? 'pos' : (trig.state === 'trigger_short' ? 'neg' : 'neu'))}</td>
+        <td class="py-2">${_fmt(x.entry)}</td>
+        <td class="py-2">${_fmt2(x.sl)}</td>
+        <td class="py-2">${_fmt2(x.tp1)}</td>
+        <td class="py-2">${_fmt2(x.tp2)}</td>
+        <td class="py-2 muted">${reason || '—'}</td>
+      `;
+
+      tr.addEventListener('click', () => {
+        const sel = document.getElementById('mpContract');
+        if (sel) sel.value = x.contract;
+        const tfSel = document.getElementById('mpTf');
+        if (tfSel) tfSel.value = (_mpStrategy === 'B') ? '4h' : '1h';
+        loadMpChart();
+      });
+
+      if (tb) tb.appendChild(tr);
+    });
+
+    if (infoEl) infoEl.textContent = `第 ${_mpPage}/${totalPages} 页（${start + 1}-${end} / ${total}）`;
+
+    const prevBtn = document.getElementById('mpPagePrev');
+    const nextBtn = document.getElementById('mpPageNext');
+    if (prevBtn) prevBtn.disabled = (_mpPage <= 1);
+    if (nextBtn) nextBtn.disabled = (_mpPage >= totalPages);
+  }
+
+  function _rebuildMpContractOptions(items) {
+    const sel = document.getElementById('mpContract');
+    if (!sel) return;
+
+    const prev = sel.value || '';
+    const contracts = [];
+    (items || []).forEach(x => {
+      if (!x || !x.contract) return;
+      contracts.push(String(x.contract));
+    });
+
+    const uniq = Array.from(new Set(contracts)).sort((a, b) => a.localeCompare(b));
+    if (!uniq.length) return;
+
+    sel.innerHTML = '';
+    uniq.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c;
+      opt.textContent = c;
+      sel.appendChild(opt);
+    });
+
+    sel.value = uniq.includes(prev) ? prev : uniq[0];
+  }
+
+  function _rebuildMpTfOptions() {
+    const sel = document.getElementById('mpTf');
+    if (!sel) return;
+    const prev = sel.value || '';
+    sel.innerHTML = '';
+    if (_mpStrategy === 'B') {
+      const o1 = document.createElement('option');
+      o1.value = '4h';
+      o1.textContent = '4H';
+      sel.appendChild(o1);
+      const o2 = document.createElement('option');
+      o2.value = '1d';
+      o2.textContent = '1D';
+      sel.appendChild(o2);
+      sel.value = (prev === '1d') ? '1d' : '4h';
+      return;
+    }
+    const o1 = document.createElement('option');
+    o1.value = '1h';
+    o1.textContent = '1H';
+    sel.appendChild(o1);
+    const o2 = document.createElement('option');
+    o2.value = '15m';
+    o2.textContent = '15M';
+    sel.appendChild(o2);
+    sel.value = (prev === '15m') ? '15m' : '1h';
+  }
+
+  function setMpStrategy(st) {
+    _mpStrategy = (st === 'B') ? 'B' : 'A';
+    if (mpBtnA && mpBtnB) {
+      if (_mpStrategy === 'A') {
+        mpBtnA.classList.add('active');
+        mpBtnB.classList.remove('active');
+      } else {
+        mpBtnB.classList.add('active');
+        mpBtnA.classList.remove('active');
+      }
+    }
+
+    const desc = document.getElementById('mpDesc');
+    const title = document.getElementById('mpTableTitle');
+    const hint = document.getElementById('mpTableHint');
+    const chartHint = document.getElementById('mpChartHint');
+    const colEnv = document.getElementById('mpColEnv');
+    const colPre = document.getElementById('mpColPre');
+    const colTrig = document.getElementById('mpColTrig');
+
+    if (_mpStrategy === 'B') {
+      if (desc) desc.innerHTML = `
+        <div class="font-semibold text-gray-200">策略B（波段远航）规则</div>
+        <div class="mt-1">
+          主周期：<span class="font-semibold">1D</span>；入场参考：<span class="font-semibold">4H</span>。
+        </div>
+        <div class="mt-1">
+          1) <span class="font-semibold">环境（1D）</span>：计算 <span class="font-semibold">SMA(10)</span>、<span class="font-semibold">SMA(30)</span> 与 <span class="font-semibold">ADX(14)</span>。
+          <span class="font-semibold">long_only</span>：SMA10&gt;SMA30 且 ADX&gt;25（趋势强，寻找做多）；
+          <span class="font-semibold">short_only</span>：SMA10&lt;SMA30 且 ADX&gt;25（趋势强，寻找做空）。
+        </div>
+        <div class="mt-1">
+          2) <span class="font-semibold">预警（1D）</span>：价格接近 SMA10（相对差距 ≤0.9%）。做多：<span class="font-semibold">Price≥SMA10</span> 且 (Price−SMA10)/SMA10≤0.009；做空：<span class="font-semibold">Price≤SMA10</span> 且 (SMA10−Price)/SMA10≤0.009。
+        </div>
+        <div class="mt-1">
+          3) <span class="font-semibold">触发（4H）</span>：出现以下任一动作则触发 <span class="font-semibold">[波段回踩入场]</span> 信号。
+          <div class="mt-1">
+            <span class="font-semibold">MACD 动能反转（Histogram 缩短）</span>：
+            做多：Histogram 在 0 轴下方，且当前柱子绝对值小于前一根（|Hist0|&lt;|Hist-1|）；
+            做空：Histogram 在 0 轴上方，且当前柱子绝对值小于前一根。
+          </div>
+          <div class="mt-1">
+            <span class="font-semibold">吞没形态（Engulfing）</span>：
+            做多（Bullish Engulfing）：当前 4H 阳线收盘价突破前一根阴线高点；
+            做空（Bearish Engulfing）：当前 4H 阴线收盘价跌破前一根阳线低点。
+          </div>
+        </div>
+        <div class="mt-2">
+          <span class="font-semibold">风控</span>：Entry=触发周期（4H）最新收盘价；
+          SL=Entry±max(2.0×1D_ATR, 1.2×4H_ATR)；
+          TP1=1:2，TP2=1:3（R=|Entry-SL|）。
+        </div>
+        <div class="mt-2 text-xs">
+          说明：<span class="font-semibold">none</span> 表示未满足该步骤条件。本页面仅用于研究，不构成投资建议。
+        </div>
+      `;
+      if (title) title.textContent = '策略B 信号列表';
+      if (hint) hint.textContent = '点击某一行将加载右侧图表（1D/4H），并标注 Entry/SL/TP1/TP2（如已触发）。';
+      if (chartHint) chartHint.textContent = '默认显示 4H。你也可以切换到 1D 查看环境背景。';
+      if (colEnv) colEnv.textContent = '1D 环境';
+      if (colPre) colPre.textContent = '1D 预警';
+      if (colTrig) colTrig.textContent = '4H 触发';
+    } else {
+      if (desc) desc.innerHTML = `
+        <div class="font-semibold text-gray-200">策略A（短线）规则</div>
+        <div class="mt-1">
+          1) <span class="font-semibold">环境（1H）</span>：EMA200 定方向。
+          Close&gt;EMA200 → <span class="font-semibold">long_only</span>；Close&lt;EMA200 → <span class="font-semibold">short_only</span>。
+        </div>
+        <div class="mt-1">
+          2) <span class="font-semibold">预警（1H）</span>：TTM Squeeze ON + RSI 回钩。
+          Squeeze ON：<span class="font-semibold">BB_Width &lt; KC_Width</span>。
+          <span class="font-semibold">pre_long</span>（Bullish Hook）：RSI(14) 前一根&lt;35，且当前 RSI&gt;前一根，且当前 RSI≥40；
+          <span class="font-semibold">pre_short</span>（Bearish Hook）：RSI(14) 前一根&gt;65，且当前 RSI&lt;前一根，且当前 RSI≤60。
+        </div>
+        <div class="mt-1">
+          <span class="font-semibold">TTM Squeeze（1H）计算</span>：
+          <span class="font-semibold">布林带 BB(20,2.0)</span>：
+          BB_Mid=SMA20，BB_Upper=BB_Mid+2×Std20，BB_Lower=BB_Mid-2×Std20。
+          <span class="font-semibold">肯特纳通道 KC(20,1.5)</span>：
+          KC_Mid=EMA20，KC_Upper=KC_Mid+1.5×ATR20，KC_Lower=KC_Mid-1.5×ATR20。
+          <span class="font-semibold">Squeeze ON</span>：BB_Width&lt;KC_Width（即 (BB_Upper-BB_Lower)&lt;(KC_Upper-KC_Lower)）。
+        </div>
+        <div class="mt-1">
+          3) <span class="font-semibold">触发（15M）</span>：突破近 3 根已收盘K线高/低。
+          <span class="font-semibold">trigger_long</span>：收盘价&gt;过去3根最高；<span class="font-semibold">trigger_short</span>：收盘价&lt;过去3根最低。
+        </div>
+        <div class="mt-2">
+          <span class="font-semibold">风控</span>：Entry=触发周期最新收盘价；SL=Entry±1.5×ATR（1H）；TP1/TP2 按 1:2 / 1:3（R=|Entry-SL|）。
+        </div>
+        <div class="mt-2 text-xs">
+          说明：<span class="font-semibold">none</span> 表示未满足该步骤条件。本页面仅用于研究，不构成投资建议。
+        </div>
+      `;
+      if (title) title.textContent = '策略A 信号列表';
+      if (hint) hint.textContent = '点击某一行将加载右侧图表，并标注 Entry/SL/TP1/TP2（如已触发）。';
+      if (chartHint) chartHint.textContent = '默认显示主周期。你也可以切换到触发周期查看结构。';
+      if (colEnv) colEnv.textContent = '1H 环境';
+      if (colPre) colPre.textContent = '1H 预警';
+      if (colTrig) colTrig.textContent = '15M 触发';
+    }
+
+    _rebuildMpTfOptions();
+    loadMpMatrix();
+  }
+
+  async function loadMpMatrix() {
+    const statusEl = document.getElementById('mpStatus');
+    if (statusEl) statusEl.textContent = '更新中…';
+    const url = (_mpStrategy === 'B') ? '/api/master_b/matrix' : '/api/master_a/matrix';
+    const data = await fetchJson(url);
+    const items = (data && data.items) ? data.items : [];
+    const errors = (data && data.errors) ? data.errors : [];
+
+    _rebuildMpContractOptions(items);
+    _rebuildMpTfOptions();
+    _mpLatestMap = {};
+    items.forEach(x => { _mpLatestMap[x.contract] = x; });
+
+    const sorted = (items || []).slice().sort((a, b) => {
+      const pa = _mpItemPriority(a);
+      const pb = _mpItemPriority(b);
+      if (pb !== pa) return pb - pa;
+      const ca = String((a && a.contract) ? a.contract : '');
+      const cb = String((b && b.contract) ? b.contract : '');
+      return ca.localeCompare(cb);
+    });
+
+    _mpAllItems = sorted;
+    _mpPage = 1;
+    _renderMpTablePage();
+
+    if (statusEl) {
+      const base = errors && errors.length ? (`部分失败：${errors.slice(0,2).join(' ; ')}`) : `已更新：${items.length} 个合约`;
+      const trigN = sorted.filter(x => _mpItemPriority(x) === 2).length;
+      const preN = sorted.filter(x => _mpItemPriority(x) === 1).length;
+      statusEl.textContent = `${base} | 触发=${trigN} 预警=${preN}`;
+    }
+  }
+
+  async function loadMpChart() {
+    const contractEl = document.getElementById('mpContract');
+    const tfEl = document.getElementById('mpTf');
+    const contract = (contractEl && contractEl.value) ? contractEl.value : 'BTC_USDT';
+    const tf = (tfEl && tfEl.value) ? tfEl.value : ((_mpStrategy === 'B') ? '4h' : '1h');
+
+    const statusEl = document.getElementById('mpChartStatus');
+    if (statusEl) statusEl.textContent = '加载中…';
+
+    // If matrix hasn't been loaded yet (or stale), latest states may be missing and annotations won't show.
+    // Auto-refresh matrix once for the current strategy.
+    try {
+      if (!_mpLatestMap || !_mpLatestMap[contract]) {
+        await loadMpMatrix();
+      }
+    } catch (e) {}
+
+    const base = (_mpStrategy === 'B') ? '/api/master_b/candles' : '/api/master_a/candles';
+    const url = `${base}?contract=${encodeURIComponent(contract)}&tf=${encodeURIComponent(tf)}&limit=260`;
+    const data = await fetchJson(url);
+    const items = (data && data.items) ? data.items : [];
+    const errs = (data && data.errors) ? data.errors : [];
+    if (errs && errs.length) {
+      if (statusEl) statusEl.textContent = errs[0];
+      return;
+    }
+
+    const xs = items.map(x => new Date((x.t || 0) * 1000));
+    const open = items.map(x => x.o);
+    const high = items.map(x => x.h);
+    const low = items.map(x => x.l);
+    const close = items.map(x => x.c);
+
+    const traces = [{
+      type: 'candlestick',
+      x: xs,
+      open, high, low, close,
+      name: contract,
+      increasing: { line: { color: '#22c55e' } },
+      decreasing: { line: { color: '#ef4444' } }
+    }];
+
+    // 指标线（可点击图例开关）
+    try {
+      // Strategy A (1H): EMA200 + BB/KC for squeeze visualization
+      if (_mpStrategy === 'A' && tf === '1h') {
+        const ema200 = _emaArr(close, 200);
+        traces.push({
+          type: 'scatter',
+          mode: 'lines',
+          x: xs,
+          y: ema200,
+          name: 'EMA200',
+          line: { color: 'rgba(147,197,253,0.95)', width: 1 },
+          hoverinfo: 'x+y'
+        });
+
+        const sma20 = _smaArr(close, 20);
+        const std20 = _stdArr(close, 20);
+        const bbUpper = sma20.map((m, i) => (m === null || std20[i] === null) ? null : (Number(m) + 2.0 * Number(std20[i])));
+        const bbLower = sma20.map((m, i) => (m === null || std20[i] === null) ? null : (Number(m) - 2.0 * Number(std20[i])));
+        traces.push({
+          type: 'scatter',
+          mode: 'lines',
+          x: xs,
+          y: bbUpper,
+          name: 'BB Upper (20,2)',
+          line: { color: 'rgba(168,85,247,0.65)', width: 1 },
+          hoverinfo: 'x+y'
+        });
+        traces.push({
+          type: 'scatter',
+          mode: 'lines',
+          x: xs,
+          y: bbLower,
+          name: 'BB Lower (20,2)',
+          line: { color: 'rgba(168,85,247,0.65)', width: 1 },
+          hoverinfo: 'x+y'
+        });
+
+        const ema20 = _emaArr(close, 20);
+        const atr20 = _atrArr(high, low, close, 20);
+        const kcUpper = ema20.map((m, i) => (m === null || atr20[i] === null) ? null : (Number(m) + 1.5 * Number(atr20[i])));
+        const kcLower = ema20.map((m, i) => (m === null || atr20[i] === null) ? null : (Number(m) - 1.5 * Number(atr20[i])));
+        traces.push({
+          type: 'scatter',
+          mode: 'lines',
+          x: xs,
+          y: kcUpper,
+          name: 'KC Upper (20,1.5)',
+          line: { color: 'rgba(56,189,248,0.6)', width: 1, dash: 'dot' },
+          hoverinfo: 'x+y'
+        });
+        traces.push({
+          type: 'scatter',
+          mode: 'lines',
+          x: xs,
+          y: kcLower,
+          name: 'KC Lower (20,1.5)',
+          line: { color: 'rgba(56,189,248,0.6)', width: 1, dash: 'dot' },
+          hoverinfo: 'x+y'
+        });
+      }
+
+      // RSI lower panel: show on Strategy A 1H and Strategy B 1D
+      if ((_mpStrategy === 'A' && tf === '1h') || (_mpStrategy === 'B' && tf === '1d')) {
+        const rsi14 = _rsi14Arr(close, 14);
+        traces.push({
+          type: 'scatter',
+          mode: 'lines',
+          x: xs,
+          y: rsi14,
+          name: 'RSI14',
+          yaxis: 'y2',
+          line: { color: 'rgba(251,191,36,0.95)', width: 1 },
+          hoverinfo: 'x+y'
+        });
+      }
+
+      // Strategy B (4H): MACD momentum (Histogram + MACD/Signal)
+      if (_mpStrategy === 'B' && tf === '4h') {
+        const m = _macdArr(close, 12, 26, 9);
+        const hist = (m && m.hist) ? m.hist : [];
+        const macd = (m && m.macd) ? m.macd : [];
+        const sig = (m && m.signal) ? m.signal : [];
+        const histColors = (hist || []).map(v => {
+          const n = Number(v);
+          if (!isFinite(n)) return 'rgba(148,163,184,0.35)';
+          return (n >= 0) ? 'rgba(34,197,94,0.65)' : 'rgba(239,68,68,0.65)';
+        });
+        traces.push({
+          type: 'bar',
+          x: xs,
+          y: hist,
+          name: 'MACD Hist (12,26,9)',
+          yaxis: 'y2',
+          marker: { color: histColors },
+          hoverinfo: 'x+y'
+        });
+        traces.push({
+          type: 'scatter',
+          mode: 'lines',
+          x: xs,
+          y: macd,
+          name: 'DIF',
+          yaxis: 'y2',
+          line: { color: 'rgba(239,68,68,0.90)', width: 1 },
+          hoverinfo: 'x+y'
+        });
+        traces.push({
+          type: 'scatter',
+          mode: 'lines',
+          x: xs,
+          y: sig,
+          name: 'DEA',
+          yaxis: 'y2',
+          line: { color: 'rgba(59,130,246,0.95)', width: 1 },
+          hoverinfo: 'x+y'
+        });
+      }
+
+      if (_mpStrategy === 'B' && tf === '1d') {
+        const sma10 = _smaArr(close, 10);
+        const sma30 = _smaArr(close, 30);
+        traces.push({
+          type: 'scatter',
+          mode: 'lines',
+          x: xs,
+          y: sma10,
+          name: 'SMA10',
+          line: { color: 'rgba(34,197,94,0.75)', width: 1 },
+          hoverinfo: 'x+y'
+        });
+        traces.push({
+          type: 'scatter',
+          mode: 'lines',
+          x: xs,
+          y: sma30,
+          name: 'SMA30',
+          line: { color: 'rgba(239,68,68,0.65)', width: 1 },
+          hoverinfo: 'x+y'
+        });
+      }
+    } catch (e) {}
+
+    const layout = {
+      margin: { l: 40, r: 20, t: 30, b: 40 },
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      xaxis: { gridcolor: 'rgba(255,255,255,0.06)' },
+      yaxis: { gridcolor: 'rgba(255,255,255,0.06)' },
+      font: { color: 'rgba(255,255,255,0.85)' },
+      title: `${contract} / ${tf}`,
+      dragmode: 'pan',
+      shapes: [],
+      annotations: [],
+      showlegend: true,
+      legend: { orientation: 'h', y: -0.25 }
+    };
+
+    // RSI lower panel layout (only when RSI trace exists)
+    try {
+      const wantRsi = ((_mpStrategy === 'A' && tf === '1h') || (_mpStrategy === 'B' && tf === '1d'));
+      const wantMacd = (_mpStrategy === 'B' && tf === '4h');
+      if (wantRsi || wantMacd) {
+        layout.yaxis = { gridcolor: 'rgba(255,255,255,0.06)', domain: [0.28, 1] };
+        if (wantRsi) {
+          layout.yaxis2 = { gridcolor: 'rgba(255,255,255,0.06)', domain: [0, 0.22], range: [0, 100], title: 'RSI14' };
+        } else {
+          layout.yaxis2 = { gridcolor: 'rgba(255,255,255,0.06)', domain: [0, 0.22], title: 'MACD' };
+        }
+        layout.xaxis = { gridcolor: 'rgba(255,255,255,0.06)', rangeslider: { visible: false } };
+      }
+    } catch (e) {}
+
+    // RSI guide lines: 30 / 70
+    try {
+      const wantRsi = ((_mpStrategy === 'A' && tf === '1h') || (_mpStrategy === 'B' && tf === '1d'));
+      if (wantRsi) {
+        layout.shapes.push({ type: 'line', xref: 'paper', yref: 'y2', x0: 0, x1: 1, y0: 30, y1: 30, line: { color: 'rgba(148,163,184,0.55)', width: 1, dash: 'dot' } });
+        layout.shapes.push({ type: 'line', xref: 'paper', yref: 'y2', x0: 0, x1: 1, y0: 70, y1: 70, line: { color: 'rgba(148,163,184,0.55)', width: 1, dash: 'dot' } });
+      }
+    } catch (e) {}
+
+    const latest = (_mpLatestMap && _mpLatestMap[contract]) ? _mpLatestMap[contract] : null;
+    if (latest && (latest.side === 'long' || latest.side === 'short') && latest.entry && latest.sl && latest.tp1 && latest.tp2) {
+      const x0 = xs.length ? xs[0] : null;
+      const x1 = xs.length ? xs[xs.length - 1] : null;
+      if (x0 && x1) {
+        layout.shapes.push({ type: 'line', x0, x1, y0: Number(latest.entry), y1: Number(latest.entry), line: { color: 'rgba(59,130,246,0.9)', width: 1, dash: 'dot' } });
+        layout.shapes.push({ type: 'line', x0, x1, y0: Number(latest.sl), y1: Number(latest.sl), line: { color: 'rgba(239,68,68,0.9)', width: 1 } });
+        layout.shapes.push({ type: 'line', x0, x1, y0: Number(latest.tp1), y1: Number(latest.tp1), line: { color: 'rgba(34,197,94,0.9)', width: 1 } });
+        layout.shapes.push({ type: 'line', x0, x1, y0: Number(latest.tp2), y1: Number(latest.tp2), line: { color: 'rgba(34,197,94,0.55)', width: 1, dash: 'dash' } });
+      }
+    }
+
+    // 标注 PRE / TRIG（仅在对应周期图上显示）
+    try {
+      const pre = latest ? (latest.prealert || {}) : {};
+      const trig = latest ? (latest.trigger || {}) : {};
+      const preOk = (pre.state === 'pre_long' || pre.state === 'pre_short');
+      const trigOk = (trig.state === 'trigger_long' || trig.state === 'trigger_short');
+      const showPre = preOk && ((_mpStrategy === 'A' && tf === '1h') || (_mpStrategy === 'B' && tf === '1d'));
+      const showTrig = trigOk && ((_mpStrategy === 'A' && tf === '15m') || (_mpStrategy === 'B' && tf === '4h'));
+
+      // Prefer direction from the actual marker state; fallback to env side
+      const stateSide = (st) => {
+        const s = String(st || '');
+        if (s.endsWith('_short') || s === 'short') return 'short';
+        if (s.endsWith('_long') || s === 'long') return 'long';
+        return 'none';
+      };
+      const sideFromEnv = latest ? String(latest.side || '') : 'none';
+      const markerSide = (showTrig ? stateSide(trig.state) : (showPre ? stateSide(pre.state) : 'none'));
+      const side = (markerSide !== 'none') ? markerSide : ((sideFromEnv === 'long' || sideFromEnv === 'short') ? sideFromEnv : 'none');
+
+      const xLast = xs.length ? xs[xs.length - 1] : null;
+      if (xLast) {
+        const hiLast = (high && high.length) ? Number(high[high.length - 1]) : null;
+        const loLast = (low && low.length) ? Number(low[low.length - 1]) : null;
+        const yBase = (side === 'short') ? (loLast !== null ? loLast : null) : ((side === 'long') ? (hiLast !== null ? hiLast : null) : (hiLast !== null ? hiLast : loLast));
+        const yShift = (yBase !== null && yBase !== undefined) ? (Math.abs(yBase) * 0.002 + 1e-9) : 0;
+        const yPre = (yBase !== null) ? ((side === 'short') ? (yBase - yShift) : (yBase + yShift)) : null;
+        const yTrig = (yBase !== null) ? ((side === 'short') ? (yBase - 2 * yShift) : (yBase + 2 * yShift)) : null;
+
+        const color = (side === 'short') ? 'rgba(239,68,68,0.95)' : 'rgba(34,197,94,0.95)';
+
+        if (showPre && yPre !== null) {
+          layout.annotations.push({
+            x: xLast,
+            y: yPre,
+            text: `MP PRE`,
+            showarrow: true,
+            arrowhead: 2,
+            ax: 0,
+            ay: (side === 'short') ? 18 : -18,
+            bgcolor: color,
+            bordercolor: 'rgba(0,0,0,0)',
+            font: { color: '#0b1220', size: 10 },
+            opacity: 0.95
+          });
+        }
+        if (showTrig && yTrig !== null) {
+          layout.annotations.push({
+            x: xLast,
+            y: yTrig,
+            text: `MP TRIG`,
+            showarrow: true,
+            arrowhead: 2,
+            ax: 0,
+            ay: (side === 'short') ? 18 : -18,
+            bgcolor: color,
+            bordercolor: 'rgba(0,0,0,0)',
+            font: { color: '#0b1220', size: 10 },
+            opacity: 0.95
+          });
+        }
+      }
+    } catch (e) {}
+
+    Plotly.newPlot('mpChart', traces, layout, { responsive: true, displayModeBar: true, scrollZoom: true });
+
+    // 状态栏显示最新指标值（如存在）
+    try {
+      let extra = '';
+      if (_mpStrategy === 'A' && tf === '1h') {
+        const ema200 = _emaArr(close, 200);
+        const v = ema200 && ema200.length ? ema200[ema200.length - 1] : null;
+        if (v !== null && v !== undefined && isFinite(Number(v))) extra = ` | EMA200=${Number(v).toFixed(6).replace(/0+$/,'').replace(/\.$/,'')}`;
+      }
+      if (_mpStrategy === 'B' && tf === '1d') {
+        const sma10 = _smaArr(close, 10);
+        const sma30 = _smaArr(close, 30);
+        const v10 = sma10 && sma10.length ? sma10[sma10.length - 1] : null;
+        const v30 = sma30 && sma30.length ? sma30[sma30.length - 1] : null;
+        const p10 = (v10 !== null && v10 !== undefined && isFinite(Number(v10))) ? `SMA10=${Number(v10).toFixed(6).replace(/0+$/,'').replace(/\.$/,'')}` : '';
+        const p30 = (v30 !== null && v30 !== undefined && isFinite(Number(v30))) ? `SMA30=${Number(v30).toFixed(6).replace(/0+$/,'').replace(/\.$/,'')}` : '';
+        const p = [p10, p30].filter(Boolean).join(' ');
+        if (p) extra = ` | ${p}`;
+      }
+      if ((_mpStrategy === 'A' && tf === '1h') || (_mpStrategy === 'B' && tf === '1d')) {
+        const rsi14 = _rsi14Arr(close, 14);
+        const vr = rsi14 && rsi14.length ? rsi14[rsi14.length - 1] : null;
+        if (vr !== null && vr !== undefined && isFinite(Number(vr))) extra += `${extra ? '' : ' | '}RSI14=${Number(vr).toFixed(2)}`;
+      }
+      if (_mpStrategy === 'B' && tf === '4h') {
+        const m = _macdArr(close, 12, 26, 9);
+        const hist = (m && m.hist && m.hist.length) ? m.hist[m.hist.length - 1] : null;
+        if (hist !== null && hist !== undefined && isFinite(Number(hist))) extra += `${extra ? '' : ' | '}Hist=${Number(hist).toFixed(6).replace(/0+$/,'').replace(/\.$/,'')}`;
+      }
+      if (statusEl) statusEl.textContent = `已加载 ${items.length} 根K线${extra}`;
+    } catch (e) {
+      if (statusEl) statusEl.textContent = `已加载 ${items.length} 根K线`;
+    }
   }
 
   function _sentCell(s) {
@@ -1770,6 +3059,10 @@
     document.getElementById('pushMacdMonitorEnabled').checked = (s.push_macd_monitor_enabled === undefined) ? true : !!s.push_macd_monitor_enabled;
     document.getElementById('pushSignalEnabled').checked = (s.push_signal_enabled === undefined) ? true : !!s.push_signal_enabled;
     document.getElementById('pushTriSignalEnabled').checked = (s.push_tri_signal_enabled === undefined) ? true : !!s.push_tri_signal_enabled;
+    const aEl = document.getElementById('pushMasterAEnabled');
+    if (aEl) aEl.checked = (s.push_master_a_enabled === undefined) ? true : !!s.push_master_a_enabled;
+    const bEl = document.getElementById('pushMasterBEnabled');
+    if (bEl) bEl.checked = (s.push_master_b_enabled === undefined) ? true : !!s.push_master_b_enabled;
   }
 
   async function saveNewsSettings() {
@@ -1783,6 +3076,8 @@
       push_macd_monitor_enabled: !!document.getElementById('pushMacdMonitorEnabled').checked,
       push_signal_enabled: !!document.getElementById('pushSignalEnabled').checked,
       push_tri_signal_enabled: !!document.getElementById('pushTriSignalEnabled').checked,
+      push_master_a_enabled: !!document.getElementById('pushMasterAEnabled').checked,
+      push_master_b_enabled: !!document.getElementById('pushMasterBEnabled').checked,
     };
     document.getElementById('newsSettingsStatus').textContent = '保存中…';
     const r = await fetch('/api/news/settings', {

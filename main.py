@@ -154,10 +154,28 @@ TRI_SIGNAL_CONTRACTS = (
 TRI_SIGNAL_CACHE_TTL_SEC = int(float(os.getenv("TRI_SIGNAL_CACHE_TTL_SEC", "60") or "60"))
 TRI_SIGNAL_MAX_WORKERS = int(float(os.getenv("TRI_SIGNAL_MAX_WORKERS", "3") or "3"))
 
+MASTER_A_ENABLED = os.getenv("MASTER_A_ENABLED", "1").strip() in ("1", "true", "True", "yes", "YES")
+MASTER_A_CONTRACTS = (os.getenv("MASTER_A_CONTRACTS", TRI_SIGNAL_CONTRACTS) or "").strip()
+MASTER_A_CACHE_TTL_SEC = int(float(os.getenv("MASTER_A_CACHE_TTL_SEC", "60") or "60"))
+MASTER_A_MAX_WORKERS = int(float(os.getenv("MASTER_A_MAX_WORKERS", "3") or "3"))
+
+MASTER_B_ENABLED = os.getenv("MASTER_B_ENABLED", "1").strip() in ("1", "true", "True", "yes", "YES")
+MASTER_B_CONTRACTS = (os.getenv("MASTER_B_CONTRACTS", MASTER_A_CONTRACTS) or "").strip()
+MASTER_B_CACHE_TTL_SEC = int(float(os.getenv("MASTER_B_CACHE_TTL_SEC", "60") or "60"))
+MASTER_B_MAX_WORKERS = int(float(os.getenv("MASTER_B_MAX_WORKERS", "3") or "3"))
+
 TRI_SIGNAL_PUSH_ENABLED = os.getenv("TRI_SIGNAL_PUSH_ENABLED", "0").strip() in ("1", "true", "True", "yes", "YES")
 TRI_SIGNAL_PUSH_INTERVAL_SEC = int(float(os.getenv("TRI_SIGNAL_PUSH_INTERVAL_SEC", "300") or "300"))
 TRI_SIGNAL_PUSH_COOLDOWN_SEC = int(float(os.getenv("TRI_SIGNAL_PUSH_COOLDOWN_SEC", "3600") or "3600"))
 TRI_SIGNAL_PUSH_ONLY_GRADE_A = os.getenv("TRI_SIGNAL_PUSH_ONLY_GRADE_A", "1").strip() in ("1", "true", "True", "yes", "YES")
+
+MASTER_A_PUSH_ENABLED = os.getenv("MASTER_A_PUSH_ENABLED", "0").strip() in ("1", "true", "True", "yes", "YES")
+MASTER_A_PUSH_INTERVAL_SEC = int(float(os.getenv("MASTER_A_PUSH_INTERVAL_SEC", "300") or "300"))
+MASTER_A_PUSH_COOLDOWN_SEC = int(float(os.getenv("MASTER_A_PUSH_COOLDOWN_SEC", "1800") or "1800"))
+
+MASTER_B_PUSH_ENABLED = os.getenv("MASTER_B_PUSH_ENABLED", "0").strip() in ("1", "true", "True", "yes", "YES")
+MASTER_B_PUSH_INTERVAL_SEC = int(float(os.getenv("MASTER_B_PUSH_INTERVAL_SEC", "300") or "300"))
+MASTER_B_PUSH_COOLDOWN_SEC = int(float(os.getenv("MASTER_B_PUSH_COOLDOWN_SEC", "1800") or "1800"))
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
@@ -311,6 +329,64 @@ def _db_init() -> None:
         except Exception:
             pass
 
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS master_a_push_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at INTEGER,
+                uniq TEXT,
+                contract TEXT,
+                side TEXT,
+                reasons TEXT,
+                entry REAL,
+                sl REAL,
+                tp1 REAL,
+                tp2 REAL,
+                atr REAL,
+                message TEXT,
+                ok INTEGER,
+                error TEXT
+            )
+            """
+        )
+        try:
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_master_a_push_history_uniq ON master_a_push_history(uniq)")
+        except Exception:
+            pass
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_master_a_push_history_contract ON master_a_push_history(contract, created_at)")
+        except Exception:
+            pass
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS master_b_push_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at INTEGER,
+                uniq TEXT,
+                contract TEXT,
+                side TEXT,
+                reasons TEXT,
+                entry REAL,
+                sl REAL,
+                tp1 REAL,
+                tp2 REAL,
+                atr REAL,
+                message TEXT,
+                ok INTEGER,
+                error TEXT
+            )
+            """
+        )
+        try:
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_master_b_push_history_uniq ON master_b_push_history(uniq)")
+        except Exception:
+            pass
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_master_b_push_history_contract ON master_b_push_history(contract, created_at)")
+        except Exception:
+            pass
+
         # 轻量迁移：push_history 缺字段时补齐
         ph_cols = [r[1] for r in cur.execute("PRAGMA table_info(news_push_history)").fetchall()]
         if "uniq" not in ph_cols:
@@ -348,6 +424,82 @@ def _db_init() -> None:
         except Exception:
             pass
         conn.commit()
+    finally:
+        conn.close()
+
+
+def _master_b_push_history_add(
+    uniq: str,
+    contract: str,
+    side: str,
+    reasons: List[str],
+    entry: Optional[float],
+    sl: Optional[float],
+    tp1: Optional[float],
+    tp2: Optional[float],
+    atr: Optional[float],
+    message: str,
+    ok: bool,
+    error: str,
+) -> None:
+    conn = _db_connect()
+    try:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO master_b_push_history(created_at, uniq, contract, side, reasons, entry, sl, tp1, tp2, atr, message, ok, error)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                int(time.time()),
+                uniq,
+                contract,
+                side,
+                json.dumps(reasons, ensure_ascii=False),
+                entry,
+                sl,
+                tp1,
+                tp2,
+                atr,
+                message,
+                1 if ok else 0,
+                error or "",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _master_b_has_uniq(uniq: str) -> bool:
+    uniq = (uniq or "").strip()
+    if not uniq:
+        return False
+    conn = _db_connect()
+    try:
+        row = conn.execute("SELECT 1 FROM master_b_push_history WHERE uniq=? LIMIT 1", (uniq,)).fetchone()
+        return bool(row)
+    finally:
+        conn.close()
+
+
+def _master_b_last_push_ts(contract: str, side: str) -> Optional[int]:
+    conn = _db_connect()
+    try:
+        row = conn.execute(
+            """
+            SELECT created_at FROM master_b_push_history
+            WHERE contract=? AND side=?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (contract, side),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            return int(row[0])
+        except Exception:
+            return None
     finally:
         conn.close()
 
@@ -490,8 +642,349 @@ def push_telegram_batch_recent(window_sec: int = 300, limit: int = 50, max_items
                 errors.append(str(e))
 
         return {"ok": ok, "pushed": pushed, "skipped": skipped, "errors": errors}
+    except Exception as e:
+        errors.append(str(e))
+        return {"ok": False, "pushed": pushed, "skipped": skipped, "errors": errors}
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _master_a_push_loop() -> None:
+    interval = max(120, min(24 * 3600, int(MASTER_A_PUSH_INTERVAL_SEC)))
+    first = True
+    while True:
+        if first:
+            time.sleep(interval)
+            first = False
+        try:
+            s = _news_settings()
+            bot_token = (s.get("tg_bot_token") or "").strip()
+            chat_id = (s.get("tg_chat_id") or "").strip()
+            enabled_mod = _setting_bool(s, "push_master_a_enabled", True)
+            if MASTER_A_PUSH_ENABLED and enabled_mod and bot_token and chat_id:
+                global _MASTER_A_PUSH_LAST_RUN_TS, _MASTER_A_PUSH_LAST_PUSH, _MASTER_A_PUSH_LAST_ERROR
+                _MASTER_A_PUSH_LAST_RUN_TS = int(time.time())
+                _MASTER_A_PUSH_LAST_ERROR = ""
+                _MASTER_A_PUSH_LAST_PUSH = push_tg_master_a(force=0)
+        except Exception as e:
+            try:
+                _MASTER_A_PUSH_LAST_ERROR = str(e)
+            except Exception:
+                pass
+        time.sleep(interval)
+
+
+def push_tg_master_b(force: int = 0) -> dict:
+    s = _news_settings()
+    bot_token = (s.get("tg_bot_token") or "").strip()
+    chat_id = (s.get("tg_chat_id") or "").strip()
+    if not bot_token or not chat_id:
+        return {"ok": False, "pushed": 0, "skipped": 0, "errors": ["未配置 Telegram Bot Token 或 Chat ID"]}
+
+    data = _MASTER_B_ENGINE.matrix()
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return {"ok": False, "pushed": 0, "skipped": 0, "errors": ["invalid master_b matrix"]}
+
+    now_ts = int(time.time())
+    bucket = int(now_ts / 300)
+
+    pushed = 0
+    skipped = 0
+    errors: List[str] = []
+
+    # 只推：已触发（4h trigger）
+    candidates: List[dict] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        trig = it.get("trigger") if isinstance(it.get("trigger"), dict) else {}
+        st = str(trig.get("state") or "none")
+        if st not in ("trigger_long", "trigger_short"):
+            continue
+        if not it.get("entry") or not it.get("sl") or not it.get("tp1") or not it.get("tp2"):
+            continue
+        candidates.append(it)
+
+    if not candidates:
+        return {"ok": True, "pushed": 0, "skipped": 0, "errors": []}
+
+    ts_txt = datetime.datetime.fromtimestamp(now_ts).strftime("%Y-%m-%d %H:%M")
+    header = f"<b>【策略B】触发信号</b>\n时间：{ts_txt}｜触发数：{len(candidates)}"
+    lines: List[str] = [header]
+
+    def _fmt(v: Any) -> str:
+        try:
+            if v is None:
+                return "—"
+            x = float(v)
+            if abs(x) >= 1000:
+                return f"{x:,.2f}"
+            return f"{x:.6g}"
+        except Exception:
+            return "—"
+
+    will_log: List[dict] = []
+    for it in candidates[:20]:
+        try:
+            contract = str(it.get("contract") or "").strip()
+            side = str(it.get("side") or "none")
+            if side not in ("long", "short"):
+                continue
+
+            uniq = f"master_b:{contract}:{side}:{bucket}"
+            if not force and _master_b_has_uniq(uniq):
+                skipped += 1
+                continue
+            if not force:
+                last_ts = _master_b_last_push_ts(contract, side)
+                if last_ts is not None and (now_ts - int(last_ts)) < int(MASTER_B_PUSH_COOLDOWN_SEC):
+                    skipped += 1
+                    continue
+
+            reasons = it.get("reasons") if isinstance(it.get("reasons"), list) else []
+            reasons = [str(x) for x in reasons if x]
+            rs_txt = " | ".join(reasons[:4])
+
+            entry = it.get("entry")
+            sl = it.get("sl")
+            tp1 = it.get("tp1")
+            tp2 = it.get("tp2")
+            atr = it.get("atr_1d") or it.get("atr_4h")
+
+            dir_txt = "做多" if side == "long" else "做空"
+            line = (
+                f"- {contract}\n"
+                f"  [策略类型] 策略B\n"
+                f"  [多空方向] {dir_txt}\n"
+                f"  [共振理由] {rs_txt or '—'}\n"
+                f"  [建议入场价] {_fmt(entry)}\n"
+                f"  [止损价] {_fmt(sl)}\n"
+                f"  [止盈价] TP1={_fmt(tp1)} TP2={_fmt(tp2)}"
+            )
+            if atr is not None:
+                line += f"\n  ATR={_fmt(atr)}"
+            lines.append(line)
+
+            will_log.append(
+                {
+                    "uniq": uniq,
+                    "contract": contract,
+                    "side": side,
+                    "reasons": reasons,
+                    "entry": _safe_float(entry),
+                    "sl": _safe_float(sl),
+                    "tp1": _safe_float(tp1),
+                    "tp2": _safe_float(tp2),
+                    "atr": _safe_float(atr),
+                }
+            )
+        except Exception:
+            skipped += 1
+
+    if not will_log:
+        return {"ok": True, "pushed": 0, "skipped": skipped, "errors": []}
+
+    msg = "\n".join(lines)
+    if len(msg) > 3500:
+        msg = msg[:3500] + "\n…(truncated)"
+
+    ok, err = _tg_send(bot_token=bot_token, chat_id=chat_id, text=msg, parse_mode="HTML")
+    for x in will_log:
+        try:
+            _master_b_push_history_add(
+                uniq=str(x.get("uniq") or ""),
+                contract=str(x.get("contract") or ""),
+                side=str(x.get("side") or ""),
+                reasons=x.get("reasons") if isinstance(x.get("reasons"), list) else [],
+                entry=_safe_float(x.get("entry")),
+                sl=_safe_float(x.get("sl")),
+                tp1=_safe_float(x.get("tp1")),
+                tp2=_safe_float(x.get("tp2")),
+                atr=_safe_float(x.get("atr")),
+                message=msg,
+                ok=ok,
+                error=err,
+            )
+        except Exception:
+            pass
+
+    if ok:
+        pushed = len(will_log)
+    else:
+        errors.append(err or "send failed")
+
+    return {"ok": ok, "pushed": pushed, "skipped": skipped, "errors": errors}
+
+
+def _master_b_push_loop() -> None:
+    interval = max(120, min(24 * 3600, int(MASTER_B_PUSH_INTERVAL_SEC)))
+    first = True
+    while True:
+        if first:
+            time.sleep(interval)
+            first = False
+        try:
+            s = _news_settings()
+            bot_token = (s.get("tg_bot_token") or "").strip()
+            chat_id = (s.get("tg_chat_id") or "").strip()
+            # 复用 telegram 页面里的模块开关（默认 true）
+            enabled_mod = _setting_bool(s, "push_master_b_enabled", True)
+            if MASTER_B_PUSH_ENABLED and enabled_mod and bot_token and chat_id:
+                global _MASTER_B_PUSH_LAST_RUN_TS, _MASTER_B_PUSH_LAST_PUSH, _MASTER_B_PUSH_LAST_ERROR
+                _MASTER_B_PUSH_LAST_RUN_TS = int(time.time())
+                _MASTER_B_PUSH_LAST_ERROR = ""
+                _MASTER_B_PUSH_LAST_PUSH = push_tg_master_b(force=0)
+        except Exception as e:
+            try:
+                _MASTER_B_PUSH_LAST_ERROR = str(e)
+            except Exception:
+                pass
+        time.sleep(interval)
+
+
+def push_tg_master_a(force: int = 0) -> dict:
+    s = _news_settings()
+    bot_token = (s.get("tg_bot_token") or "").strip()
+    chat_id = (s.get("tg_chat_id") or "").strip()
+    if not bot_token or not chat_id:
+        return {"ok": False, "pushed": 0, "skipped": 0, "errors": ["未配置 Telegram Bot Token 或 Chat ID"]}
+
+    data = _MASTER_A_ENGINE.matrix()
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return {"ok": False, "pushed": 0, "skipped": 0, "errors": ["invalid master_a matrix"]}
+
+    now_ts = int(time.time())
+    bucket = int(now_ts / 300)
+
+    pushed = 0
+    skipped = 0
+    errors: List[str] = []
+
+    # 只推：已触发（15m breakout）
+    candidates: List[dict] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        trig = it.get("trigger") if isinstance(it.get("trigger"), dict) else {}
+        st = str(trig.get("state") or "none")
+        if st not in ("trigger_long", "trigger_short"):
+            continue
+        if not it.get("entry") or not it.get("sl") or not it.get("tp1") or not it.get("tp2"):
+            continue
+        candidates.append(it)
+
+    if not candidates:
+        return {"ok": True, "pushed": 0, "skipped": 0, "errors": []}
+
+    ts_txt = datetime.datetime.fromtimestamp(now_ts).strftime("%Y-%m-%d %H:%M")
+    header = f"<b>【策略A】触发信号</b>\n时间：{ts_txt}｜触发数：{len(candidates)}"
+    lines: List[str] = [header]
+
+    def _fmt(v: Any) -> str:
+        try:
+            if v is None:
+                return "—"
+            x = float(v)
+            if abs(x) >= 1000:
+                return f"{x:,.2f}"
+            return f"{x:.6g}"
+        except Exception:
+            return "—"
+
+    will_log: List[dict] = []
+    for it in candidates[:20]:
+        try:
+            contract = str(it.get("contract") or "").strip()
+            side = str(it.get("side") or "none")
+            if side not in ("long", "short"):
+                continue
+
+            uniq = f"master_a:{contract}:{side}:{bucket}"
+            if not force and _master_a_has_uniq(uniq):
+                skipped += 1
+                continue
+            if not force:
+                last_ts = _master_a_last_push_ts(contract, side)
+                if last_ts is not None and (now_ts - int(last_ts)) < int(MASTER_A_PUSH_COOLDOWN_SEC):
+                    skipped += 1
+                    continue
+
+            reasons = it.get("reasons") if isinstance(it.get("reasons"), list) else []
+            reasons = [str(x) for x in reasons if x]
+            rs_txt = " | ".join(reasons[:4])
+
+            entry = it.get("entry")
+            sl = it.get("sl")
+            tp1 = it.get("tp1")
+            tp2 = it.get("tp2")
+            atr = it.get("atr_1h")
+
+            dir_txt = "做多" if side == "long" else "做空"
+            line = (
+                f"- {contract}\n"
+                f"  [策略类型] 策略A\n"
+                f"  [多空方向] {dir_txt}\n"
+                f"  [共振理由] {rs_txt or '—'}\n"
+                f"  [建议入场价] {_fmt(entry)}\n"
+                f"  [止损价] {_fmt(sl)}\n"
+                f"  [止盈价] TP1={_fmt(tp1)} TP2={_fmt(tp2)}"
+            )
+            lines.append(line)
+
+            will_log.append(
+                {
+                    "uniq": uniq,
+                    "contract": contract,
+                    "side": side,
+                    "reasons": reasons,
+                    "entry": _safe_float(entry),
+                    "sl": _safe_float(sl),
+                    "tp1": _safe_float(tp1),
+                    "tp2": _safe_float(tp2),
+                    "atr": _safe_float(atr),
+                }
+            )
+        except Exception:
+            skipped += 1
+
+    if not will_log:
+        return {"ok": True, "pushed": 0, "skipped": skipped, "errors": []}
+
+    msg = "\n".join(lines)
+    if len(msg) > 3500:
+        msg = msg[:3500] + "\n…(truncated)"
+
+    ok, err = _tg_send(bot_token=bot_token, chat_id=chat_id, text=msg, parse_mode="HTML")
+    for x in will_log:
+        try:
+            _master_a_push_history_add(
+                uniq=str(x.get("uniq") or ""),
+                contract=str(x.get("contract") or ""),
+                side=str(x.get("side") or ""),
+                reasons=x.get("reasons") if isinstance(x.get("reasons"), list) else [],
+                entry=_safe_float(x.get("entry")),
+                sl=_safe_float(x.get("sl")),
+                tp1=_safe_float(x.get("tp1")),
+                tp2=_safe_float(x.get("tp2")),
+                atr=_safe_float(x.get("atr")),
+                message=msg,
+                ok=ok,
+                error=err,
+            )
+        except Exception:
+            pass
+
+    if ok:
+        pushed = len(will_log)
+    else:
+        errors.append(err or "send failed")
+
+    return {"ok": ok, "pushed": pushed, "skipped": skipped, "errors": errors}
 
 
 _NEWS_AUTO_THREAD: Optional[threading.Thread] = None
@@ -514,6 +1007,18 @@ _MACD_MONITOR_THREAD_LOCK = threading.Lock()
 _MACD_MONITOR_LAST_RUN_TS: Optional[int] = None
 _MACD_MONITOR_LAST_PUSH: Optional[dict] = None
 _MACD_MONITOR_LAST_ERROR: str = ""
+
+_MASTER_A_PUSH_THREAD: Optional[threading.Thread] = None
+_MASTER_A_PUSH_THREAD_LOCK = threading.Lock()
+_MASTER_A_PUSH_LAST_RUN_TS: Optional[int] = None
+_MASTER_A_PUSH_LAST_PUSH: Optional[dict] = None
+_MASTER_A_PUSH_LAST_ERROR: str = ""
+
+_MASTER_B_PUSH_THREAD: Optional[threading.Thread] = None
+_MASTER_B_PUSH_THREAD_LOCK = threading.Lock()
+_MASTER_B_PUSH_LAST_RUN_TS: Optional[int] = None
+_MASTER_B_PUSH_LAST_PUSH: Optional[dict] = None
+_MASTER_B_PUSH_LAST_ERROR: str = ""
 
 
 def _news_auto_loop() -> None:
@@ -2124,6 +2629,29 @@ def _adx(highs: List[float], lows: List[float], closes: List[float], period: int
     return out
 
 
+def _macd_hist(closes: List[float], fast: int = 12, slow: int = 26, signal: int = 9) -> List[Optional[float]]:
+    n = len(closes)
+    if n <= max(fast, slow) + signal + 2:
+        return []
+    ef = _ema(closes, fast)
+    es = _ema(closes, slow)
+    if not ef or not es or len(ef) != n or len(es) != n:
+        return []
+    macd_line: List[float] = []
+    for i in range(n):
+        macd_line.append(float(ef[i]) - float(es[i]))
+    sig = _ema(macd_line, signal)
+    if not sig or len(sig) != n:
+        return []
+    out: List[Optional[float]] = [None] * n
+    for i in range(n):
+        try:
+            out[i] = float(macd_line[i]) - float(sig[i])
+        except Exception:
+            out[i] = None
+    return out
+
+
 def _macd(values: List[float], fast: int = 12, slow: int = 26, signal: int = 9) -> Tuple[List[float], List[float], List[float]]:
     # DIF=EMA(fast)-EMA(slow), DEA=EMA(DIF,signal), HIST=2*(DIF-DEA)
     if len(values) < slow + signal:
@@ -2140,19 +2668,107 @@ def _macd(values: List[float], fast: int = 12, slow: int = 26, signal: int = 9) 
 # REST fallback
 # ==========================
 
+def _rest_should_retry_status(status_code: int) -> bool:
+    try:
+        sc = int(status_code)
+    except Exception:
+        return False
+    if sc == 429:
+        return True
+    return 500 <= sc <= 599
+
+
+def _rest_should_retry_exception(e: Exception) -> bool:
+    try:
+        import requests as _rq
+
+        if isinstance(
+            e,
+            (
+                _rq.exceptions.Timeout,
+                _rq.exceptions.ConnectionError,
+                _rq.exceptions.ChunkedEncodingError,
+                _rq.exceptions.ContentDecodingError,
+                _rq.exceptions.RequestException,
+            ),
+        ):
+            return True
+    except Exception:
+        pass
+    msg = str(e).lower()
+    for kw in (
+        "connection reset",
+        "forcibly closed",
+        "read timed out",
+        "timed out",
+        "temporarily unavailable",
+        "remote end closed",
+        "bad gateway",
+        "service unavailable",
+        "gateway timeout",
+        "max retries exceeded",
+    ):
+        if kw in msg:
+            return True
+    return False
+
+
+def _rest_backoff_sleep(i: int) -> None:
+    try:
+        base = 0.35 * (2**i)
+        jitter = random.random() * 0.15
+        time.sleep(min(6.0, base + jitter))
+    except Exception:
+        pass
+
+
+def _rest_get_json(url: str, params: Optional[dict] = None, timeout: Any = 10) -> Any:
+    last_err: Optional[Exception] = None
+    last_status: Optional[int] = None
+    last_body: str = ""
+    for i in range(3):
+        try:
+            r = HTTP.get(url, params=params, timeout=timeout)
+            last_status = getattr(r, "status_code", None)
+            if last_status != 200:
+                try:
+                    last_body = (r.text or "")[:200]
+                except Exception:
+                    last_body = ""
+                if last_status is not None and _rest_should_retry_status(int(last_status)):
+                    raise RuntimeError(f"HTTP {last_status}: {last_body}")
+                raise RuntimeError(f"HTTP {last_status}: {last_body}")
+            try:
+                return r.json()
+            except Exception as je:
+                last_err = je
+                if _rest_should_retry_exception(je):
+                    raise
+                raise RuntimeError(f"JSON decode failed: {je}")
+        except Exception as e:
+            last_err = e
+            retryable = _rest_should_retry_exception(e)
+            if isinstance(e, RuntimeError) and last_status is not None and _rest_should_retry_status(int(last_status)):
+                retryable = True
+            if i >= 2 or (not retryable):
+                break
+            _rest_backoff_sleep(i)
+
+    msg = str(last_err) if last_err is not None else "request failed"
+    extra = ""
+    if last_status is not None:
+        extra = f" status={last_status}"
+    if last_body:
+        extra = f"{extra} body={last_body}"
+    raise RuntimeError(f"REST GET failed:{extra} url={url} err={msg}")
+
 def _rest_get(path: str, params: Optional[dict] = None) -> Any:
     url = f"{GATE_REST_FUTURES_USDT_BASE}{path}"
-    r = HTTP.get(url, params=params, timeout=8)
-    if r.status_code != 200:
-        raise RuntimeError(f"Gate REST HTTP {r.status_code}: {r.text[:200]}")
-    return r.json()
+    return _rest_get_json(url, params=params, timeout=8)
 
 
 def _rest_get_full_url(url: str, params: Optional[dict] = None, timeout: int = 10) -> Any:
-    r = HTTP.get(url, params=params, timeout=timeout)
-    if r.status_code != 200:
-        raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
-    return r.json()
+    return _rest_get_json(url, params=params, timeout=timeout)
 
 
 def get_tri_candles(contract: str, tf: str, limit: int) -> List[dict]:
@@ -3004,7 +3620,56 @@ def _parse_contracts_csv(raw: str) -> List[str]:
     return dedup
 
 
-class SignalEngine:
+def _monthly_background(closes: List[float]) -> Dict[str, Any]:
+    # MACD(12,26,9) needs at least slow + signal bars to be meaningful.
+    # Using 30d as "monthly" approximation, many contracts don't have 40 bars (3.3y).
+    if len(closes) < 35:
+        return {"state": "—", "reason": ""}
+    sma10 = _sma(closes, 10)
+    dif, dea, hist = _macd(closes, 12, 26, 9)
+    if not sma10 or not hist:
+        return {"state": "—", "reason": ""}
+    last_close = closes[-1]
+    last_sma = sma10[-1]
+    last_hist = hist[-1]
+    if last_sma is None:
+        return {"state": "—", "reason": ""}
+    above = last_close > float(last_sma)
+    macd_pos = float(last_hist) > 0
+    if above and macd_pos:
+        return {"state": "bull", "reason": "Close>SMA10 & MACD偏多"}
+    if (not above) and (not macd_pos):
+        return {"state": "bear", "reason": "Close<SMA10 & MACD偏空"}
+    return {"state": "neutral", "reason": "SMA/MACD冲突(过渡)"}
+
+
+def _daily_trend(highs: List[float], lows: List[float], closes: List[float]) -> Dict[str, Any]:
+    if len(closes) < 60:
+        return {"direction": "—", "strength": "—", "adx": None, "reason": ""}
+    ema20 = _ema(closes, 20)
+    ema50 = _ema(closes, 50)
+    adx = _adx(highs, lows, closes, 14)
+    if not ema20 or not ema50:
+        return {"direction": "—", "strength": "—", "adx": None, "reason": ""}
+    direction = "up" if ema20[-1] > ema50[-1] else "down"
+    adx_last = None
+    if adx:
+        adx_last = adx[-1]
+    strength = "weak"
+    try:
+        if adx_last is not None and float(adx_last) > 25:
+            strength = "strong"
+    except Exception:
+        strength = "weak"
+    return {
+        "direction": direction,
+        "strength": strength,
+        "adx": float(adx_last) if isinstance(adx_last, (int, float)) else None,
+        "reason": f"EMA20{'>' if direction == 'up' else '<'}EMA50, ADX={float(adx_last):.1f}" if isinstance(adx_last, (int, float)) else f"EMA20{'>' if direction == 'up' else '<'}EMA50",
+    }
+
+
+class TriSignalEngine:
     def __init__(self, contracts: List[str]):
         self.contracts = contracts
 
@@ -3118,6 +3783,42 @@ class SignalEngine:
             elif last_close < e200 and float(rsi_prev) > 70.0 and float(rsi_last) <= 70.0:
                 signal = "short"
                 reason = "Close<EMA200 & RSI下穿70"
+            else:
+                try:
+                    cl = float(last_close)
+                    e = float(e200)
+                    rp = float(rsi_prev)
+                    rl = float(rsi_last)
+                    above = cl > e
+                    below = cl < e
+                    if above:
+                        if rp < 30.0 and rl < 30.0:
+                            reason = f"Close>EMA200 但 RSI未上穿30（prev={rp:.2f}, now={rl:.2f}）"
+                        else:
+                            reason = f"Close>EMA200 且 RSI未处于上穿区间（prev={rp:.2f}, now={rl:.2f}）"
+                    elif below:
+                        if rp > 70.0 and rl > 70.0:
+                            reason = f"Close<EMA200 但 RSI未下穿70（prev={rp:.2f}, now={rl:.2f}）"
+                        else:
+                            reason = f"Close<EMA200 且 RSI未处于下穿区间（prev={rp:.2f}, now={rl:.2f}）"
+                    else:
+                        reason = f"Close≈EMA200（Close={cl:.6f}, EMA200={e:.6f}）"
+                except Exception:
+                    if not reason:
+                        reason = "未触发（条件未满足）"
+        elif not reason:
+            if e200 is None:
+                reason = "EMA200不足"
+            elif rsi_last is None:
+                reason = "RSI不足"
+            elif rsi_prev is None:
+                try:
+                    rl = float(rsi_last) if isinstance(rsi_last, (int, float)) else None
+                    reason = f"RSI历史不足（now={rl:.2f}）" if rl is not None else "RSI历史不足"
+                except Exception:
+                    reason = "RSI历史不足"
+            else:
+                reason = "未触发（条件未满足）"
 
         atr_series = _atr(highs, lows, closes, 14)
         atr_last = atr_series[-1] if atr_series else None
@@ -3146,8 +3847,8 @@ class SignalEngine:
 
     def analyze_one(self, contract: str) -> Dict[str, Any]:
         now_ts = int(time.time())
-        monthly = self._candles(contract, "1M", limit=120)
-        daily = self._candles(contract, "1d", limit=160)
+        monthly = self._candles(contract, "1d", limit=160)
+        daily = self._candles(contract, "4h", limit=260)
         hourly = self._candles(contract, "1h", limit=260)
 
         m_ts, _mo, _mh, _ml, m_c = self._series(monthly)
@@ -3176,7 +3877,7 @@ class SignalEngine:
             "high_prob": bool(hi_prob),
             "grade": grade,
             "last_price": float(h_c[-1]) if h_c else (float(d_c[-1]) if d_c else None),
-            "ts": {"1M": (m_ts[-1] if m_ts else None), "1d": (d_ts[-1] if d_ts else None), "1h": (h_ts[-1] if h_ts else None)},
+            "ts": {"1d": (m_ts[-1] if m_ts else None), "4h": (d_ts[-1] if d_ts else None), "1h": (h_ts[-1] if h_ts else None)},
         }
 
     def matrix(self) -> dict:
@@ -3208,7 +3909,520 @@ class SignalEngine:
         return payload
 
 
-_TRI_ENGINE = SignalEngine(_parse_contracts_csv(TRI_SIGNAL_CONTRACTS))
+class MasterBEngine:
+    def __init__(self, contracts: List[str]):
+        self.contracts = contracts
+
+    def _candles(self, contract: str, tf: str, limit: int) -> List[dict]:
+        return get_tri_candles(contract=contract, tf=tf, limit=int(limit))
+
+    def _series(self, candles: List[dict]) -> Tuple[List[int], List[float], List[float], List[float], List[float]]:
+        seq = [x for x in candles if isinstance(x, dict)]
+        seq.sort(key=lambda x: int(x.get("t") or 0))
+        ts: List[int] = []
+        o: List[float] = []
+        h: List[float] = []
+        l: List[float] = []
+        c: List[float] = []
+        for x in seq:
+            t = x.get("t")
+            oo = _safe_float(x.get("o"))
+            hh = _safe_float(x.get("h"))
+            ll = _safe_float(x.get("l"))
+            cc = _safe_float(x.get("c"))
+            if t is None or oo is None or hh is None or ll is None or cc is None:
+                continue
+            try:
+                ts.append(int(t))
+                o.append(float(oo))
+                h.append(float(hh))
+                l.append(float(ll))
+                c.append(float(cc))
+            except Exception:
+                continue
+        return ts, o, h, l, c
+
+    def _ttm_squeeze_on(self, highs: List[float], lows: List[float], closes: List[float]) -> Optional[bool]:
+        if len(closes) < 50:
+            return None
+        bb_mid = _sma(closes, 20)
+        if not bb_mid or bb_mid[-1] is None:
+            return None
+        try:
+            win = closes[-20:]
+            mean = float(bb_mid[-1])
+            var = sum((float(x) - mean) ** 2 for x in win) / float(len(win))
+            std = var ** 0.5
+            bb_upper = mean + 2.0 * std
+            bb_lower = mean - 2.0 * std
+        except Exception:
+            return None
+
+        kc_mid = _ema(closes, 20)
+        atr20 = _atr(highs, lows, closes, 20)
+        if not kc_mid or not atr20 or kc_mid[-1] is None or atr20[-1] is None:
+            return None
+        try:
+            m = float(kc_mid[-1])
+            a = float(atr20[-1])
+            kc_upper = m + 1.5 * a
+            kc_lower = m - 1.5 * a
+            bb_w = float(bb_upper) - float(bb_lower)
+            kc_w = float(kc_upper) - float(kc_lower)
+            return bool(bb_w < kc_w)
+        except Exception:
+            return None
+
+    def _env_1d_voyage(self, highs_1d: List[float], lows_1d: List[float], closes_1d: List[float]) -> Dict[str, Any]:
+        if len(closes_1d) < 60:
+            return {"state": "none", "reason": "数据不足", "sma10": None, "sma30": None, "adx": None}
+        sma10 = _sma(closes_1d, 10)
+        sma30 = _sma(closes_1d, 30)
+        adx14 = _adx(highs_1d, lows_1d, closes_1d, 14)
+        if not sma10 or not sma30 or not adx14 or sma10[-1] is None or sma30[-1] is None or adx14[-1] is None:
+            return {"state": "none", "reason": "指标不足", "sma10": None, "sma30": None, "adx": None}
+
+        v10 = float(sma10[-1])
+        v30 = float(sma30[-1])
+        a = float(adx14[-1])
+        if a <= 25.0:
+            return {"state": "none", "reason": f"ADX≤25（{a:.1f}）", "sma10": v10, "sma30": v30, "adx": a}
+        if v10 > v30:
+            return {"state": "long_only", "reason": f"SMA10>SMA30 且 ADX>25（{a:.1f}）", "sma10": v10, "sma30": v30, "adx": a}
+        if v10 < v30:
+            return {"state": "short_only", "reason": f"SMA10<SMA30 且 ADX>25（{a:.1f}）", "sma10": v10, "sma30": v30, "adx": a}
+        return {"state": "none", "reason": "SMA10=30", "sma10": v10, "sma30": v30, "adx": a}
+
+    def _prealert_1d_voyage(self, closes_1d: List[float], side: str) -> Dict[str, Any]:
+        if len(closes_1d) < 30:
+            return {"state": "none", "reason": "数据不足", "price": None, "sma10": None, "dist": None}
+        sma10 = _sma(closes_1d, 10)
+        if not sma10 or sma10[-1] is None:
+            return {"state": "none", "reason": "SMA10不足", "price": None, "sma10": None, "dist": None}
+        price = float(closes_1d[-1])
+        s10 = float(sma10[-1])
+        if s10 <= 0:
+            return {"state": "none", "reason": "SMA10异常", "price": price, "sma10": s10, "dist": None}
+        if side == "long":
+            # Pullback: price from above, stays slightly above SMA10 (0%~0.9%)
+            dist = (price - s10) / s10
+            if 0.0 <= dist <= 0.009:
+                return {"state": "pre_long", "reason": "回调至 SMA10 上方 0%~0.9%", "price": price, "sma10": s10, "dist": dist}
+            return {"state": "none", "reason": f"未回调到 SMA10 上方 0%~0.9%（当前{dist*100:.2f}%）", "price": price, "sma10": s10, "dist": dist}
+
+        # side == short
+        # Relief rally: price from below, stays slightly below SMA10 (0%~0.9%)
+        dist = (s10 - price) / s10
+        if 0.0 <= dist <= 0.009:
+            return {"state": "pre_short", "reason": "反弹至 SMA10 下方 0%~0.9%", "price": price, "sma10": s10, "dist": dist}
+        return {"state": "none", "reason": f"未反弹到 SMA10 下方 0%~0.9%（当前{dist*100:.2f}%）", "price": price, "sma10": s10, "dist": dist}
+
+    def _trigger_4h_voyage(self, opens_4h: List[float], highs_4h: List[float], lows_4h: List[float], closes_4h: List[float], side: str) -> Dict[str, Any]:
+        if len(closes_4h) < 60 or len(opens_4h) < 2:
+            return {"state": "none", "reason": "数据不足"}
+
+        hist = _macd_hist(closes_4h, 12, 26, 9)
+        macd_ok = False
+        try:
+            if hist and len(hist) >= 2 and hist[-1] is not None and hist[-2] is not None:
+                h0 = float(hist[-1])
+                h1 = float(hist[-2])
+                if side == "long" and h0 < 0 and abs(h0) < abs(h1):
+                    macd_ok = True
+                if side == "short" and h0 > 0 and abs(h0) < abs(h1):
+                    macd_ok = True
+        except Exception:
+            macd_ok = False
+
+        engulf_ok = False
+        try:
+            o_prev = float(opens_4h[-2])
+            c_prev = float(closes_4h[-2])
+            h_prev = float(highs_4h[-2])
+            l_prev = float(lows_4h[-2])
+            o_cur = float(opens_4h[-1])
+            c_cur = float(closes_4h[-1])
+            if side == "long":
+                if c_prev < o_prev and c_cur > o_cur and c_cur > h_prev:
+                    engulf_ok = True
+            else:
+                if c_prev > o_prev and c_cur < o_cur and c_cur < l_prev:
+                    engulf_ok = True
+        except Exception:
+            engulf_ok = False
+
+        if macd_ok and engulf_ok:
+            return {"state": f"trigger_{side}", "reason": "4H MACD动能反转 + 吞没形态"}
+        if macd_ok:
+            return {"state": f"trigger_{side}", "reason": "4H MACD动能反转（柱状图缩短）"}
+        if engulf_ok:
+            return {"state": f"trigger_{side}", "reason": "4H 吞没形态"}
+        return {"state": "none", "reason": "未出现MACD反转/吞没"}
+
+    def _risk_voyage(self, entry: float, side: str, atr_1d: Optional[float], atr_4h: Optional[float]) -> Dict[str, Any]:
+        if atr_1d is None or atr_4h is None:
+            return {"sl": None, "tp1": None, "tp2": None, "atr_1d": atr_1d, "atr_4h": atr_4h}
+        try:
+            a1 = float(atr_1d)
+            a4 = float(atr_4h)
+        except Exception:
+            return {"sl": None, "tp1": None, "tp2": None, "atr_1d": None, "atr_4h": None}
+        if a1 <= 0 or a4 <= 0:
+            return {"sl": None, "tp1": None, "tp2": None, "atr_1d": a1, "atr_4h": a4}
+        d = max(2.0 * a1, 1.2 * a4)
+        if side == "long":
+            sl = entry - d
+            r = entry - sl
+            tp1 = entry + 2.0 * r
+            tp2 = entry + 3.0 * r
+        else:
+            sl = entry + d
+            r = sl - entry
+            tp1 = entry - 2.0 * r
+            tp2 = entry - 3.0 * r
+        return {"sl": float(sl), "tp1": float(tp1), "tp2": float(tp2), "atr_1d": float(a1), "atr_4h": float(a4), "sl_dist": float(d)}
+
+    def analyze_one(self, contract: str) -> Dict[str, Any]:
+        now_ts = int(time.time())
+
+        c1d = self._candles(contract, "1d", limit=360)
+        c4h = self._candles(contract, "4h", limit=220)
+        ts1d, _o1d, h1d, l1d, cl1d = self._series(c1d)
+        ts4h, _o4h, h4h, l4h, cl4h = self._series(c4h)
+
+        _ts4h2, o4h, _h4h2, _l4h2, _cl4h2 = self._series(c4h)
+
+        env = self._env_1d_voyage(h1d, l1d, cl1d)
+        side = "long" if env.get("state") == "long_only" else ("short" if env.get("state") == "short_only" else "none")
+
+        pre = {"state": "none", "reason": "环境不足"}
+        trig = {"state": "none", "reason": "预警未满足，未检测触发"}
+        reasons: List[str] = []
+
+        entry: Optional[float] = None
+        sl: Optional[float] = None
+        tp1: Optional[float] = None
+        tp2: Optional[float] = None
+        atr_1d_last: Optional[float] = None
+        atr_4h_last: Optional[float] = None
+
+        if side in ("long", "short"):
+            reasons.append(str(env.get("reason") or ""))
+            pre = self._prealert_1d_voyage(cl1d, side=side)
+            reasons.append(str(pre.get("reason") or ""))
+            if pre.get("state") in ("pre_long", "pre_short"):
+                trig = self._trigger_4h_voyage(o4h, h4h, l4h, cl4h, side=side)
+                reasons.append(str(trig.get("reason") or ""))
+            else:
+                trig = {"state": "none", "reason": "预警未满足，未检测触发"}
+                reasons.append(str(trig.get("reason") or ""))
+
+            if pre.get("state") in ("pre_long", "pre_short") and trig.get("state") in ("trigger_long", "trigger_short"):
+                try:
+                    entry = float(cl4h[-1]) if cl4h else None
+                except Exception:
+                    entry = None
+                atrs1 = _atr(h1d, l1d, cl1d, 14)
+                if atrs1 and atrs1[-1] is not None:
+                    atr_1d_last = float(atrs1[-1])
+                atrs4 = _atr(h4h, l4h, cl4h, 14)
+                if atrs4 and atrs4[-1] is not None:
+                    atr_4h_last = float(atrs4[-1])
+                if entry is not None:
+                    rk = self._risk_voyage(entry, side=side, atr_1d=atr_1d_last, atr_4h=atr_4h_last)
+                    sl = rk.get("sl")
+                    tp1 = rk.get("tp1")
+                    tp2 = rk.get("tp2")
+
+        return {
+            "contract": contract,
+            "updated_at": now_ts,
+            "side": side,
+            "env": env,
+            "prealert": pre,
+            "trigger": trig,
+            "reasons": [x for x in reasons if x],
+            "entry": entry,
+            "sl": sl,
+            "tp1": tp1,
+            "tp2": tp2,
+            "atr": atr_1d_last,
+            "atr_1d": atr_1d_last,
+            "atr_4h": atr_4h_last,
+            "ts": {"1d": (ts1d[-1] if ts1d else None), "4h": (ts4h[-1] if ts4h else None)},
+        }
+
+    def matrix(self) -> dict:
+        if not MASTER_B_ENABLED:
+            return {"items": [], "errors": ["disabled"]}
+        ck = f"master_b:matrix:{','.join(self.contracts)}"
+        cached = _cache_get(ck, ttl=max(5, int(MASTER_B_CACHE_TTL_SEC)))
+        if cached is not None:
+            return cached
+
+        errors: List[str] = []
+        items: List[dict] = []
+
+        contract_set = set(get_all_futures_contract_names())
+        targets = [c for c in self.contracts if c in contract_set]
+
+        max_workers = max(1, min(int(MASTER_B_MAX_WORKERS), max(1, len(targets))))
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futs = {ex.submit(self.analyze_one, c): c for c in targets}
+            for f in as_completed(futs):
+                c = futs[f]
+                try:
+                    items.append(f.result())
+                except Exception as e:
+                    errors.append(f"{c}: {e}")
+
+        items.sort(key=lambda x: str(x.get("contract") or ""))
+        payload = {"items": items, "errors": errors}
+        _cache_set(ck, payload)
+        return payload
+
+
+class MasterAEngine:
+    def __init__(self, contracts: List[str]):
+        self.contracts = contracts
+
+    def _candles(self, contract: str, tf: str, limit: int) -> List[dict]:
+        # Reuse the same REST fetcher for Gate perpetual candles
+        return get_tri_candles(contract=contract, tf=tf, limit=int(limit))
+
+    def _series(self, candles: List[dict]) -> Tuple[List[int], List[float], List[float], List[float], List[float]]:
+        # Keep consistent with SignalEngine
+        seq = [x for x in candles if isinstance(x, dict)]
+        seq.sort(key=lambda x: int(x.get("t") or 0))
+        ts: List[int] = []
+        o: List[float] = []
+        h: List[float] = []
+        l: List[float] = []
+        c: List[float] = []
+        for x in seq:
+            t = x.get("t")
+            oo = _safe_float(x.get("o"))
+            hh = _safe_float(x.get("h"))
+            ll = _safe_float(x.get("l"))
+            cc = _safe_float(x.get("c"))
+            if t is None or oo is None or hh is None or ll is None or cc is None:
+                continue
+            try:
+                ts.append(int(t))
+                o.append(float(oo))
+                h.append(float(hh))
+                l.append(float(ll))
+                c.append(float(cc))
+            except Exception:
+                continue
+        return ts, o, h, l, c
+
+    def _ttm_squeeze_on(self, highs: List[float], lows: List[float], closes: List[float]) -> Optional[bool]:
+        # Squeeze ON: BB_Width < KC_Width
+        if len(closes) < 50:
+            return None
+        bb_mid = _sma(closes, 20)
+        if not bb_mid or bb_mid[-1] is None:
+            return None
+        try:
+            win = closes[-20:]
+            mean = float(bb_mid[-1])
+            var = sum((float(x) - mean) ** 2 for x in win) / float(len(win))
+            std = var ** 0.5
+            bb_upper = mean + 2.0 * std
+            bb_lower = mean - 2.0 * std
+        except Exception:
+            return None
+
+        kc_mid = _ema(closes, 20)
+        atr20 = _atr(highs, lows, closes, 20)
+        if not kc_mid or not atr20 or kc_mid[-1] is None or atr20[-1] is None:
+            return None
+        try:
+            m = float(kc_mid[-1])
+            a = float(atr20[-1])
+            kc_upper = m + 1.5 * a
+            kc_lower = m - 1.5 * a
+            return bool(bb_upper < kc_upper and bb_lower > kc_lower)
+        except Exception:
+            return None
+
+    def _prealert(self, highs: List[float], lows: List[float], closes: List[float], side: str) -> Dict[str, Any]:
+        # side: long | short
+        if len(closes) < 220:
+            return {"state": "none", "reason": "数据不足", "squeeze": None, "rsi": None}
+
+        squeeze = self._ttm_squeeze_on(highs, lows, closes)
+        rsi_last = _rsi14(closes)
+        rsi_prev = _rsi14(closes[:-1]) if len(closes) >= 16 else None
+        if squeeze is None or rsi_last is None or rsi_prev is None:
+            return {"state": "none", "reason": "指标不足", "squeeze": squeeze, "rsi": float(rsi_last) if isinstance(rsi_last, (int, float)) else None}
+
+        try:
+            if not squeeze:
+                return {"state": "none", "reason": "未挤压", "squeeze": bool(squeeze), "rsi": float(rsi_last)}
+
+            if side == "long":
+                # oversold hook: RSI 处于超卖附近且开始回升
+                if float(rsi_prev) < 35.0 and float(rsi_last) > float(rsi_prev) and float(rsi_last) >= 40.0:
+                    return {"state": "pre_long", "reason": "Squeeze ON + RSI超卖回钩（35→40）", "squeeze": True, "rsi": float(rsi_last)}
+            else:
+                # overbought hook: RSI 处于超买附近且开始回落
+                if float(rsi_prev) > 65.0 and float(rsi_last) < float(rsi_prev) and float(rsi_last) <= 60.0:
+                    return {"state": "pre_short", "reason": "Squeeze ON + RSI超买回钩（65→60）", "squeeze": True, "rsi": float(rsi_last)}
+        except Exception:
+            pass
+
+        return {"state": "none", "reason": "未满足回钩", "squeeze": bool(squeeze), "rsi": float(rsi_last) if isinstance(rsi_last, (int, float)) else None}
+
+    def _env(self, closes_1h: List[float]) -> Dict[str, Any]:
+        if len(closes_1h) < 220:
+            return {"state": "none", "reason": "数据不足", "ema200": None}
+        ema200 = _ema(closes_1h, 200)
+        if not ema200 or ema200[-1] is None:
+            return {"state": "none", "reason": "EMA不足", "ema200": None}
+        last = closes_1h[-1]
+        e200 = float(ema200[-1])
+        if last > e200:
+            return {"state": "long_only", "reason": "Close>EMA200（只找做多）", "ema200": e200}
+        return {"state": "short_only", "reason": "Close<EMA200（只找做空）", "ema200": e200}
+
+    def _trigger_15m(self, highs_15m: List[float], lows_15m: List[float], closes_15m: List[float], side: str) -> Dict[str, Any]:
+        if len(closes_15m) < 20:
+            return {"state": "none", "reason": "数据不足"}
+        # breakout previous 3 closed candles
+        try:
+            last_close = float(closes_15m[-1])
+            prev_high3 = max(float(x) for x in highs_15m[-4:-1])
+            prev_low3 = min(float(x) for x in lows_15m[-4:-1])
+            if side == "long" and last_close > prev_high3:
+                return {"state": "trigger_long", "reason": "15M 突破近3根高点", "break": prev_high3}
+            if side == "short" and last_close < prev_low3:
+                return {"state": "trigger_short", "reason": "15M 跌破近3根低点", "break": prev_low3}
+        except Exception:
+            return {"state": "none", "reason": "计算失败"}
+        return {"state": "none", "reason": "未突破"}
+
+    def _risk(self, entry: float, side: str, atr_1h: Optional[float]) -> Dict[str, Any]:
+        if atr_1h is None or not isinstance(atr_1h, (int, float)) or float(atr_1h) <= 0:
+            return {"sl": None, "tp1": None, "tp2": None, "atr": None}
+        a = float(atr_1h)
+        if side == "long":
+            sl = entry - 1.5 * a
+            r = entry - sl
+            tp1 = entry + 2.0 * r
+            tp2 = entry + 3.0 * r
+        else:
+            sl = entry + 1.5 * a
+            r = sl - entry
+            tp1 = entry - 2.0 * r
+            tp2 = entry - 3.0 * r
+        return {"sl": float(sl), "tp1": float(tp1), "tp2": float(tp2), "atr": float(a)}
+
+    def analyze_one(self, contract: str) -> Dict[str, Any]:
+        now_ts = int(time.time())
+
+        c1h = self._candles(contract, "1h", limit=320)
+        c15 = self._candles(contract, "15m", limit=160)
+        ts1h, _o1h, h1h, l1h, cl1h = self._series(c1h)
+        ts15, _o15, h15, l15, cl15 = self._series(c15)
+
+        env = self._env(cl1h)
+        side = "long" if env.get("state") == "long_only" else ("short" if env.get("state") == "short_only" else "none")
+
+        pre = {"state": "none", "reason": "环境不足", "squeeze": None, "rsi": None}
+        trig = {"state": "none", "reason": "预警未满足，未检测触发"}
+        reasons: List[str] = []
+
+        entry: Optional[float] = None
+        sl: Optional[float] = None
+        tp1: Optional[float] = None
+        tp2: Optional[float] = None
+        atr_last: Optional[float] = None
+
+        if side in ("long", "short"):
+            reasons.append(str(env.get("reason") or ""))
+            pre = self._prealert(h1h, l1h, cl1h, side=side)
+            reasons.append(str(pre.get("reason") or ""))
+            if pre.get("state") in ("pre_long", "pre_short"):
+                trig = self._trigger_15m(h15, l15, cl15, side=side)
+                reasons.append(str(trig.get("reason") or ""))
+            else:
+                trig = {"state": "none", "reason": "预警未满足，未检测触发"}
+                reasons.append(str(trig.get("reason") or ""))
+
+            if pre.get("state") in ("pre_long", "pre_short") and trig.get("state") in ("trigger_long", "trigger_short"):
+                try:
+                    entry = float(cl15[-1]) if cl15 else None
+                except Exception:
+                    entry = None
+
+                atrs = _atr(h1h, l1h, cl1h, 14)
+                if atrs and atrs[-1] is not None:
+                    atr_last = float(atrs[-1])
+                if entry is not None:
+                    rk = self._risk(entry, side=side, atr_1h=atr_last)
+                    sl = rk.get("sl")
+                    tp1 = rk.get("tp1")
+                    tp2 = rk.get("tp2")
+
+        # Normalize reasons
+        reasons = [x for x in reasons if x]
+        if not reasons:
+            reasons = ["—"]
+
+        return {
+            "contract": contract,
+            "symbol": contract.replace("_USDT", ""),
+            "updated_at": now_ts,
+            "side": side,
+            "env": env,
+            "prealert": pre,
+            "trigger": trig,
+            "entry": float(entry) if isinstance(entry, (int, float)) else None,
+            "sl": float(sl) if isinstance(sl, (int, float)) else None,
+            "tp1": float(tp1) if isinstance(tp1, (int, float)) else None,
+            "tp2": float(tp2) if isinstance(tp2, (int, float)) else None,
+            "atr_1h": float(atr_last) if isinstance(atr_last, (int, float)) else None,
+            "reasons": reasons,
+            "ts": {"1h": (ts1h[-1] if ts1h else None), "15m": (ts15[-1] if ts15 else None)},
+        }
+
+    def matrix(self) -> dict:
+        if not MASTER_A_ENABLED:
+            return {"items": [], "errors": ["disabled"]}
+        ck = f"master_a:matrix:{','.join(self.contracts)}"
+        cached = _cache_get(ck, ttl=max(5, int(MASTER_A_CACHE_TTL_SEC)))
+        if cached is not None:
+            return cached
+
+        errors: List[str] = []
+        items: List[dict] = []
+
+        contract_set = set(get_all_futures_contract_names())
+        targets = [c for c in self.contracts if c in contract_set]
+
+        max_workers = max(1, min(int(MASTER_A_MAX_WORKERS), max(1, len(targets))))
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futs = {ex.submit(self.analyze_one, c): c for c in targets}
+            for f in as_completed(futs):
+                c = futs[f]
+                try:
+                    items.append(f.result())
+                except Exception as e:
+                    errors.append(f"{c}: {e}")
+
+        items.sort(key=lambda x: str(x.get("contract") or ""))
+        payload = {"items": items, "errors": errors}
+        _cache_set(ck, payload)
+        return payload
+
+
+_TRI_ENGINE = TriSignalEngine(_parse_contracts_csv(TRI_SIGNAL_CONTRACTS))
+
+_MASTER_A_ENGINE = MasterAEngine(_parse_contracts_csv(MASTER_A_CONTRACTS))
+
+_MASTER_B_ENGINE = MasterBEngine(_parse_contracts_csv(MASTER_B_CONTRACTS))
 
 
 @app.get("/api/tri_signal/matrix")
@@ -3224,7 +4438,7 @@ def api_tri_signal_candles(contract: str = "BTC_USDT", tf: str = "1h", limit: in
     try:
         contract = (contract or "BTC_USDT").strip().upper()
         tf = (tf or "1h").strip()
-        if tf not in ("1h", "1d", "1M"):
+        if tf not in ("1h", "4h", "1d"):
             tf = "1h"
         limit = max(50, min(500, int(limit)))
         candles = _TRI_ENGINE._candles(contract, tf, limit=limit)
@@ -3237,6 +4451,80 @@ def api_tri_signal_candles(contract: str = "BTC_USDT", tf: str = "1h", limit: in
         return JSONResponse(payload)
     except Exception as e:
         return JSONResponse({"contract": contract, "tf": tf, "items": [], "errors": [str(e)]}, status_code=200)
+
+
+@app.get("/api/master_a/matrix")
+def api_master_a_matrix() -> JSONResponse:
+    try:
+        return JSONResponse(_MASTER_A_ENGINE.matrix())
+    except Exception as e:
+        return JSONResponse({"items": [], "errors": [str(e)]}, status_code=200)
+
+
+@app.get("/api/master_a/candles")
+def api_master_a_candles(contract: str = "BTC_USDT", tf: str = "1h", limit: int = 260) -> JSONResponse:
+    try:
+        contract = (contract or "BTC_USDT").strip().upper()
+        tf = (tf or "1h").strip()
+        if tf not in ("1h", "15m"):
+            tf = "1h"
+        limit = max(50, min(600, int(limit)))
+        candles = _MASTER_A_ENGINE._candles(contract, tf, limit=limit)
+        ts, o, h, l, c = _MASTER_A_ENGINE._series(candles)
+        payload = {
+            "contract": contract,
+            "tf": tf,
+            "items": [{"t": ts[i], "o": o[i], "h": h[i], "l": l[i], "c": c[i]} for i in range(min(len(ts), len(c)))],
+        }
+        return JSONResponse(payload)
+    except Exception as e:
+        return JSONResponse({"contract": contract, "tf": tf, "items": [], "errors": [str(e)]}, status_code=200)
+
+
+@app.get("/api/master_b/matrix")
+def api_master_b_matrix() -> JSONResponse:
+    try:
+        return JSONResponse(_MASTER_B_ENGINE.matrix())
+    except Exception as e:
+        return JSONResponse({"items": [], "errors": [str(e)]}, status_code=200)
+
+
+@app.get("/api/master_b/candles")
+def api_master_b_candles(contract: str = "BTC_USDT", tf: str = "4h", limit: int = 260) -> JSONResponse:
+    try:
+        contract = (contract or "BTC_USDT").strip().upper()
+        tf = (tf or "4h").strip()
+        if tf not in ("1d", "4h"):
+            tf = "4h"
+        limit = max(50, min(600, int(limit)))
+        candles = _MASTER_B_ENGINE._candles(contract, tf, limit=limit)
+        ts, o, h, l, c = _MASTER_B_ENGINE._series(candles)
+        payload = {
+            "contract": contract,
+            "tf": tf,
+            "items": [{"t": ts[i], "o": o[i], "h": h[i], "l": l[i], "c": c[i]} for i in range(min(len(ts), len(c)))],
+        }
+        return JSONResponse(payload)
+    except Exception as e:
+        return JSONResponse({"contract": contract, "tf": tf, "items": [], "errors": [str(e)]}, status_code=200)
+
+
+@app.get("/api/master_a_push/now")
+def api_master_a_push_now(force: int = 0) -> JSONResponse:
+    try:
+        out = push_tg_master_a(force=force)
+        return JSONResponse(out)
+    except Exception as e:
+        return JSONResponse({"ok": False, "pushed": 0, "skipped": 0, "errors": [str(e)]}, status_code=200)
+
+
+@app.get("/api/master_b_push/now")
+def api_master_b_push_now(force: int = 0) -> JSONResponse:
+    try:
+        out = push_tg_master_b(force=force)
+        return JSONResponse(out)
+    except Exception as e:
+        return JSONResponse({"ok": False, "pushed": 0, "skipped": 0, "errors": [str(e)]}, status_code=200)
 
 
 _TRI_SIGNAL_PUSH_THREAD: Optional[threading.Thread] = None
@@ -3317,6 +4605,82 @@ def _tri_signal_has_uniq(uniq: str) -> bool:
     try:
         row = conn.execute("SELECT 1 FROM tri_signal_push_history WHERE uniq=? LIMIT 1", (uniq,)).fetchone()
         return bool(row)
+    finally:
+        conn.close()
+
+
+def _master_a_push_history_add(
+    uniq: str,
+    contract: str,
+    side: str,
+    reasons: List[str],
+    entry: Optional[float],
+    sl: Optional[float],
+    tp1: Optional[float],
+    tp2: Optional[float],
+    atr: Optional[float],
+    message: str,
+    ok: bool,
+    error: str,
+) -> None:
+    conn = _db_connect()
+    try:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO master_a_push_history(created_at, uniq, contract, side, reasons, entry, sl, tp1, tp2, atr, message, ok, error)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                int(time.time()),
+                uniq,
+                contract,
+                side,
+                json.dumps(reasons, ensure_ascii=False),
+                entry,
+                sl,
+                tp1,
+                tp2,
+                atr,
+                message,
+                1 if ok else 0,
+                error or "",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _master_a_has_uniq(uniq: str) -> bool:
+    uniq = (uniq or "").strip()
+    if not uniq:
+        return False
+    conn = _db_connect()
+    try:
+        row = conn.execute("SELECT 1 FROM master_a_push_history WHERE uniq=? LIMIT 1", (uniq,)).fetchone()
+        return bool(row)
+    finally:
+        conn.close()
+
+
+def _master_a_last_push_ts(contract: str, side: str) -> Optional[int]:
+    conn = _db_connect()
+    try:
+        row = conn.execute(
+            """
+            SELECT created_at FROM master_a_push_history
+            WHERE contract=? AND side=?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (contract, side),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            return int(row[0])
+        except Exception:
+            return None
     finally:
         conn.close()
 
@@ -3945,6 +5309,23 @@ def _startup() -> None:
                 t5 = threading.Thread(target=_tri_signal_push_loop, name="tri_signal_push", daemon=True)
                 _TRI_SIGNAL_PUSH_THREAD = t5
                 t5.start()
+
+    # Master Prompt：策略A/策略B 触发推送
+    if MASTER_A_PUSH_ENABLED:
+        global _MASTER_A_PUSH_THREAD
+        with _MASTER_A_PUSH_THREAD_LOCK:
+            if _MASTER_A_PUSH_THREAD is None or not _MASTER_A_PUSH_THREAD.is_alive():
+                t6 = threading.Thread(target=_master_a_push_loop, name="master_a_push", daemon=True)
+                _MASTER_A_PUSH_THREAD = t6
+                t6.start()
+
+    if MASTER_B_PUSH_ENABLED:
+        global _MASTER_B_PUSH_THREAD
+        with _MASTER_B_PUSH_THREAD_LOCK:
+            if _MASTER_B_PUSH_THREAD is None or not _MASTER_B_PUSH_THREAD.is_alive():
+                t7 = threading.Thread(target=_master_b_push_loop, name="master_b_push", daemon=True)
+                _MASTER_B_PUSH_THREAD = t7
+                t7.start()
 
 static_dir = os.path.join(os.path.dirname(__file__), "web")
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
