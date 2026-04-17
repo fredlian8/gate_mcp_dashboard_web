@@ -85,14 +85,14 @@
             <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
               <div>
                 <h1 class="text-3xl font-extrabold text-blue-300">Gate.io 永续合约市场数据</h1>
-                <p class="muted mt-2">主表：固定 5 个合约。市场异动：Top50（以 24h 成交额代理市值排序）。</p>
+                <p class="muted mt-2">主表：固定 5 个合约；市场异动：Top100（按 24h 成交额）。“价格变化% / OI变化%”使用 lookback=6 根K线计算。市场异动按强度（score=|ΔP|+0.7×|ΔOI|）降序展示。</p>
               </div>
 
               <div class="flex items-center gap-3">
                 <label class="muted text-sm">时间框架</label>
                 <select id="tf" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
-                  <option value="15m">15m</option>
-                  <option value="1h" selected>1h</option>
+                  <option value="15m" selected>15m</option>
+                  <option value="1h">1h</option>
                   <option value="4h">4h</option>
                   <option value="1d">1d</option>
                 </select>
@@ -126,14 +126,14 @@
                   <div>
                     <div class="font-semibold text-gray-200">价格变化%（随上方时间框架）</div>
                     <div>
-                      取该时间框架最新两根 K线收盘价：<span class="text-gray-100">(Close_last - Close_prev) / Close_prev × 100%</span>。
+                      取该时间框架最近 lookback=6 根K线：<span class="text-gray-100">(Close_last - Close_prevN) / Close_prevN × 100%</span>（prevN 为倒数第 7 根收盘）。
                     </div>
                   </div>
 
                   <div>
                     <div class="font-semibold text-gray-200">OI 变化%（随上方时间框架）</div>
                     <div>
-                      取 Gate 合约统计 contract_stats 最近两条同时间框架数据：<span class="text-gray-100">(OI_last - OI_prev) / OI_prev × 100%</span>。
+                      取 Gate 合约统计 contract_stats 最近 lookback=6 个同时间框架数据：<span class="text-gray-100">(OI_last - OI_prevN) / OI_prevN × 100%</span>（prevN 为倒数第 7 个点）。
                     </div>
                   </div>
 
@@ -171,7 +171,7 @@
           </section>
 
           <section class="mb-10">
-            <h2 class="text-xl font-extrabold mb-3">市场异动（Top50）</h2>
+            <h2 class="text-xl font-extrabold mb-3">市场异动（Top100）</h2>
             <div id="cards" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4"></div>
           </section>
 
@@ -188,6 +188,7 @@
                     <th>最新价格</th>
                     <th>价格变化%</th>
                     <th>OI 变化%</th>
+                    <th>强度</th>
                     <th>时间框架</th>
                     <th>更新时间</th>
                   </tr>
@@ -282,7 +283,7 @@
                   <div>
                     <div class="font-semibold text-gray-200">时间框架（K线选择）</div>
                     <div>
-                      本页面所有与 K线相关的指标都会跟随上方 <span class="text-gray-100">K线</span> 选择（15m/1h/1d），默认 1h。
+                      本页面所有与 K线相关的指标都会跟随上方 <span class="text-gray-100">K线</span> 选择（15m/1h/1d），默认 15m。
                     </div>
                   </div>
 
@@ -417,7 +418,9 @@
                   <option value="all">全部</option>
                   <option value="15m">15m</option>
                   <option value="1h" selected>1h</option>
+                  <option value="4h">4h</option>
                   <option value="1d">1d</option>
+                  <option value="2d">2d</option>
                 </select>
                 <label class="muted text-sm">刷新间隔</label>
                 <select id="macdRefreshSec" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
@@ -488,7 +491,9 @@
                   <option value="all">全部</option>
                   <option value="15m">15m</option>
                   <option value="1h" selected>1h</option>
+                  <option value="4h">4h</option>
                   <option value="1d">1d</option>
+                  <option value="2d">2d</option>
                 </select>
                 <label class="muted text-sm">刷新间隔</label>
                 <select id="preRefreshSec" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
@@ -545,7 +550,9 @@
             <div class="card rounded-2xl p-4 space-y-6">
               <div id="preChart15m" style="height:320px"></div>
               <div id="preChart1h" style="height:320px"></div>
+              <div id="preChart4h" style="height:320px"></div>
               <div id="preChart1d" style="height:320px"></div>
+              <div id="preChart2d" style="height:320px"></div>
             </div>
           </section>
         </section>
@@ -879,8 +886,8 @@
                 <div class="mt-1">
                   2) <span class="font-semibold">预警（1H）</span>：TTM Squeeze ON + RSI 回钩。
                   Squeeze ON：<span class="font-semibold">BB_Width &lt; KC_Width</span>（波动收敛）。
-                  <span class="font-semibold">pre_long</span>（Bullish Hook）：RSI(14) 前一根&lt;35，且当前 RSI&gt;前一根，且当前 RSI≥40（35→40 回钩）；
-                  <span class="font-semibold">pre_short</span>（Bearish Hook）：RSI(14) 前一根&gt;65，且当前 RSI&lt;前一根，且当前 RSI≤60（65→60 回钩）。
+                  <span class="font-semibold">pre_long</span>（Bullish Hook）：RSI(14) 前一根&lt;40，且当前 RSI&gt;前一根，且当前 RSI≥38；
+                  <span class="font-semibold">pre_short</span>（Bearish Hook）：RSI(14) 前一根&gt;60，且当前 RSI&lt;前一根，且当前 RSI≤62。
                 </div>
                 <div class="mt-1">
                   3) <span class="font-semibold">触发（15M）</span>：突破近 3 根已收盘K线的高/低。
@@ -1120,6 +1127,13 @@
     return `<span class="muted">${arr.slice(0,4).join('+')}</span>`;
   }
 
+  // ==========================
+  // 多空综合雷达（Signal Dashboard）
+  // ==========================
+  // loadSignalDashboard():
+  // - 调用后端 /api/signal_dashboard 获取 Top100/自选 的综合评分结果
+  // - 将 score、level、资金费率、价格/OI变化、量能、MACD/RSI 与 reasons 渲染到 DataTables
+  // - 表格隐藏列：score_raw/updated_ts 用于排序
   async function loadSignalDashboard() {
     const mode = document.getElementById('sigMode').value;
     const kTf = document.getElementById('sigKtf').value || '1h';
@@ -1183,6 +1197,13 @@
     }, Math.max(30, sec) * 1000);
   }
 
+  // ==========================
+  // 页面切换（导航）
+  // ==========================
+  // showPage():
+  // - 控制各功能页显示/隐藏
+  // - 同步左侧导航 active 状态
+  // - DataTables 在 hidden 状态下初始化会列宽异常，因此切页后做 columns.adjust()
   function showPage(pageId) {
     const pages = ['page-dashboard', 'page-macd', 'page-prealert', 'page-signal', 'page-news', 'page-telegram', 'page-tri-signal', 'page-master-a'];
     pages.forEach(pid => {
@@ -1233,13 +1254,22 @@
     }
   }
 
+  // ==========================
+  // 仪表板（Dashboard）：主入口流程
+  // ==========================
+  // loadAll():
+  // - 读取页面上方时间框架选择（15m/1h/4h/1d）
+  // - 并发请求：
+  //   1) /api/summary：固定 5 个合约主表数据（lookback=6）
+  //   2) /api/anomalies：Top100 市场异动数据（lookback=6，按 score 排序）
+  // - 渲染：主表 renderMain + 异动卡片 renderCards
   async function loadAll() {
     const tf = document.getElementById('tf').value;
     document.getElementById('status').textContent = '更新中…';
 
     const [summary, anomalies] = await Promise.all([
-      fetchJson(`/api/summary?timeframe=${encodeURIComponent(tf)}`),
-      fetchJson(`/api/anomalies?timeframe=${encodeURIComponent(tf)}&top_n=50`)
+      fetchJson(`/api/summary?timeframe=${encodeURIComponent(tf)}&lookback=6`),
+      fetchJson(`/api/anomalies?timeframe=${encodeURIComponent(tf)}&top_n=100&lookback=6`)
     ]);
 
     lastAnomalyPayload = anomalies;
@@ -1251,6 +1281,10 @@
     document.getElementById('status').textContent = `更新时间：${now.toLocaleString()}`;
   }
 
+  // renderMain(): 渲染“主表格”（固定 5 个合约）。
+  // 数据字段来自后端 Row：
+  // - contract/timeframe/last_price/price_change_pct/oi_change_pct/market_signal/updated_at
+  // 注意：这里的 last_price 是该时间框架最后一根K线的收盘价，不是实时 ticker last。
   function renderMain(items) {
     const rows = items.map(x => ( [
       x.contract,
@@ -1275,6 +1309,10 @@
     }
   }
 
+  // renderCards(): 渲染“市场异动（Top100）”四象限卡片。
+  // - counts: 每个桶的数量
+  // - top3: 每个桶按 score 降序的前三个合约符号（用于卡片展示）
+  // 点击卡片会调用 openDetails(key) 打开详情表。
   function renderCards(payload) {
     const root = document.getElementById('cards');
     root.innerHTML = '';
@@ -1304,6 +1342,8 @@
     }
   }
 
+  // openDetails(): 打开某一“异动桶”的详情表。
+  // 详情列表在后端已按 score 降序排序；前端表格默认也按“强度”列降序显示。
   function openDetails(key) {
     if (!lastAnomalyPayload || !lastAnomalyPayload.details) return;
     const items = lastAnomalyPayload.details[key] || [];
@@ -1316,6 +1356,7 @@
       fmtPrice(x.last_price),
       `<span class="${clsPct(x.price_change_pct)}">${fmtPct(x.price_change_pct)}</span>`,
       `<span class="${clsPct(x.oi_change_pct)}">${fmtPct(x.oi_change_pct)}</span>`,
+      (x.score === null || x.score === undefined || !isFinite(Number(x.score))) ? '—' : Number(x.score).toFixed(3),
       x.timeframe,
       new Date((x.updated_at || 0) * 1000).toLocaleString(),
     ]));
@@ -1324,7 +1365,7 @@
       detailDT = $('#detailTable').DataTable({
         data: rows,
         pageLength: 10,
-        order: [[2, 'asc']],
+        order: [[4, 'desc']],
       });
     } else {
       detailDT.clear();
@@ -1333,6 +1374,7 @@
     }
   }
 
+  // 事件绑定：刷新按钮 / 时间框架切换 / 关闭详情
   document.getElementById('refresh').addEventListener('click', loadAll);
   document.getElementById('tf').addEventListener('change', () => {
     document.getElementById('detailsSection').classList.add('hidden');
@@ -1368,6 +1410,7 @@
     }
   }
 
+  // beep(): MACD 新信号提示音（可在 UI 勾选开关）。
   function beep() {
     try {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -1387,6 +1430,13 @@
     }
   }
 
+  // ==========================
+  // MACD 监控（Cross Signals）
+  // ==========================
+  // loadMacd():
+  // - 根据 UI 的 TopN、过滤条件（all/signal/golden/death）调用 /api/macd_signals
+  // - renderMacd() 渲染 DataTables，并基于新出现的 (contract|tf|type|time) 做提示音
+  // - 设置一个定时器，在页面可见时按间隔自动刷新
   async function loadMacd() {
     // 同步当前 UI 选择，确保每次打开页默认是 1h
     const tfSel = document.getElementById('macdTf');
@@ -1414,6 +1464,10 @@
     document.getElementById('macdStatus').textContent = `更新时间：${new Date().toLocaleString()}`;
   }
 
+  // renderMacd():
+  // - 进行 timeframe / 信号类型过滤
+  // - 生成 DataTables 行，并对金叉/死叉行着色
+  // - 使用隐藏列辅助排序：先把“有信号的行”排前，再按 signal_time 倒序
   function renderMacd(items) {
     // 过滤：timeframe
     let filtered = items;
@@ -1504,6 +1558,7 @@
     }
   }
 
+  // MACD 页事件：刷新 / TopN / timeframe / 刷新间隔 / 过滤按钮
   document.getElementById('macdRefresh').addEventListener('click', loadMacd);
   document.getElementById('macdTopN').addEventListener('change', () => {
     loadMacd();
@@ -1530,6 +1585,7 @@
     loadMacd();
   });
 
+  // Signal Dashboard 页事件：刷新 / 刷新间隔 / mode / K线 / 只看有信号 / 排序
   const _sigRefreshEl = document.getElementById('sigRefresh');
   if (_sigRefreshEl) {
     _sigRefreshEl.addEventListener('click', () => loadSignalDashboard().catch(() => {}));
@@ -1557,6 +1613,13 @@
 
   setSignalTimer();
 
+  // ==========================
+  // MACD 预警（Prealert）
+  // ==========================
+  // loadPrealerts():
+  // - 调用 /api/macd_prealerts 获取“即将金叉/即将死叉”列表
+  // - renderPrealerts() 渲染 DataTables
+  // - 点击行通常会加载详细图（prealert detail）并展示 DIF/DEA/Hist
   const _preRefreshEl = document.getElementById('preRefresh');
   if (_preRefreshEl) {
     _preRefreshEl.addEventListener('click', () => loadPrealerts().catch(() => {}));
@@ -1599,6 +1662,7 @@
     });
   }
 
+  // 导航点击：切页后按需触发各页面首屏加载
   document.querySelectorAll('.nav-item').forEach(btn => {
     btn.addEventListener('click', () => {
       const pageId = btn.getAttribute('data-target');
@@ -1632,11 +1696,22 @@
     });
   });
 
+  // ==========================
+  // 三周期信号矩阵（Tri-Signal）
+  // ==========================
+  // - loadTriMatrix(): 拉取 /api/tri_signal/matrix，并按优先级/等级排序后分页渲染
+  // - loadTriChart(): 拉取 /api/tri_signal/candles 并绘制K线 + 指标（按 tf 自动切换指标面板）
   const triRefreshBtn = document.getElementById('triRefresh');
   if (triRefreshBtn) triRefreshBtn.addEventListener('click', () => loadTriMatrix());
   const triLoadChartBtn = document.getElementById('triLoadChart');
   if (triLoadChartBtn) triLoadChartBtn.addEventListener('click', () => loadTriChart());
 
+  // ==========================
+  // 量化策略（Master Prompt）
+  // ==========================
+  // - setMpStrategy(): 切换策略A/策略B，并更新页面说明与表格列标题
+  // - loadMpMatrix(): 拉取 /api/master_a/matrix 或 /api/master_b/matrix，并分页渲染
+  // - loadMpChart(): 拉取 /api/tri_signal/candles 绘制策略图表与风控标注
   let _mpStrategy = 'A';
   const mpBtnA = document.getElementById('mpBtnA');
   const mpBtnB = document.getElementById('mpBtnB');
@@ -2126,6 +2201,10 @@
     document.getElementById('triStatus').textContent = errors && errors.length ? (`部分失败：${errors.slice(0,2).join(' ; ')}`) : `已更新：${items.length} 个合约`;
   }
 
+  // tri matrix pagination：
+  // - _triAllItems 存全量
+  // - _triPage/_triPageSize 控制分页
+  // - _renderTriTablePage() 每次只渲染当前页，避免 DOM 过大
   // tri matrix pagination
   const triPageSizeSel = document.getElementById('triPageSize');
   const triPagePrevBtn = document.getElementById('triPagePrev');
@@ -2162,6 +2241,11 @@
     const high = items.map(x => x.h);
     const low = items.map(x => x.l);
     const close = items.map(x => x.c);
+
+    // Tri-Signal 图表说明：
+    // - 主图：K线
+    // - 指标：按 tf 自动切换（1h: EMA200+RSI；4h: EMA20/50+ADX；1d: SMA10+MACD）
+    // - 交互：Plotly 开启 pan/zoom/hover，并在 1h 上叠加 Setup/Signal 标注
 
     const traces = [{
       type: 'candlestick',
@@ -2481,6 +2565,10 @@
   }
 
   function setMpStrategy(st) {
+    // setMpStrategy(): 切换策略 A/B
+    // - A：1H 环境+预警，15M 触发
+    // - B：1D 环境+预警，4H 触发
+    // 切换后会：更新说明文案、更新表格列名、重建 tf 下拉，并刷新矩阵数据
     _mpStrategy = (st === 'B') ? 'B' : 'A';
     if (mpBtnA && mpBtnB) {
       if (_mpStrategy === 'A') {
@@ -2552,8 +2640,8 @@
         <div class="mt-1">
           2) <span class="font-semibold">预警（1H）</span>：TTM Squeeze ON + RSI 回钩。
           Squeeze ON：<span class="font-semibold">BB_Width &lt; KC_Width</span>。
-          <span class="font-semibold">pre_long</span>（Bullish Hook）：RSI(14) 前一根&lt;35，且当前 RSI&gt;前一根，且当前 RSI≥40；
-          <span class="font-semibold">pre_short</span>（Bearish Hook）：RSI(14) 前一根&gt;65，且当前 RSI&lt;前一根，且当前 RSI≤60。
+          <span class="font-semibold">pre_long</span>（Bullish Hook）：RSI(14) 前一根&lt;40，且当前 RSI&gt;前一根，且当前 RSI≥38；
+          <span class="font-semibold">pre_short</span>（Bearish Hook）：RSI(14) 前一根&gt;60，且当前 RSI&lt;前一根，且当前 RSI≤62。
         </div>
         <div class="mt-1">
           <span class="font-semibold">TTM Squeeze（1H）计算</span>：
@@ -2587,6 +2675,10 @@
   }
 
   async function loadMpMatrix() {
+    // loadMpMatrix():
+    // - 根据当前策略选择 /api/master_a/matrix 或 /api/master_b/matrix
+    // - 将返回 items 建立 _mpLatestMap（供画图标注用）
+    // - 按优先级（触发>预警>无）排序并分页渲染
     const statusEl = document.getElementById('mpStatus');
     if (statusEl) statusEl.textContent = '更新中…';
     const url = (_mpStrategy === 'B') ? '/api/master_b/matrix' : '/api/master_a/matrix';
@@ -2621,6 +2713,10 @@
   }
 
   async function loadMpChart() {
+    // loadMpChart():
+    // - 拉取 /api/tri_signal/candles（复用K线接口）绘制策略图
+    // - 叠加策略相关指标（EMA/SMA/RSI/MACD/BB/KC）
+    // - 如果当前合约在矩阵中处于预警/触发，会在图上标注 MP PRE / MP TRIG 以及 Entry/SL/TP
     const contractEl = document.getElementById('mpContract');
     const tfEl = document.getElementById('mpTf');
     const contract = (contractEl && contractEl.value) ? contractEl.value : 'BTC_USDT';
@@ -2987,6 +3083,12 @@
     `;
   }
 
+  // ==========================
+  // 新闻多空哨兵（News Sentinel）
+  // ==========================
+  // loadNews():
+  // - 拉取 /api/news/items 最新新闻及情绪分析结果
+  // - renderNews() 渲染表格，并按刷新间隔自动轮询
   async function loadNews() {
     const sec = parseInt(document.getElementById('newsRefreshSec').value || '120', 10);
     document.getElementById('newsStatus').textContent = '更新中…';
@@ -3004,6 +3106,10 @@
     document.getElementById('newsStatus').textContent = `更新时间：${new Date().toLocaleString()}`;
   }
 
+  // renderNews():
+  // - 将新闻条目转换为 DataTables 行
+  // - 隐藏列：时间戳（用于排序）
+  // - applyNewsSentimentFilter(): 对情绪列做筛选（利多/利空/中性）
   function renderNews(items) {
     const rows = (items || []).map(x => {
       const ts = (x.published_at || x.created_at || 0);
@@ -3047,6 +3153,12 @@
     applyNewsSentimentFilter();
   }
 
+  // ==========================
+  // Telegram 推送设置（后端持久化在 /api/news/settings）
+  // ==========================
+  // loadNewsSettings():
+  // - 获取当前 Telegram Bot Token/ChatId 及各模块推送开关
+  // - 回填到设置表单
   async function loadNewsSettings() {
     const payload = await fetchJson('/api/news/settings');
     const s = (payload && payload.settings) ? payload.settings : {};
@@ -3065,6 +3177,9 @@
     if (bEl) bEl.checked = (s.push_master_b_enabled === undefined) ? true : !!s.push_master_b_enabled;
   }
 
+  // saveNewsSettings():
+  // - 将表单设置 POST 到 /api/news/settings
+  // - 这些设置会影响后端的自动推送线程（新闻/MACD/信号/策略等）
   async function saveNewsSettings() {
     const s = {
       tg_bot_token: (document.getElementById('tgBotToken').value || '').trim(),
@@ -3093,6 +3208,13 @@
     }
   }
 
+  // ==========================
+  // Telegram 推送历史（Push History）
+  // ==========================
+  // loadPushHistory():
+  // - 拉取 /api/telegram/push_history（后端汇总各模块推送记录）
+  // - rebuildPushLevelOptions(): 根据 level 动态构造筛选下拉
+  // - DataTables 渲染后可按 level/ok/时间筛选
   async function loadPushHistory() {
     const payload = await fetchJson('/api/telegram/push_history?limit=100');
     const items = (payload && payload.items) ? payload.items : [];
@@ -3292,6 +3414,13 @@
     return '—';
   }
 
+  // ==========================
+  // MACD 预警（Prealert）：列表/详情
+  // ==========================
+  // loadPrealerts():
+  // - 拉取 /api/macd_prealerts（支持 TopN、only_warn、warn_type、tf 等参数）
+  // - 渲染 renderPrealerts()
+  // - 页面里还会通过详情区展示单个合约的 DIF/DEA/Hist 走势（macd_prealert_detail）
   async function loadPrealerts() {
     const sec = parseInt(document.getElementById('preRefreshSec').value || '120', 10);
     document.getElementById('preStatus').textContent = '更新中…';
@@ -3302,7 +3431,7 @@
 
     const onlyWarn = (preFilterMode === 'warn' || preFilterMode === 'pre_golden' || preFilterMode === 'pre_death') ? 1 : 0;
     const warnType = (preFilterMode === 'pre_golden' || preFilterMode === 'pre_death') ? preFilterMode : 'all';
-    const payload = await fetchJson(`/api/macd_prealerts?limit=${topN}&only_warn=${onlyWarn}&warn_type=${warnType}`);
+    const payload = await fetchJson(`/api/macd_prealerts?limit=${topN}&only_warn=${onlyWarn}&warn_type=${warnType}&timeframe=${encodeURIComponent(preTfMode)}`);
     const items = (payload && payload.items) ? payload.items : [];
     renderPrealerts(items);
 
@@ -3315,6 +3444,9 @@
     document.getElementById('preStatus').textContent = `更新时间：${new Date().toLocaleString()}`;
   }
 
+  // renderPrealerts():
+  // - 负责把预警列表渲染为 DataTables
+  // - expectedCols 用于防止列数变化导致 DataTables 状态异常（需要时会销毁重建）
   function renderPrealerts(items) {
     const expectedCols = 12;
     if (preDT && preDT.columns && preDT.columns().count && preDT.columns().count() !== expectedCols) {
@@ -3325,11 +3457,13 @@
       $('#preTable tbody').empty();
     }
 
-    const tfs = (preTfMode === 'all') ? ['15m', '1h', '1d'] : [preTfMode];
+    const tfs = (preTfMode === 'all') ? ['15m', '1h', '4h', '1d', '2d'] : [preTfMode];
     const tfField = (tf) => {
       if (tf === '15m') return 'status_15m';
       if (tf === '1h') return 'status_1h';
+      if (tf === '4h') return 'status_4h';
       if (tf === '1d') return 'status_1d';
+      if (tf === '2d') return 'status_2d';
       return null;
     };
 
@@ -3429,7 +3563,9 @@
     document.getElementById('preDetails').classList.remove('hidden');
     await _loadPreChart(contract, '15m', 'preChart15m', `${symbol} 15m`);
     await _loadPreChart(contract, '1h', 'preChart1h', `${symbol} 1h`);
+    await _loadPreChart(contract, '4h', 'preChart4h', `${symbol} 4h`);
     await _loadPreChart(contract, '1d', 'preChart1d', `${symbol} 1d`);
+    await _loadPreChart(contract, '2d', 'preChart2d', `${symbol} 2d`);
 
   });
 

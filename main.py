@@ -542,7 +542,12 @@ def _signal_last_push_ts(symbol: str) -> Optional[int]:
 
 
 def push_telegram_batch_recent(window_sec: int = 300, limit: int = 50, max_items_in_msg: int = 8) -> dict:
-    """合并推送：把最近 window_sec 内满足条件的新闻合成 1 条消息发送（仍按 uniq 去重落库）。"""
+    """新闻多空哨兵：合并推送最近一段时间内的新闻信号。
+
+    - window_sec：统计窗口（秒），只取 created_at >= now-window_sec 的新闻
+    - strength 阈值从配置读取（默认 0.75），只推送 bullish/bearish 且 strength >= 阈值
+    - 写入 news_push_history 作为去重与节流依据
+    """
     s = _news_settings()
     enabled = _setting_bool(s, "push_enabled", True)
     threshold = s.get("push_threshold")
@@ -1123,7 +1128,13 @@ def _macd_prealert_push_loop() -> None:
 
 
 def push_tg_macd_prealerts(topn: int = 50, max_items_in_msg: int = 20, force: int = 0) -> dict:
-    """拉取 MACD 预警结果并合并推送 1 条 TG 消息；每个预警按 uniq 去重写入 push_history。"""
+    """MACD 预警推送：拉取 /api/macd_prealerts 的结果并合并推送。
+
+    关键点：
+    - 使用数据库查询上次推送时间实现全局节流（服务重启/多进程也有效）
+    - 仅推送 1h timeframe 的“即将金叉/即将死叉”预警
+    - Telegram 单条消息长度有限，超过会自动拆分多条
+    """
     topn = max(10, min(200, int(topn)))
     max_items_in_msg = max(1, min(200, int(max_items_in_msg)))
 
@@ -1296,6 +1307,12 @@ def push_tg_macd_prealerts(topn: int = 50, max_items_in_msg: int = 20, force: in
 
 
 def push_tg_macd_monitor(topn: int = 50, max_items_in_msg: int = 30, force: int = 0) -> dict:
+    """MACD 监控推送：推送最近发生的金叉/死叉事件（来自 /api/macd_signals）。
+
+    - 同样使用数据库实现节流
+    - 只推送 1h timeframe 的信号（避免 15m 过于频繁）
+    - strength 为归一化后的柱子强度百分比（便于跨币种对比）
+    """
     topn = max(10, min(200, int(topn)))
     max_items_in_msg = max(1, min(200, int(max_items_in_msg)))
 
@@ -2482,6 +2499,7 @@ TIMEFRAMES = {
 MACD_TIMEFRAMES = {
     "15m": "15m",
     "1h": "1h",
+    "4h": "4h",
     "1d": "1d",
 }
 
@@ -2493,6 +2511,7 @@ class Row:
     last_price: Optional[float]
     price_change_pct: Optional[float]
     oi_change_pct: Optional[float]
+    score: Optional[float]
     market_signal: Optional[str]
     updated_at: int
 
@@ -2772,6 +2791,13 @@ def _rest_get_full_url(url: str, params: Optional[dict] = None, timeout: int = 1
 
 
 def get_tri_candles(contract: str, tf: str, limit: int) -> List[dict]:
+    """获取三周期信号/策略模块用的K线数据（REST）。
+
+    说明：
+    - 这里的 tf 直接使用策略模块内部的时间框架（如 1h/4h/1d/1M）。
+    - Gate REST 的月线使用 interval=30d 近似，因此 tf=="1M" 时会映射到 "30d"。
+    - 返回结构为 Gate futures candlesticks 的 list[dict]，字段包含 t/o/h/l/c/v/sum。
+    """
     interval = tf
     if tf == "1M":
         interval = "30d"
@@ -2790,6 +2816,11 @@ def get_tri_candles(contract: str, tf: str, limit: int) -> List[dict]:
 # ==========================
 
 def get_candles(contract: str, tf: str, limit: int = 2) -> List[dict]:
+    """获取仪表板/异动检测用的K线数据（REST）。
+
+    - tf 是页面选择的时间框架（15m/1h/4h/1d），会通过 TIMEFRAMES 映射到 Gate interval。
+    - 返回值不做重排；上层计算会自行按时间戳 t 排序。
+    """
     interval = TIMEFRAMES[tf]
     # 优先直接用 REST，MCP 的工具名不确定；后续可通过 tools/list 做映射
     data = _rest_get("/candlesticks", params={"contract": contract, "interval": interval, "limit": limit})
@@ -2798,25 +2829,108 @@ def get_candles(contract: str, tf: str, limit: int = 2) -> List[dict]:
 
 
 def get_macd_candles(contract: str, tf: str, limit: int = 120) -> List[dict]:
+    """获取 MACD 监控/预警用的K线数据（REST）。
+
+    说明：
+    - MACD 扫描会用相对更短的历史窗口（默认 120 根），避免请求过大。
+    - tf 取 MACD_TIMEFRAMES 映射表（允许 all/15m/1h/1d 相关调用）。
+    - 结果会缓存（避免高频刷新触发 Gate 429）。
+    """
     # MACD 扫描用：只取最近 100-150 根，避免全量历史
-    interval = MACD_TIMEFRAMES[tf]
+    # 备注：Gate candlesticks interval 不包含 2d，这里用 1d 合成 2d，确保筛选后口径一致。
     ck = f"macd:candles:{contract}:{tf}:{limit}"
     cached = _cache_get(ck, ttl=180)
     if cached is not None:
         return cached
-    data = _rest_get("/candlesticks", params={"contract": contract, "interval": interval, "limit": limit})
-    out = data if isinstance(data, list) else []
+
+    if tf == "2d":
+        # 2d = 两根 1d 合成一根 2d（O=第一根open, H/L=两根极值, C=第二根close, V=sum）
+        raw_limit = max(20, min(800, int(limit) * 2 + 6))
+        data = _rest_get("/candlesticks", params={"contract": contract, "interval": "1d", "limit": raw_limit})
+        seq = [x for x in (data if isinstance(data, list) else []) if isinstance(x, dict)]
+        seq.sort(key=lambda x: int(x.get("t") or 0))
+
+        # 只做简单的 2-by-2 合成：保证每根 2d 都对应连续两根 1d
+        if len(seq) % 2 == 1:
+            seq = seq[1:]
+
+        out: List[dict] = []
+        for i in range(0, len(seq) - 1, 2):
+            a = seq[i]
+            b = seq[i + 1]
+            try:
+                o = _safe_float(a.get("o"))
+                h1 = _safe_float(a.get("h"))
+                l1 = _safe_float(a.get("l"))
+                c1 = _safe_float(a.get("c"))
+                o2 = _safe_float(b.get("o"))
+                h2 = _safe_float(b.get("h"))
+                l2 = _safe_float(b.get("l"))
+                c2 = _safe_float(b.get("c"))
+                if o is None or c2 is None:
+                    continue
+
+                hi = None
+                lo = None
+                for vv in (h1, h2):
+                    if vv is None:
+                        continue
+                    hi = vv if hi is None else max(float(hi), float(vv))
+                for vv in (l1, l2):
+                    if vv is None:
+                        continue
+                    lo = vv if lo is None else min(float(lo), float(vv))
+                if hi is None or lo is None:
+                    continue
+
+                v1 = _safe_float(a.get("v"))
+                v2 = _safe_float(b.get("v"))
+                sv1 = _safe_float(a.get("sum"))
+                sv2 = _safe_float(b.get("sum"))
+
+                out.append({
+                    "t": int(b.get("t") or 0),
+                    "o": float(o),
+                    "h": float(hi),
+                    "l": float(lo),
+                    "c": float(c2),
+                    "v": (float(v1 or 0.0) + float(v2 or 0.0)),
+                    "sum": (float(sv1 or 0.0) + float(sv2 or 0.0)),
+                })
+            except Exception:
+                continue
+
+        # 只保留最后 limit 根 2d
+        out = out[-int(limit):] if limit else out
+    else:
+        interval = MACD_TIMEFRAMES[tf]
+        data = _rest_get("/candlesticks", params={"contract": contract, "interval": interval, "limit": limit})
+        out = data if isinstance(data, list) else []
+
     _cache_set(ck, out)
     return out
 
 
 def get_contract_stats(contract: str, tf: str, limit: int = 2) -> List[dict]:
+    """获取 OI 等合约统计数据（REST）。
+
+    用途：
+    - 仪表板主表/市场异动的 OI 变化百分比计算
+    - 多空综合雷达中 OI(tf)% 的计算
+
+    注意：contract_stats 的时间戳字段可能是 t 或 time，上层会统一排序处理。
+    """
     interval = TIMEFRAMES[tf]
     data = _rest_get("/contract_stats", params={"contract": contract, "interval": interval, "limit": limit})
     return data if isinstance(data, list) else []
 
 
 def _pick_oi(stat: Dict[str, Any]) -> Optional[float]:
+    """从 contract_stats 单条记录中提取 OI 字段。
+
+    Gate 的不同接口/版本可能返回不同字段名，这里按候选字段依次尝试。
+    返回 None 表示该条记录无法解析出 OI。
+    """
     for k in (
         "open_interest",
         "open_interest_usd",
@@ -3006,8 +3120,22 @@ def top_contracts_by_quote_volume(limit: int = 50) -> List[str]:
     return out
 
 
-def compute_row(contract: str, tf: str) -> Row:
-    ck = f"row:{contract}:{tf}"
+def compute_row(contract: str, tf: str, lookback: int = 1) -> Row:
+    """计算单个合约在指定时间框架下的仪表板行数据。
+
+    核心输出：
+    - last_price：该 tf 的最后一根收盘价（用于主表展示；不等同于实时 ticker last）
+    - price_change_pct：按 lookback 根K线跨度的收盘价变化百分比
+    - oi_change_pct：按 lookback 个 contract_stats 点跨度的 OI 变化百分比
+    - score：异动强度分数（用于排序）：|ΔP| + 0.7 * |ΔOI|
+    - market_signal：四象限市场信号（价格/持仓的符号组合）
+
+    说明：
+    - 取样点使用 "lookback + 1" 个数据，以便取到 last 与 prevN（倒数第 lookback+1 个点）。
+    - REST 返回顺序可能不稳定，因此会按时间戳排序后取尾部点位。
+    """
+    lb = max(1, min(24, int(lookback or 1)))
+    ck = f"row:{contract}:{tf}:lb{lb}"
     cached = _cache_get(ck, ttl=15)
     if cached is not None:
         try:
@@ -3017,13 +3145,13 @@ def compute_row(contract: str, tf: str) -> Row:
 
     updated_at = int(time.time())
 
-    candles = get_candles(contract, tf, limit=2)
+    candles = get_candles(contract, tf, limit=max(2, lb + 1))
     # 价格变化：按收盘价变化 (Close_last-Close_prev)/Close_prev * 100
     # 注意：REST 返回顺序可能变化，这里按时间戳 t 排序确保取到最后两根
     seq = [x for x in candles if isinstance(x, dict)]
     seq.sort(key=lambda x: int(x.get("t") or 0))
 
-    prev_close = _safe_float(seq[-2].get("c")) if len(seq) >= 2 else None
+    prev_close = _safe_float(seq[-(lb + 1)].get("c")) if len(seq) >= (lb + 1) else None
     last_close = _safe_float(seq[-1].get("c")) if len(seq) >= 1 else None
 
     last_price = last_close
@@ -3032,12 +3160,20 @@ def compute_row(contract: str, tf: str) -> Row:
     else:
         price_change_pct = (last_close - prev_close) / prev_close * 100.0
 
-    stats = get_contract_stats(contract, tf, limit=2)
+    stats = get_contract_stats(contract, tf, limit=max(2, lb + 1))
     stat_seq = [x for x in stats if isinstance(x, dict)]
     stat_seq.sort(key=lambda x: int(x.get("t") or x.get("time") or 0))
-    prev_oi = _pick_oi(stat_seq[-2]) if len(stat_seq) >= 2 else None
+    prev_oi = _pick_oi(stat_seq[-(lb + 1)]) if len(stat_seq) >= (lb + 1) else None
     last_oi = _pick_oi(stat_seq[-1]) if len(stat_seq) >= 1 else None
     oi_change_pct = _pct_change(last_oi, prev_oi)
+
+    score: Optional[float] = None
+    try:
+        if price_change_pct is not None and oi_change_pct is not None:
+            # 强度分数：价格变化与 OI 变化的加权绝对值（便于排序，兼容不同时间框架）
+            score = abs(float(price_change_pct)) + 0.7 * abs(float(oi_change_pct))
+    except Exception:
+        score = None
 
     market_signal = classify(price_change_pct, oi_change_pct)
 
@@ -3047,6 +3183,7 @@ def compute_row(contract: str, tf: str) -> Row:
         last_price=last_price,
         price_change_pct=price_change_pct,
         oi_change_pct=oi_change_pct,
+        score=score,
         market_signal=market_signal,
         updated_at=updated_at,
     )
@@ -3056,6 +3193,13 @@ def compute_row(contract: str, tf: str) -> Row:
 
 
 def classify(price_pct: Optional[float], oi_pct: Optional[float]) -> Optional[str]:
+    """四象限分类：由价格变化%与OI变化%的符号组合得出“市场信号”。
+
+    - 价格↑ + OI↑：多头强势进场（上涨伴随增仓）
+    - 价格↑ + OI↓：多头获利了结（上涨但减仓）
+    - 价格↓ + OI↑：空头强势进场（下跌伴随增仓）
+    - 价格↓ + OI↓：空头获利了结（下跌但减仓）
+    """
     if price_pct is None or oi_pct is None:
         return None
     if price_pct > 0 and oi_pct < 0:
@@ -3285,7 +3429,20 @@ def _macd_status_and_rsi(contract: str, tf: str = "1h") -> Dict[str, Any]:
 
 
 def _signal_score(item: Dict[str, Any]) -> Tuple[float, List[str], str]:
-    # 返回 score, reasons, level
+    """多空综合雷达：对单个币的多维指标打分，输出综合分数与原因。
+
+    返回：
+    - score：[-10, +10] 的综合分数（会 clamp）
+    - reasons：用于前端展示的主要加减分原因
+    - level：strong_long/long/neutral/short/strong_short
+
+    评分维度（大致）：
+    - 资金费率 funding（极正/极负）
+    - 价格(tf)% 与 OI(tf)% 共振（增仓趋势确认/减仓背离）
+    - 成交量放大（vol_ratio）
+    - MACD 事件（金叉/死叉/预警）
+    - RSI(14) 超买超卖（在趋势确认时会降权，避免逆势加分）
+    """
     score = 0.0
     reasons: List[str] = []
 
@@ -3443,6 +3600,20 @@ def build_signal_dashboard(
     sort: str = "score",
     k_tf: str = "1h",
 ) -> dict:
+    """构建“多空综合雷达”表格数据。
+
+    参数：
+    - mode：top100 或 watchlist
+    - limit：TopN 数量（用于 top100 模式）
+    - only_strong：只返回 strong_long/strong_short
+    - only_signal：只返回非 neutral
+    - sort：score/rank/symbol
+    - k_tf：指标计算使用的K线时间框架（15m/1h/1d）
+
+    说明：
+    - 数据会缓存（key 中包含 watchlist 与过滤条件），避免频繁触发外部接口。
+    - 该模块会综合 ticker / candles / contract_stats 等数据源。
+    """
     if not SIGNAL_DASHBOARD_ENABLED:
         return {"items": [], "errors": ["disabled"]}
     mode = (mode or "top100").strip().lower()
@@ -3670,6 +3841,12 @@ def _daily_trend(highs: List[float], lows: List[float], closes: List[float]) -> 
 
 
 class TriSignalEngine:
+    """三周期信号矩阵引擎。
+
+    目标：
+    - 用“月线背景 + 日线趋势 + 小时级执行”三段式结构，为每个合约输出方向/强弱/是否高胜率。
+    - 该引擎主要用于“监控/提示”，而不是严格的交易回测系统。
+    """
     def __init__(self, contracts: List[str]):
         self.contracts = contracts
 
@@ -3846,6 +4023,7 @@ class TriSignalEngine:
         }
 
     def analyze_one(self, contract: str) -> Dict[str, Any]:
+        """对单个合约执行三周期分析并返回结构化结果。"""
         now_ts = int(time.time())
         monthly = self._candles(contract, "1d", limit=160)
         daily = self._candles(contract, "4h", limit=260)
@@ -3910,6 +4088,14 @@ class TriSignalEngine:
 
 
 class MasterBEngine:
+    """量化策略 Master B（Voyage）引擎。
+
+    结构：
+    - 1D：环境过滤（趋势/ADX 等）决定只做多/只做空
+    - 1D：预警（回调/反弹至 SMA10 0%~0.9% 区间）
+    - 4H：触发（MACD 动能反转 + 吞没形态）
+    - 风控：用 ATR 计算 SL/TP1/TP2
+    """
     def __init__(self, contracts: List[str]):
         self.contracts = contracts
 
@@ -4183,6 +4369,14 @@ class MasterBEngine:
 
 
 class MasterAEngine:
+    """量化策略 Master A 引擎。
+
+    结构：
+    - 1H：环境过滤（Close 相对 EMA200 的多空环境）
+    - 1H：预警（TTM Squeeze ON + RSI 回钩）
+    - 15M：触发（突破近 3 根的高/低点）
+    - 风控：用 1H ATR 计算 SL/TP1/TP2
+    """
     def __init__(self, contracts: List[str]):
         self.contracts = contracts
 
@@ -4264,12 +4458,12 @@ class MasterAEngine:
 
             if side == "long":
                 # oversold hook: RSI 处于超卖附近且开始回升
-                if float(rsi_prev) < 35.0 and float(rsi_last) > float(rsi_prev) and float(rsi_last) >= 40.0:
-                    return {"state": "pre_long", "reason": "Squeeze ON + RSI超卖回钩（35→40）", "squeeze": True, "rsi": float(rsi_last)}
+                if float(rsi_prev) < 40.0 and float(rsi_last) > float(rsi_prev) and float(rsi_last) >= 38.0:
+                    return {"state": "pre_long", "reason": "Squeeze ON + RSI超卖回钩（prev<40 且回升且>=38）", "squeeze": True, "rsi": float(rsi_last)}
             else:
                 # overbought hook: RSI 处于超买附近且开始回落
-                if float(rsi_prev) > 65.0 and float(rsi_last) < float(rsi_prev) and float(rsi_last) <= 60.0:
-                    return {"state": "pre_short", "reason": "Squeeze ON + RSI超买回钩（65→60）", "squeeze": True, "rsi": float(rsi_last)}
+                if float(rsi_prev) > 60.0 and float(rsi_last) < float(rsi_prev) and float(rsi_last) <= 62.0:
+                    return {"state": "pre_short", "reason": "Squeeze ON + RSI超买回钩（prev>60 且回落且<=62）", "squeeze": True, "rsi": float(rsi_last)}
         except Exception:
             pass
 
@@ -5345,19 +5539,31 @@ def health() -> dict:
 
 
 @app.get("/api/summary")
-def summary(timeframe: str = "1h") -> JSONResponse:
+def summary(timeframe: str = "1h", lookback: int = 6) -> JSONResponse:
+    """仪表板主表（固定5个合约）。
+
+    - timeframe：15m/1h/4h/1d
+    - lookback：用于 price_change_pct / oi_change_pct 的跨度（使用 lookback+1 个点取 last 与 prevN）
+
+    返回：
+    - items：Row.__dict__ 列表（包含 score/market_signal 等）
+    - errors：失败合约列表
+    """
     if timeframe not in TIMEFRAMES:
         return JSONResponse({"error": "invalid timeframe"}, status_code=400)
 
-    ck = f"summary:{timeframe}"
+    lookback = max(1, min(24, int(lookback or 1)))
+
+    ck = f"summary:{timeframe}:lb{lookback}"
     cached = _cache_get(ck, ttl=10)
     if cached is not None:
         return JSONResponse(cached)
 
     items: List[dict] = []
     errors: List[str] = []
+
     with ThreadPoolExecutor(max_workers=5) as ex:
-        futs = {ex.submit(compute_row, c, timeframe): c for c in CONTRACTS_5}
+        futs = {ex.submit(compute_row, c, timeframe, lookback): c for c in CONTRACTS_5}
         for f in as_completed(futs):
             c = futs[f]
             try:
@@ -5365,6 +5571,12 @@ def summary(timeframe: str = "1h") -> JSONResponse:
                 items.append(r.__dict__)
             except Exception as e:
                 errors.append(f"{c}: {e}")
+
+    # 默认按强度降序，便于主表直接体现“异动优先级”
+    try:
+        items.sort(key=lambda x: float(x.get("score") or 0.0), reverse=True)
+    except Exception:
+        pass
 
     payload = {"items": items, "errors": errors}
     _cache_set(ck, payload)
@@ -5681,13 +5893,25 @@ def api_macd_prealert_auto_status() -> JSONResponse:
 
 
 @app.get("/api/macd_prealerts")
-def macd_prealerts(limit: int = 50, only_warn: int = 0, warn_type: str = "all", debug: int = 0) -> JSONResponse:
+def macd_prealerts(
+    limit: int = 50,
+    only_warn: int = 0,
+    warn_type: str = "all",
+    timeframe: str = "all",
+    debug: int = 0,
+) -> JSONResponse:
     limit = max(10, min(100, int(limit)))
     warn_type = (warn_type or "all").strip().lower()
     if warn_type not in ("all", "pre_golden", "pre_death"):
         warn_type = "all"
 
-    ck = f"macd_prealerts:{limit}:{only_warn}:{warn_type}:{int(1 if debug else 0)}"
+    timeframe = (timeframe or "all").strip().lower()
+    if timeframe not in ("all", "15m", "1h", "4h", "1d", "2d"):
+        timeframe = "all"
+
+    tfs_scan = ("15m", "1h", "4h", "1d", "2d") if timeframe == "all" else (timeframe,)
+
+    ck = f"macd_prealerts:{limit}:{only_warn}:{warn_type}:{timeframe}:{int(1 if debug else 0)}"
     if not debug:
         cached = _cache_get(ck, ttl=30)
         if cached is not None:
@@ -5698,13 +5922,13 @@ def macd_prealerts(limit: int = 50, only_warn: int = 0, warn_type: str = "all", 
     dbg = {
         "candidates": 0,
         "scanned": 0,
-        "tf_scanned": {"15m": 0, "1h": 0, "1d": 0},
-        "tf_prealert": {"15m": 0, "1h": 0, "1d": 0},
-        "tf_insufficient": {"15m": 0, "1h": 0, "1d": 0},
-        "tf_min_ratio": {"15m": None, "1h": None, "1d": None},
-        "tf_min_abs_gap": {"15m": None, "1h": None, "1d": None},
-        "tf_ratio_pass": {"15m": 0, "1h": 0, "1d": 0},
-        "tf_slope_pass": {"15m": 0, "1h": 0, "1d": 0},
+        "tf_scanned": {"15m": 0, "1h": 0, "4h": 0, "1d": 0, "2d": 0},
+        "tf_prealert": {"15m": 0, "1h": 0, "4h": 0, "1d": 0, "2d": 0},
+        "tf_insufficient": {"15m": 0, "1h": 0, "4h": 0, "1d": 0, "2d": 0},
+        "tf_min_ratio": {"15m": None, "1h": None, "4h": None, "1d": None, "2d": None},
+        "tf_min_abs_gap": {"15m": None, "1h": None, "4h": None, "1d": None, "2d": None},
+        "tf_ratio_pass": {"15m": 0, "1h": 0, "4h": 0, "1d": 0, "2d": 0},
+        "tf_slope_pass": {"15m": 0, "1h": 0, "4h": 0, "1d": 0, "2d": 0},
     }
 
     try:
@@ -5746,20 +5970,20 @@ def macd_prealerts(limit: int = 50, only_warn: int = 0, warn_type: str = "all", 
         if debug:
             local_dbg = {
                 "scanned": 1,
-                "tf_scanned": {"15m": 0, "1h": 0, "1d": 0},
-                "tf_prealert": {"15m": 0, "1h": 0, "1d": 0},
-                "tf_insufficient": {"15m": 0, "1h": 0, "1d": 0},
-                "tf_min_ratio": {"15m": None, "1h": None, "1d": None},
-                "tf_min_abs_gap": {"15m": None, "1h": None, "1d": None},
-                "tf_ratio_pass": {"15m": 0, "1h": 0, "1d": 0},
-                "tf_slope_pass": {"15m": 0, "1h": 0, "1d": 0},
+                "tf_scanned": {"15m": 0, "1h": 0, "4h": 0, "1d": 0, "2d": 0},
+                "tf_prealert": {"15m": 0, "1h": 0, "4h": 0, "1d": 0, "2d": 0},
+                "tf_insufficient": {"15m": 0, "1h": 0, "4h": 0, "1d": 0, "2d": 0},
+                "tf_min_ratio": {"15m": None, "1h": None, "4h": None, "1d": None, "2d": None},
+                "tf_min_abs_gap": {"15m": None, "1h": None, "4h": None, "1d": None, "2d": None},
+                "tf_ratio_pass": {"15m": 0, "1h": 0, "4h": 0, "1d": 0, "2d": 0},
+                "tf_slope_pass": {"15m": 0, "1h": 0, "4h": 0, "1d": 0, "2d": 0},
             }
 
         # per timeframe status
         statuses: Dict[str, dict] = {}
         latest_warn = None
 
-        for tf in ("15m", "1h", "1d"):
+        for tf in tfs_scan:
             try:
                 if debug:
                     local_dbg["tf_scanned"][tf] += 1
@@ -5835,9 +6059,13 @@ def macd_prealerts(limit: int = 50, only_warn: int = 0, warn_type: str = "all", 
             "market_cap_rank": cand.get("market_cap_rank"),
             "market_cap": cand.get("market_cap"),
             "current_price": last_px,
+            # 为了保持前端渲染逻辑稳定，这里固定返回所有 status_xx 字段；
+            # 但当 timeframe != all 时，只有被扫描的周期才会有真实值，其他周期保持“—”。
             "status_15m": statuses.get("15m", {}).get("status", "—"),
             "status_1h": statuses.get("1h", {}).get("status", "—"),
+            "status_4h": statuses.get("4h", {}).get("status", "—"),
             "status_1d": statuses.get("1d", {}).get("status", "—"),
+            "status_2d": statuses.get("2d", {}).get("status", "—"),
             "latest_warn_time": (latest_warn.get("time") if latest_warn else None),
             "latest_warn_type": (latest_warn.get("type") if latest_warn else None),
             "latest_distance": (latest_warn.get("distance") if latest_warn else None),
@@ -5856,7 +6084,7 @@ def macd_prealerts(limit: int = 50, only_warn: int = 0, warn_type: str = "all", 
                     items.append(row)
                 if debug and ld:
                     dbg["scanned"] += int(ld.get("scanned") or 0)
-                    for tf in ("15m", "1h", "1d"):
+                    for tf in ("15m", "1h", "4h", "1d", "2d"):
                         dbg["tf_scanned"][tf] += int((ld.get("tf_scanned") or {}).get(tf) or 0)
                         dbg["tf_prealert"][tf] += int((ld.get("tf_prealert") or {}).get(tf) or 0)
                         dbg["tf_insufficient"][tf] += int((ld.get("tf_insufficient") or {}).get(tf) or 0)
@@ -5891,7 +6119,7 @@ def macd_prealerts(limit: int = 50, only_warn: int = 0, warn_type: str = "all", 
 @app.get("/api/macd_prealert_detail")
 def macd_prealert_detail(contract: str, tf: str = "1h", limit: int = 200) -> JSONResponse:
     tf = (tf or "1h").strip()
-    if tf not in ("15m", "1h", "1d"):
+    if tf not in ("15m", "1h", "4h", "1d", "2d"):
         tf = "1h"
     limit = max(80, min(300, int(limit)))
     ck = f"macd_prealert_detail:{contract}:{tf}:{limit}"
@@ -5921,12 +6149,25 @@ def macd_prealert_detail(contract: str, tf: str = "1h", limit: int = 200) -> JSO
 
 
 @app.get("/api/anomalies")
-def anomalies(timeframe: str = "1h", top_n: int = 50) -> JSONResponse:
+def anomalies(timeframe: str = "1h", top_n: int = 50, lookback: int = 1) -> JSONResponse:
+    """市场异动检测（TopN 合约池）。
+
+    逻辑：
+    - 先取 TopN（按 24h 成交额）合约列表
+    - 对每个合约调用 compute_row 计算 price_change_pct / oi_change_pct / score
+    - 使用四象限 classify 分桶，并对每个桶按 score 降序排序
+
+    参数：
+    - timeframe：15m/1h/4h/1d
+    - top_n：TopN 样本池（上限 200）
+    - lookback：变化幅度的跨度（与主表保持一致时可传 6）
+    """
     if timeframe not in TIMEFRAMES:
         return JSONResponse({"error": "invalid timeframe"}, status_code=400)
     top_n = max(10, min(200, int(top_n)))
+    lookback = max(1, min(24, int(lookback or 1)))
 
-    ck = f"anomalies:{timeframe}:{top_n}"
+    ck = f"anomalies:{timeframe}:{top_n}:lb{lookback}"
     cached = _cache_get(ck, ttl=20)
     if cached is not None:
         return JSONResponse(cached)
@@ -5940,7 +6181,7 @@ def anomalies(timeframe: str = "1h", top_n: int = 50) -> JSONResponse:
     rows: List[Row] = []
     # 50 个合约 * (candles + contract_stats) 两个请求；用并发显著降低整体耗时
     with ThreadPoolExecutor(max_workers=12) as ex:
-        futs = {ex.submit(compute_row, c, timeframe): c for c in contracts}
+        futs = {ex.submit(compute_row, c, timeframe, lookback): c for c in contracts}
         for f in as_completed(futs):
             c = futs[f]
             try:
@@ -5960,9 +6201,17 @@ def anomalies(timeframe: str = "1h", top_n: int = 50) -> JSONResponse:
         if k:
             buckets[k].append(r.__dict__)
 
+    # 每个桶按强度分数降序，Top3 与详情一致
+    try:
+        for k in buckets.keys():
+            buckets[k].sort(key=lambda x: float(x.get("score") or 0.0), reverse=True)
+    except Exception:
+        pass
+
     out = {
         "timeframe": timeframe,
         "top_n": top_n,
+        "lookback": lookback,
         "counts": {k: len(v) for k, v in buckets.items()},
         "top3": {k: [x["contract"] for x in v[:3]] for k, v in buckets.items()},
         "details": buckets,
@@ -5978,7 +6227,7 @@ def macd_signals(limit: int = 50, only_signal: int = 0, timeframe: str = "all") 
     # 返回：市值前N（过滤稳定币）对应的 Gate USDT 永续合约，在 15m/1h/1d 的 MACD 金叉/死叉信号
     limit = max(10, min(100, int(limit)))
     timeframe = (timeframe or "all").strip().lower()
-    if timeframe not in ("all", "15m", "1h", "1d"):
+    if timeframe not in ("all", "15m", "1h", "4h", "1d", "2d"):
         timeframe = "all"
     ck = f"macd_signals:{limit}:{only_signal}:{timeframe}"
     cached = _cache_get(ck, ttl=60)
@@ -6023,7 +6272,7 @@ def macd_signals(limit: int = 50, only_signal: int = 0, timeframe: str = "all") 
         last_px = last_price_map.get(contract)
         now_ts = int(time.time())
 
-        tfs = ("15m", "1h", "1d") if timeframe == "all" else (timeframe,)
+        tfs = ("15m", "1h", "4h", "1d", "2d") if timeframe == "all" else (timeframe,)
         for tf in tfs:
             try:
                 candles = get_macd_candles(contract, tf, limit=120)
