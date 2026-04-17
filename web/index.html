@@ -1450,7 +1450,7 @@
 
     // 全部：包含无信号行；只显示有信号/金叉/死叉：让后端过滤减少 payload
     const onlySignal = (macdFilterMode === 'signal' || macdFilterMode === 'golden' || macdFilterMode === 'death') ? 1 : 0;
-    const payload = await fetchJson(`/api/macd_signals?limit=${topN}&only_signal=${onlySignal}`);
+    const payload = await fetchJson(`/api/macd_signals?limit=${topN}&only_signal=${onlySignal}&timeframe=${encodeURIComponent(macdTfMode || 'all')}`);
     const items = (payload && payload.items) ? payload.items : [];
 
     renderMacd(items);
