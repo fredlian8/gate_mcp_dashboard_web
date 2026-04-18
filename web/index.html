@@ -40,6 +40,27 @@
     .input { background: rgba(17,24,39,0.75); color: rgba(255,255,255,0.9); border: 1px solid rgba(255,255,255,0.12); border-radius: 12px; }
     .input:focus { outline: none; border-color: rgba(59,130,246,0.65); box-shadow: 0 0 0 3px rgba(59,130,246,0.30); }
     select.input option { background: rgb(17,24,39); color: rgba(255,255,255,0.92); }
+    .dataTables_wrapper .dataTables_length select,
+    .dataTables_wrapper .dataTables_filter input {
+      background: rgba(17,24,39,0.75);
+      color: rgba(255,255,255,0.90);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 12px;
+      padding: 6px 10px;
+    }
+    .dataTables_wrapper .dataTables_length select:focus,
+    .dataTables_wrapper .dataTables_filter input:focus {
+      outline: none;
+      border-color: rgba(59,130,246,0.65);
+      box-shadow: 0 0 0 3px rgba(59,130,246,0.30);
+    }
+    .dataTables_wrapper .dataTables_length select option {
+      background: rgb(17,24,39);
+      color: rgba(255,255,255,0.92);
+    }
+    .js-plotly-plot {
+      touch-action: pan-y pinch-zoom;
+    }
     .row-golden td { background: rgba(20, 83, 45, 0.25) !important; }
     .row-death td { background: rgba(127, 29, 29, 0.25) !important; }
     /* 多空综合雷达：主要原因列强制加宽并允许换行 */
@@ -48,6 +69,7 @@
       white-space: normal !important;
       word-break: break-word;
     }
+
     /* 只把“主要原因”的结果内容调小（td），表头 th 保持正常 */
     #sigTable td.sig-reasons {
       font-size: 13px;
@@ -70,6 +92,7 @@
             <button class="nav-item active" data-target="page-dashboard" id="nav-dashboard">仪表板</button>
             <button class="nav-item" data-target="page-macd" id="nav-macd">MACD 监控</button>
             <button class="nav-item" data-target="page-prealert" id="nav-prealert">MACD 预警</button>
+            <button class="nav-item" data-target="page-macd-entry" id="nav-macd-entry">MACD 入场</button>
             <button class="nav-item" data-target="page-signal" id="nav-signal">多空综合雷达</button>
             <button class="nav-item" data-target="page-news" id="nav-news">新闻多空哨兵</button>
             <button class="nav-item" data-target="page-tri-signal" id="nav-tri-signal">三周期信号矩阵</button>
@@ -195,6 +218,260 @@
                 </thead>
                 <tbody></tbody>
               </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="page-macd-entry" class="hidden">
+          <header class="mb-6">
+            <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+              <div>
+                <h1 class="text-3xl font-extrabold text-blue-300">MACD 监控入场（趋势+量能过滤）</h1>
+                <p class="muted mt-2">入场触发：MACD 金叉/死叉；过滤：Close 与 EMA50、ADX14（趋势强度）、成交量均线（SMA20）确认。ADX&lt;20 完全不开仓；ADX 20-25 默认建议不开仓（可开启允许）。</p>
+                <details class="mt-3">
+                  <summary class="muted text-sm cursor-pointer">查看做多 / 做空条件（触发 / 过滤 / 风控参考）</summary>
+                  <div class="muted text-xs mt-3 space-y-3 leading-relaxed">
+                    <div>
+                      <div class="font-semibold text-gray-200">做多（Long）</div>
+                      <div class="mt-1">
+                        1) <span class="font-semibold">触发</span>：MACD <span class="font-semibold">金叉</span>（DIF 上穿 DEA）。
+                      </div>
+                      <div class="mt-1">
+                        2) <span class="font-semibold">趋势过滤</span>：Close &gt; EMA50。
+                      </div>
+                      <div class="mt-1">
+                        3) <span class="font-semibold">强度过滤</span>：ADX14 ≥ 25；若勾选“允许 ADX 20-25”，则 ADX14 ∈ [20,25) 也可放行；ADX14 &lt; 20 直接禁用。
+                      </div>
+                      <div class="mt-1">
+                        4) <span class="font-semibold">量能确认</span>：VOL &gt; SMA20(VOL) × 1.3（表格中的“量能倍数”）。
+                      </div>
+                    </div>
+
+                    <div>
+                      <div class="font-semibold text-gray-200">做空（Short）</div>
+                      <div class="mt-1">
+                        1) <span class="font-semibold">触发</span>：MACD <span class="font-semibold">死叉</span>（DIF 下穿 DEA）。
+                      </div>
+                      <div class="mt-1">
+                        2) <span class="font-semibold">趋势过滤</span>：Close &lt; EMA50。
+                      </div>
+                      <div class="mt-1">
+                        3) <span class="font-semibold">强度过滤</span>：ADX14 规则同做多（ADX≥25 优先，20-25 需手动允许，&lt;20 禁用）。
+                      </div>
+                      <div class="mt-1">
+                        4) <span class="font-semibold">量能确认</span>：VOL &gt; SMA20(VOL) × 1.3。
+                      </div>
+                    </div>
+
+                    <div>
+                      <div class="font-semibold text-gray-200">风控参考（ATR）</div>
+                      <div class="mt-1">
+                        以信号K线附近的 ATR14 作为波动尺度：表格展示 SL(1ATR)、TP1(2ATR) 仅作参考，具体执行可结合你的仓位管理与分批止盈方案。
+                      </div>
+                    </div>
+                  </div>
+                </details>
+                <div class="mt-3 flex flex-wrap items-center gap-2">
+                  <button class="btn active" id="entryTabMonitor">MACD 监控入场</button>
+                  <button class="btn" id="entryTabPrealert">MACD 预警入场</button>
+                </div>
+              </div>
+
+              <div class="flex flex-wrap items-center gap-3">
+                <label class="muted text-sm">TopN</label>
+                <select id="entryTopN" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+                  <option value="50">50</option>
+                  <option value="100" selected>100</option>
+                  <option value="200">200</option>
+                </select>
+                <label class="muted text-sm">时间框架</label>
+                <select id="entryTf" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+                  <option value="15m">15m</option>
+                  <option value="1h" selected>1h</option>
+                  <option value="4h">4h</option>
+                  <option value="1d">1d</option>
+                </select>
+                <label class="muted text-sm flex items-center gap-2">
+                  <input id="entryAllowAdx2025" type="checkbox" class="accent-blue-500" checked />
+                  允许 ADX 20-25
+                </label>
+                <label class="muted text-sm">刷新间隔</label>
+                <select id="entryRefreshSec" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+                  <option value="60">60s</option>
+                  <option value="120" selected>120s</option>
+                  <option value="180">180s</option>
+                </select>
+                <button id="entryRefresh" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg font-semibold">刷新</button>
+                <span id="entryStatus" class="muted text-sm"></span>
+              </div>
+            </div>
+          </header>
+
+          <section class="mb-10">
+            <div class="card rounded-2xl p-4">
+              <table id="entryTable" class="display" style="width:100%">
+                <thead>
+                  <tr>
+                    <th style="display:none">signal_time_ts</th>
+                    <th>市值排名</th>
+                    <th>币种</th>
+                    <th>方向</th>
+                    <th>时间框架</th>
+                    <th>信号时间</th>
+                    <th>入场价</th>
+                    <th>EMA50</th>
+                    <th>ADX14</th>
+                    <th>ADX分档</th>
+                    <th>量能倍数</th>
+                    <th>ATR14</th>
+                    <th>SL(1ATR)</th>
+                    <th>TP1(2ATR)</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+              <div class="muted text-xs mt-3">点击币种可展开窗口化详情图（以信号时间为中心）。</div>
+            </div>
+          </section>
+
+          <section id="entryDetails" class="mb-10 hidden">
+            <div class="flex items-center justify-between mb-3">
+              <h2 id="entryDetailsTitle" class="text-xl font-extrabold">入场详情</h2>
+              <button id="entryCloseDetails" class="muted hover:text-white">关闭</button>
+            </div>
+            <div class="card rounded-2xl p-4 space-y-10">
+              <div id="entryChart15m" style="height:500px"></div>
+              <div id="entryChart1h" style="height:500px"></div>
+              <div id="entryChart4h" style="height:500px"></div>
+              <div id="entryChart1d" style="height:500px"></div>
+            </div>
+          </section>
+        </section>
+
+        <section id="page-macd-preentry" class="hidden">
+          <header class="mb-6">
+            <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+              <div>
+                <h1 class="text-3xl font-extrabold text-blue-300">MACD 预警入场（即将金叉/死叉）</h1>
+                <p class="muted mt-2">入场触发：即将金叉/即将死叉（预警）；过滤：Close 与 EMA50、ADX14（趋势强度）、成交量均线（SMA20）确认。ADX&lt;20 完全不开仓；ADX 20-25 默认建议不开仓（可开启允许）。</p>
+                <details class="mt-3">
+                  <summary class="muted text-sm cursor-pointer">查看做多 / 做空条件（预警触发 / 过滤 / 风控参考）</summary>
+                  <div class="muted text-xs mt-3 space-y-3 leading-relaxed">
+                    <div>
+                      <div class="font-semibold text-gray-200">做多（Long）</div>
+                      <div class="mt-1">
+                        1) <span class="font-semibold">预警触发</span>：MACD <span class="font-semibold">即将金叉</span>（预警模型判定 DIF/DEA 正在收敛，接近上穿）。
+                      </div>
+                      <div class="mt-1">
+                        2) <span class="font-semibold">趋势过滤</span>：Close &gt; EMA50。
+                      </div>
+                      <div class="mt-1">
+                        3) <span class="font-semibold">强度过滤</span>：ADX14 ≥ 25；若勾选“允许 ADX 20-25”，则 ADX14 ∈ [20,25) 也可放行；ADX14 &lt; 20 直接禁用。
+                      </div>
+                      <div class="mt-1">
+                        4) <span class="font-semibold">量能确认</span>：VOL &gt; SMA20(VOL) × 1.3。
+                      </div>
+                    </div>
+
+                    <div>
+                      <div class="font-semibold text-gray-200">做空（Short）</div>
+                      <div class="mt-1">
+                        1) <span class="font-semibold">预警触发</span>：MACD <span class="font-semibold">即将死叉</span>（预警模型判定 DIF/DEA 正在收敛，接近下穿）。
+                      </div>
+                      <div class="mt-1">
+                        2) <span class="font-semibold">趋势过滤</span>：Close &lt; EMA50。
+                      </div>
+                      <div class="mt-1">
+                        3) <span class="font-semibold">强度过滤</span>：ADX14 规则同做多（ADX≥25 优先，20-25 需手动允许，&lt;20 禁用）。
+                      </div>
+                      <div class="mt-1">
+                        4) <span class="font-semibold">量能确认</span>：VOL &gt; SMA20(VOL) × 1.3。
+                      </div>
+                    </div>
+
+                    <div>
+                      <div class="font-semibold text-gray-200">风控参考（ATR）</div>
+                      <div class="mt-1">
+                        以 ATR14 作为波动尺度：表格展示 SL(1ATR)、TP1(2ATR) 仅作参考。预警属于“提前量”，建议结合确认K线或分批入场。
+                      </div>
+                    </div>
+                  </div>
+                </details>
+                <div class="mt-3 flex flex-wrap items-center gap-2">
+                  <button class="btn" id="preEntryTabMonitor">MACD 监控入场</button>
+                  <button class="btn active" id="preEntryTabPrealert">MACD 预警入场</button>
+                </div>
+              </div>
+
+              <div class="flex flex-wrap items-center gap-3">
+                <label class="muted text-sm">TopN</label>
+                <select id="preEntryTopN" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+                  <option value="50">50</option>
+                  <option value="100" selected>100</option>
+                  <option value="200">200</option>
+                </select>
+                <label class="muted text-sm">时间框架</label>
+                <select id="preEntryTf" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+                  <option value="15m">15m</option>
+                  <option value="1h" selected>1h</option>
+                  <option value="4h">4h</option>
+                  <option value="1d">1d</option>
+                </select>
+                <label class="muted text-sm flex items-center gap-2">
+                  <input id="preEntryAllowAdx2025" type="checkbox" class="accent-blue-500" checked />
+                  允许 ADX 20-25
+                </label>
+                <label class="muted text-sm">刷新间隔</label>
+                <select id="preEntryRefreshSec" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+                  <option value="60">60s</option>
+                  <option value="120" selected>120s</option>
+                  <option value="180">180s</option>
+                </select>
+                <button id="preEntryRefresh" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg font-semibold">刷新</button>
+                <span id="preEntryStatus" class="muted text-sm"></span>
+              </div>
+            </div>
+          </header>
+
+          <section class="mb-10">
+            <div class="card rounded-2xl p-4">
+              <table id="preEntryTable" class="display" style="width:100%">
+                <thead>
+                  <tr>
+                    <th style="display:none">signal_time_ts</th>
+                    <th>市值排名</th>
+                    <th>币种</th>
+                    <th>方向</th>
+                    <th>时间框架</th>
+                    <th>信号时间</th>
+                    <th>预警类型</th>
+                    <th>ratio</th>
+                    <th>入场价</th>
+                    <th>EMA50</th>
+                    <th>ADX14</th>
+                    <th>ADX分档</th>
+                    <th>量能倍数</th>
+                    <th>ATR14</th>
+                    <th>SL(1ATR)</th>
+                    <th>TP1(2ATR)</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+              <div class="muted text-xs mt-3">点击币种可展开窗口化详情图（以信号时间为中心）。</div>
+            </div>
+          </section>
+
+          <section id="preEntryDetails" class="mb-10 hidden">
+            <div class="flex items-center justify-between mb-3">
+              <h2 id="preEntryDetailsTitle" class="text-xl font-extrabold">预警入场详情</h2>
+              <button id="preEntryCloseDetails" class="muted hover:text-white">关闭</button>
+            </div>
+            <div class="card rounded-2xl p-4 space-y-10">
+              <div id="preEntryChart15m" style="height:500px"></div>
+              <div id="preEntryChart1h" style="height:500px"></div>
+              <div id="preEntryChart4h" style="height:500px"></div>
+              <div id="preEntryChart1d" style="height:500px"></div>
             </div>
           </section>
         </section>
@@ -403,7 +680,7 @@
           <header class="mb-6">
             <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
               <div>
-                <h1 class="text-3xl font-extrabold text-blue-300">MACD 信号监控（市值前50）</h1>
+                <h1 class="text-3xl font-extrabold text-blue-300">MACD 信号监控</h1>
                 <p class="muted mt-2">扫描 CoinGecko 市值前50（过滤稳定币），匹配 Gate USDT 永续合约，监控 15m/1h/1d 的 MACD 金叉/死叉（最近3根内，取最近一次交叉）。MACD 状态表示当前 DIF 与 DEA 的位置关系（DIF&gt;DEA 为多头，DIF&lt;DEA 为空头）。</p>
               </div>
 
@@ -412,6 +689,7 @@
                 <select id="macdTopN" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
                   <option value="50">50</option>
                   <option value="100" selected>100</option>
+                  <option value="200">200</option>
                 </select>
                 <label class="muted text-sm">时间框架</label>
                 <select id="macdTf" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
@@ -470,13 +748,27 @@
               <div class="muted text-xs mt-3">金叉：绿色高亮；死叉：红色高亮。只报告“最近3根K线内刚发生”的交叉（取最近一次）。MACD状态为当前 DIF/DEA 多空，可能与交叉事件不完全同步（震荡时可能频繁来回穿越）。</div>
             </div>
           </section>
+
+          <section id="macdDetails" class="mb-10 hidden">
+            <div class="flex items-center justify-between mb-3">
+              <h2 id="macdDetailsTitle" class="text-xl font-extrabold">信号详情</h2>
+              <button id="macdCloseDetails" class="muted hover:text-white">关闭</button>
+            </div>
+            <div class="card rounded-2xl p-4 space-y-10">
+              <div id="macdChart15m" style="height:500px"></div>
+              <div id="macdChart1h" style="height:500px"></div>
+              <div id="macdChart4h" style="height:500px"></div>
+              <div id="macdChart1d" style="height:500px"></div>
+              <div id="macdChart2d" style="height:500px"></div>
+            </div>
+          </section>
         </section>
 
         <section id="page-prealert" class="hidden">
           <header class="mb-6">
             <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
               <div>
-                <h1 class="text-3xl font-extrabold text-blue-300">MACD 即将金叉/死叉预警（TopN）</h1>
+                <h1 class="text-3xl font-extrabold text-blue-300">MACD 即将金叉/死叉预警</h1>
                 <p class="muted mt-2">偏早预警：DIF/DEA 距离接近（ratio≤0.75，按最近20根归一化） + 连续收敛（lookback=2） + 同向斜率 + 柱子收敛。</p>
               </div>
 
@@ -485,6 +777,7 @@
                 <select id="preTopN" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
                   <option value="50">50</option>
                   <option value="100" selected>100</option>
+                  <option value="200">200</option>
                 </select>
                 <label class="muted text-sm">时间框架</label>
                 <select id="preTf" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
@@ -547,12 +840,12 @@
               <h2 id="preDetailsTitle" class="text-xl font-extrabold">预警详情</h2>
               <button id="preCloseDetails" class="muted hover:text-white">关闭</button>
             </div>
-            <div class="card rounded-2xl p-4 space-y-6">
-              <div id="preChart15m" style="height:320px"></div>
-              <div id="preChart1h" style="height:320px"></div>
-              <div id="preChart4h" style="height:320px"></div>
-              <div id="preChart1d" style="height:320px"></div>
-              <div id="preChart2d" style="height:320px"></div>
+            <div class="card rounded-2xl p-4 space-y-10">
+              <div id="preChart15m" style="height:500px"></div>
+              <div id="preChart1h" style="height:500px"></div>
+              <div id="preChart4h" style="height:500px"></div>
+              <div id="preChart1d" style="height:500px"></div>
+              <div id="preChart2d" style="height:500px"></div>
             </div>
           </section>
         </section>
@@ -1082,8 +1375,25 @@
   let pushDT = null;
   let newsTimer = null;
 
+  // DataTables 全局默认：未显式配置的表格不再默认每页 10
+  //（只影响未设置 pageLength 的初始化；已设置 pageLength 的表格不受影响）
+  if (window.jQuery && $.fn && $.fn.dataTable) {
+    $.extend(true, $.fn.dataTable.defaults, {
+      pageLength: 10,
+      lengthMenu: [[10, 15, 25, 50, 100, 200, -1], [10, 15, 25, 50, 100, 200, 'All']],
+    });
+  }
+
+  const PLOTLY_CONFIG = {
+    responsive: true,
+    displayModeBar: true,
+    scrollZoom: true,
+    displaylogo: false,
+  };
+
   async function fetchJson(url) {
     const r = await fetch(url);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return await r.json();
   }
 
@@ -1205,7 +1515,7 @@
   // - 同步左侧导航 active 状态
   // - DataTables 在 hidden 状态下初始化会列宽异常，因此切页后做 columns.adjust()
   function showPage(pageId) {
-    const pages = ['page-dashboard', 'page-macd', 'page-prealert', 'page-signal', 'page-news', 'page-telegram', 'page-tri-signal', 'page-master-a'];
+    const pages = ['page-dashboard', 'page-macd', 'page-macd-entry', 'page-macd-preentry', 'page-prealert', 'page-signal', 'page-news', 'page-telegram', 'page-tri-signal', 'page-master-a'];
     pages.forEach(pid => {
       const el = document.getElementById(pid);
       if (!el) return;
@@ -1252,6 +1562,23 @@
         } catch (e) {}
       }, 30);
     }
+
+    if (pageId === 'page-macd-entry') {
+      setTimeout(() => {
+        try {
+          if (entryDT) entryDT.columns.adjust().draw(false);
+        } catch (e) {}
+      }, 30);
+    }
+
+    if (pageId === 'page-macd-preentry') {
+      setTimeout(() => {
+        try {
+          if (preEntryDT) preEntryDT.columns.adjust().draw(false);
+        } catch (e) {}
+      }, 30);
+    }
+
   }
 
   // ==========================
@@ -1464,6 +1791,190 @@
     document.getElementById('macdStatus').textContent = `更新时间：${new Date().toLocaleString()}`;
   }
 
+  // ==========================
+  // MACD 入场（Entry Monitor）
+  // ==========================
+  // - loadEntries(): 调用 /api/macd_entries 获取满足入场过滤条件的候选
+  // - renderEntries(): 渲染 DataTables
+  let entryDT = null;
+  let entryTimer = null;
+
+  // ==========================
+  // MACD 预警入场（Prealert Entry）
+  // ==========================
+  // - loadPreEntries(): 调用 /api/macd_preentries 获取“即将金叉/死叉”入场候选
+  // - renderPreEntries(): 渲染 DataTables
+  let preEntryDT = null;
+  let preEntryTimer = null;
+
+  async function loadEntries() {
+    const sec = parseInt((document.getElementById('entryRefreshSec') && document.getElementById('entryRefreshSec').value) || '120', 10) || 120;
+    const topN = parseInt((document.getElementById('entryTopN') && document.getElementById('entryTopN').value) || '50', 10) || 50;
+    const tf = (document.getElementById('entryTf') && document.getElementById('entryTf').value) ? document.getElementById('entryTf').value : '1h';
+    const allow = (document.getElementById('entryAllowAdx2025') && document.getElementById('entryAllowAdx2025').checked) ? 1 : 0;
+
+    const statusEl = document.getElementById('entryStatus');
+    if (statusEl) statusEl.textContent = '更新中…';
+
+    const payload = await fetchJson(`/api/macd_entries?limit=${topN}&timeframe=${encodeURIComponent(tf)}&allow_adx_20_25=${allow}`);
+    const items = (payload && payload.items) ? payload.items : [];
+    const errors = (payload && payload.errors) ? payload.errors : [];
+    renderEntries(items);
+
+    if (entryTimer) clearInterval(entryTimer);
+    entryTimer = setInterval(() => {
+      const page = document.getElementById('page-macd-entry');
+      if (page && !page.classList.contains('hidden')) loadEntries();
+    }, Math.max(60, Math.min(180, sec)) * 1000);
+
+    if (statusEl) {
+      statusEl.textContent = errors && errors.length ? (`部分失败：${errors.slice(0,2).join(' ; ')}`) : `更新时间：${new Date().toLocaleString()}（${items.length}）`;
+    }
+  }
+
+  async function loadPreEntries() {
+    const sec = parseInt((document.getElementById('preEntryRefreshSec') && document.getElementById('preEntryRefreshSec').value) || '120', 10) || 120;
+    const topN = parseInt((document.getElementById('preEntryTopN') && document.getElementById('preEntryTopN').value) || '50', 10) || 50;
+    const tf = (document.getElementById('preEntryTf') && document.getElementById('preEntryTf').value) ? document.getElementById('preEntryTf').value : '1h';
+    const allow = (document.getElementById('preEntryAllowAdx2025') && document.getElementById('preEntryAllowAdx2025').checked) ? 1 : 0;
+
+    const statusEl = document.getElementById('preEntryStatus');
+    if (statusEl) statusEl.textContent = '更新中…';
+
+    const payload = await fetchJson(`/api/macd_preentries?limit=${topN}&timeframe=${encodeURIComponent(tf)}&allow_adx_20_25=${allow}`);
+    const items = (payload && payload.items) ? payload.items : [];
+    const errors = (payload && payload.errors) ? payload.errors : [];
+    renderPreEntries(items);
+
+    if (preEntryTimer) clearInterval(preEntryTimer);
+    preEntryTimer = setInterval(() => {
+      const page = document.getElementById('page-macd-preentry');
+      if (page && !page.classList.contains('hidden')) loadPreEntries();
+    }, Math.max(60, Math.min(180, sec)) * 1000);
+
+    if (statusEl) {
+      statusEl.textContent = errors && errors.length ? (`部分失败：${errors.slice(0,2).join(' ; ')}`) : `更新时间：${new Date().toLocaleString()}（${items.length}）`;
+    }
+  }
+
+  function renderEntries(items) {
+    const rows = (items || []).map(x => {
+      const ts = x.signal_time ? Number(x.signal_time) : 0;
+      const tStr = ts ? new Date(ts * 1000).toLocaleString() : '—';
+      const side = x.side || '—';
+      const sideLabel = (side === 'long') ? _pill('做多', 'pos') : ((side === 'short') ? _pill('做空', 'neg') : _pill('—', 'neu'));
+      const _adxTier = (v) => {
+        const n = Number(v);
+        if (!isFinite(n)) return _pill('—', 'neu');
+        if (n < 20) return _pill('<20 禁止', 'neu');
+        if (n < 25) return _pill('20-25 谨慎', 'neu');
+        if (n < 35) return _pill('25-35 趋势', 'pos');
+        return _pill('35+ 强趋势', 'pos');
+      };
+      const sym = x.symbol || '—';
+      const contract = x.contract || '';
+      const tf = x.timeframe || '1h';
+      const symHtml = `<a href="#" class="entry-sym" data-contract="${String(contract).replace(/\"/g, '&quot;')}" data-symbol="${String(sym).replace(/\"/g, '&quot;')}" data-center-ts="${String(ts).replace(/\"/g, '&quot;')}" data-entry="${String(x.entry_price ?? '').replace(/\"/g, '&quot;')}" data-sl="${String(x.sl ?? '').replace(/\"/g, '&quot;')}" data-tp1="${String(x.tp1 ?? '').replace(/\"/g, '&quot;')}">${sym}</a>`;
+
+      const _n = (v, d = 4) => (v === null || v === undefined || !isFinite(Number(v))) ? '—' : Number(v).toFixed(d);
+      const _n2 = (v, d = 2) => (v === null || v === undefined || !isFinite(Number(v))) ? '—' : Number(v).toFixed(d);
+
+      return [
+        ts,
+        x.market_cap_rank ?? '—',
+        symHtml,
+        sideLabel,
+        tf,
+        tStr,
+        _n(x.entry_price, 4),
+        _n(x.ema50, 4),
+        _n2(x.adx14, 1),
+        _adxTier(x.adx14),
+        (x.vol_ratio === null || x.vol_ratio === undefined || !isFinite(Number(x.vol_ratio))) ? '—' : `x${Number(x.vol_ratio).toFixed(2)}`,
+        _n(x.atr14, 4),
+        _n(x.sl, 4),
+        _n(x.tp1, 4),
+      ];
+    });
+
+    if (!entryDT) {
+      entryDT = $('#entryTable').DataTable({
+        data: rows,
+        pageLength: 15,
+        columnDefs: [
+          { targets: [0], visible: false, searchable: false },
+        ],
+        order: [[0, 'desc']],
+      });
+    } else {
+      entryDT.clear();
+      entryDT.rows.add(rows);
+      entryDT.draw(false);
+    }
+  }
+
+  function renderPreEntries(items) {
+    const _adxTier = (v) => {
+      const n = Number(v);
+      if (!isFinite(n)) return _pill('—', 'neu');
+      if (n < 20) return _pill('<20 禁止', 'neu');
+      if (n < 25) return _pill('20-25 谨慎', 'neu');
+      if (n < 35) return _pill('25-35 趋势', 'pos');
+      return _pill('35+ 强趋势', 'pos');
+    };
+
+    const _n = (v, d = 4) => (v === null || v === undefined || !isFinite(Number(v))) ? '—' : Number(v).toFixed(d);
+    const _n2 = (v, d = 2) => (v === null || v === undefined || !isFinite(Number(v))) ? '—' : Number(v).toFixed(d);
+
+    const rows = (items || []).map(x => {
+      const ts = x.signal_time ? Number(x.signal_time) : 0;
+      const tStr = ts ? new Date(ts * 1000).toLocaleString() : '—';
+      const side = x.side || '—';
+      const sideLabel = (side === 'long') ? _pill('做多', 'pos') : ((side === 'short') ? _pill('做空', 'neg') : _pill('—', 'neu'));
+      const sym = x.symbol || '—';
+      const contract = x.contract || '';
+      const tf = x.timeframe || '1h';
+      const symHtml = `<a href="#" class="preentry-sym" data-contract="${String(contract).replace(/\"/g, '&quot;')}" data-symbol="${String(sym).replace(/\"/g, '&quot;')}" data-center-ts="${String(ts).replace(/\"/g, '&quot;')}" data-entry="${String(x.entry_price ?? '').replace(/\"/g, '&quot;')}" data-sl="${String(x.sl ?? '').replace(/\"/g, '&quot;')}" data-tp1="${String(x.tp1 ?? '').replace(/\"/g, '&quot;')}">${sym}</a>`;
+
+      const wt = (x.signal_type === 'pre_golden') ? _pill('即将金叉', 'pos') : ((x.signal_type === 'pre_death') ? _pill('即将死叉', 'neg') : _pill(String(x.signal_type || '—'), 'neu'));
+      const ratio = (x.pre_ratio === null || x.pre_ratio === undefined || !isFinite(Number(x.pre_ratio))) ? '—' : Number(x.pre_ratio).toFixed(4);
+
+      return [
+        ts,
+        x.market_cap_rank ?? '—',
+        symHtml,
+        sideLabel,
+        tf,
+        tStr,
+        wt,
+        ratio,
+        _n(x.entry_price, 4),
+        _n(x.ema50, 4),
+        _n2(x.adx14, 1),
+        _adxTier(x.adx14),
+        (x.vol_ratio === null || x.vol_ratio === undefined || !isFinite(Number(x.vol_ratio))) ? '—' : `x${Number(x.vol_ratio).toFixed(2)}`,
+        _n(x.atr14, 4),
+        _n(x.sl, 4),
+        _n(x.tp1, 4),
+      ];
+    });
+
+    if (!preEntryDT) {
+      preEntryDT = $('#preEntryTable').DataTable({
+        data: rows,
+        pageLength: 15,
+        columnDefs: [
+          { targets: [0], visible: false, searchable: false },
+        ],
+        order: [[0, 'desc']],
+      });
+    } else {
+      preEntryDT.clear();
+      preEntryDT.rows.add(rows);
+      preEntryDT.draw(false);
+    }
+  }
+
   // renderMacd():
   // - 进行 timeframe / 信号类型过滤
   // - 生成 DataTables 行，并对金叉/死叉行着色
@@ -1496,14 +2007,17 @@
       const hasSignal = (x.signal_type === 'golden' || x.signal_type === 'death') ? 1 : 0;
       const sigTs = x.signal_time ? x.signal_time : 0;
       const strength = (x.signal_strength === null || x.signal_strength === undefined) ? '—' : `${Number(x.signal_strength).toFixed(4)}%`;
+
+      const symText = (x.symbol ?? '—');
+      const symHtml = `<a href="#" class="macd-sym" data-contract="${String(x.contract || '').replace(/\"/g, '&quot;')}" data-symbol="${String(symText).replace(/\"/g, '&quot;')}" data-tf="${String(x.timeframe || '').replace(/\"/g, '&quot;')}" data-center-ts="${String(sigTs).replace(/\"/g, '&quot;')}">${symText}</a>`;
       return [
         hasSignal,
         sigTs,
         x.market_cap_rank ?? '—',
-        x.symbol,
+        symHtml,
         x.timeframe,
         (x.current_price ?? '—'),
-        x.macd_state || '—',
+        _pill((x.macd_state || '—'), (x.macd_state === '多头') ? 'pos' : ((x.macd_state === '空头') ? 'neg' : 'neu')),
         sigTime,
         sigType,
         (x.signal_price ?? '—'),
@@ -1511,13 +2025,15 @@
       ];
     });
 
-    // DataTables 行高亮
-    const rowClassByIdx = (idx) => {
-      const x = filtered[idx];
-      if (!x || !x.signal_type) return '';
-      if (x.signal_type === 'golden') return 'row-golden';
-      if (x.signal_type === 'death') return 'row-death';
-      return '';
+    const _macdRowClassFromRowData = (rowData) => {
+      try {
+        const sig = rowData && rowData.length ? String(rowData[8] || '') : '';
+        if (sig === '金叉') return 'row-golden';
+        if (sig === '死叉') return 'row-death';
+        return '';
+      } catch (e) {
+        return '';
+      }
     };
 
     if (!macdDT) {
@@ -1539,7 +2055,7 @@
         ],
         order: [[0, 'desc'], [1, 'desc']],
         createdRow: function (row, data, dataIndex) {
-          const cls = rowClassByIdx(dataIndex);
+          const cls = _macdRowClassFromRowData(data);
           if (cls) row.classList.add(cls);
         }
       });
@@ -1549,10 +2065,14 @@
       macdDT.draw(false);
 
       // 重新给行着色
-      $('#macdTable tbody tr').each(function (i) {
+      $('#macdTable tbody tr').each(function () {
         this.classList.remove('row-golden');
         this.classList.remove('row-death');
-        const cls = rowClassByIdx(i);
+        let cls = '';
+        try {
+          const d = macdDT.row(this).data();
+          cls = _macdRowClassFromRowData(d);
+        } catch (e) { cls = ''; }
         if (cls) this.classList.add(cls);
       });
     }
@@ -1584,6 +2104,59 @@
     setMacdFilter('death');
     loadMacd();
   });
+
+  const _macdCloseDetailsEl = document.getElementById('macdCloseDetails');
+  if (_macdCloseDetailsEl) {
+    _macdCloseDetailsEl.addEventListener('click', () => {
+      const d = document.getElementById('macdDetails');
+      if (d) d.classList.add('hidden');
+    });
+  }
+
+  const _entryRefreshEl = document.getElementById('entryRefresh');
+  if (_entryRefreshEl) _entryRefreshEl.addEventListener('click', () => loadEntries().catch(() => {}));
+  const _entryRefreshSecEl = document.getElementById('entryRefreshSec');
+  if (_entryRefreshSecEl) _entryRefreshSecEl.addEventListener('change', () => loadEntries().catch(() => {}));
+  const _entryTopNEl = document.getElementById('entryTopN');
+  if (_entryTopNEl) _entryTopNEl.addEventListener('change', () => loadEntries().catch(() => {}));
+  const _entryTfEl = document.getElementById('entryTf');
+  if (_entryTfEl) _entryTfEl.addEventListener('change', () => loadEntries().catch(() => {}));
+  const _entryAllowEl = document.getElementById('entryAllowAdx2025');
+  if (_entryAllowEl) _entryAllowEl.addEventListener('change', () => loadEntries().catch(() => {}));
+  const _entryCloseEl = document.getElementById('entryCloseDetails');
+  if (_entryCloseEl) {
+    _entryCloseEl.addEventListener('click', () => {
+      const d = document.getElementById('entryDetails');
+      if (d) d.classList.add('hidden');
+    });
+  }
+
+  const _preEntryRefreshEl = document.getElementById('preEntryRefresh');
+  if (_preEntryRefreshEl) _preEntryRefreshEl.addEventListener('click', () => loadPreEntries().catch(() => {}));
+  const _preEntryRefreshSecEl = document.getElementById('preEntryRefreshSec');
+  if (_preEntryRefreshSecEl) _preEntryRefreshSecEl.addEventListener('change', () => loadPreEntries().catch(() => {}));
+  const _preEntryTopNEl = document.getElementById('preEntryTopN');
+  if (_preEntryTopNEl) _preEntryTopNEl.addEventListener('change', () => loadPreEntries().catch(() => {}));
+  const _preEntryTfEl = document.getElementById('preEntryTf');
+  if (_preEntryTfEl) _preEntryTfEl.addEventListener('change', () => loadPreEntries().catch(() => {}));
+  const _preEntryAllowEl = document.getElementById('preEntryAllowAdx2025');
+  if (_preEntryAllowEl) _preEntryAllowEl.addEventListener('change', () => loadPreEntries().catch(() => {}));
+  const _preEntryCloseEl = document.getElementById('preEntryCloseDetails');
+  if (_preEntryCloseEl) {
+    _preEntryCloseEl.addEventListener('click', () => {
+      const d = document.getElementById('preEntryDetails');
+      if (d) d.classList.add('hidden');
+    });
+  }
+
+  const _entryTabMonitorEl = document.getElementById('entryTabMonitor');
+  if (_entryTabMonitorEl) _entryTabMonitorEl.addEventListener('click', () => { showPage('page-macd-entry'); loadEntries().catch(() => {}); });
+  const _entryTabPreEl = document.getElementById('entryTabPrealert');
+  if (_entryTabPreEl) _entryTabPreEl.addEventListener('click', () => { showPage('page-macd-preentry'); loadPreEntries().catch(() => {}); });
+  const _preTabMonitorEl = document.getElementById('preEntryTabMonitor');
+  if (_preTabMonitorEl) _preTabMonitorEl.addEventListener('click', () => { showPage('page-macd-entry'); loadEntries().catch(() => {}); });
+  const _preTabPreEl = document.getElementById('preEntryTabPrealert');
+  if (_preTabPreEl) _preTabPreEl.addEventListener('click', () => { showPage('page-macd-preentry'); loadPreEntries().catch(() => {}); });
 
   // Signal Dashboard 页事件：刷新 / 刷新间隔 / mode / K线 / 只看有信号 / 排序
   const _sigRefreshEl = document.getElementById('sigRefresh');
@@ -1675,6 +2248,12 @@
       }
       if (pageId === 'page-prealert') {
         loadPrealerts();
+      }
+      if (pageId === 'page-macd-entry') {
+        loadEntries();
+      }
+      if (pageId === 'page-macd-preentry') {
+        loadPreEntries();
       }
       if (pageId === 'page-signal') {
         setSignalTimer();
@@ -2262,16 +2841,14 @@
     }];
 
     const layout = {
-      margin: { l: 40, r: 20, t: 30, b: 40 },
+      margin: { l: 20, r: 56, t: 30, b: 40 },
       paper_bgcolor: 'rgba(0,0,0,0)',
       plot_bgcolor: 'rgba(0,0,0,0)',
-      xaxis: { gridcolor: 'rgba(255,255,255,0.06)' },
-      yaxis: { gridcolor: 'rgba(255,255,255,0.06)' },
+      xaxis: { gridcolor: 'rgba(255,255,255,0.06)', domain: [0, 0.8] },
+      yaxis: { gridcolor: 'rgba(255,255,255,0.06)', side: 'right' },
       font: { color: 'rgba(255,255,255,0.85)' },
       title: `${contract} / ${tf}`,
       dragmode: 'pan',
-      shapes: [],
-      annotations: [],
       showlegend: true,
       legend: { orientation: 'h', y: -0.25 },
       hovermode: 'x unified',
@@ -2299,9 +2876,9 @@
         });
 
         layout.yaxis = { ...layout.yaxis, domain: [0.28, 1] };
-        layout.yaxis2 = { domain: [0, 0.22], gridcolor: 'rgba(255,255,255,0.06)', title: 'MACD', zerolinecolor: 'rgba(255,255,255,0.10)' };
-        layout.xaxis = { ...layout.xaxis, domain: [0, 1], rangeslider: { visible: false } };
-        layout.xaxis2 = { domain: [0, 1], overlaying: 'x', anchor: 'y2', matches: 'x', showgrid: false, showticklabels: false };
+        layout.yaxis2 = { domain: [0, 0.22], gridcolor: 'rgba(255,255,255,0.06)', title: 'MACD', zerolinecolor: 'rgba(255,255,255,0.10)', side: 'right' };
+        layout.xaxis = { ...layout.xaxis, domain: [0, 0.8], rangeslider: { visible: false } };
+        layout.xaxis2 = { domain: [0, 0.8], overlaying: 'x', anchor: 'y2', matches: 'x', showgrid: false, showticklabels: false };
         traces.push({ type: 'bar', x: xs, y: hist, name: 'MACD Hist (12,26,9)', yaxis: 'y2', xaxis: 'x2', marker: { color: histColors }, hovertemplate: '%{x}<br>%{y:.6f}<extra>MACD Hist</extra>' });
         // DIF = MACD line, DEA = Signal line (DIF red, DEA blue)
         traces.push({ type: 'scatter', mode: 'lines', x: xs, y: macd, name: 'DIF', yaxis: 'y2', xaxis: 'x2', line: { color: 'rgba(239,68,68,0.90)', width: 1 }, hovertemplate: '%{x}<br>%{y:.6f}<extra>DIF</extra>' });
@@ -2316,13 +2893,13 @@
 
         const adx14 = _adxArr(high, low, close, 14);
         layout.yaxis = { ...layout.yaxis, domain: [0.28, 1] };
-        layout.yaxis2 = { domain: [0, 0.22], gridcolor: 'rgba(255,255,255,0.06)', title: 'ADX14' };
-        layout.xaxis = { ...layout.xaxis, domain: [0, 1], rangeslider: { visible: false } };
-        layout.xaxis2 = { domain: [0, 1], overlaying: 'x', anchor: 'y2', matches: 'x', showgrid: false, showticklabels: false };
+        layout.yaxis2 = { domain: [0, 0.22], gridcolor: 'rgba(255,255,255,0.06)', title: 'ADX14', side: 'right' };
+        layout.xaxis = { ...layout.xaxis, domain: [0, 0.8], rangeslider: { visible: false } };
+        layout.xaxis2 = { domain: [0, 0.8], overlaying: 'x', anchor: 'y2', matches: 'x', showgrid: false, showticklabels: false };
         traces.push({ type: 'scatter', mode: 'lines', x: xs, y: adx14, name: 'ADX14', yaxis: 'y2', xaxis: 'x2', line: { color: 'rgba(34,197,94,0.95)', width: 1 }, hovertemplate: '%{x}<br>%{y:.2f}<extra>ADX14</extra>' });
 
         try {
-          layout.shapes.push({ type: 'line', xref: 'paper', yref: 'y2', x0: 0, x1: 1, y0: 25, y1: 25, line: { color: 'rgba(148,163,184,0.55)', width: 1, dash: 'dot' } });
+          layout.shapes.push({ type: 'line', xref: 'paper', yref: 'y2', x0: 0, x1: 0.8, y0: 25, y1: 25, line: { color: 'rgba(148,163,184,0.55)', width: 1, dash: 'dot' } });
         } catch (e) {}
       }
 
@@ -2332,14 +2909,14 @@
 
         const rsi14 = _rsi14Arr(close, 14);
         layout.yaxis = { ...layout.yaxis, domain: [0.28, 1] };
-        layout.yaxis2 = { domain: [0, 0.22], gridcolor: 'rgba(255,255,255,0.06)', title: 'RSI14' };
-        layout.xaxis = { ...layout.xaxis, domain: [0, 1], rangeslider: { visible: false } };
-        layout.xaxis2 = { domain: [0, 1], overlaying: 'x', anchor: 'y2', matches: 'x', showgrid: false, showticklabels: false };
+        layout.yaxis2 = { domain: [0, 0.22], gridcolor: 'rgba(255,255,255,0.06)', title: 'RSI14', side: 'right' };
+        layout.xaxis = { ...layout.xaxis, domain: [0, 0.8], rangeslider: { visible: false } };
+        layout.xaxis2 = { domain: [0, 0.8], overlaying: 'x', anchor: 'y2', matches: 'x', showgrid: false, showticklabels: false };
         traces.push({ type: 'scatter', mode: 'lines', x: xs, y: rsi14, name: 'RSI14', yaxis: 'y2', xaxis: 'x2', line: { color: 'rgba(251,191,36,0.95)', width: 1 }, hovertemplate: '%{x}<br>%{y:.2f}<extra>RSI14</extra>' });
 
         try {
-          layout.shapes.push({ type: 'line', xref: 'paper', yref: 'y2', x0: 0, x1: 1, y0: 30, y1: 30, line: { color: 'rgba(148,163,184,0.55)', width: 1, dash: 'dot' } });
-          layout.shapes.push({ type: 'line', xref: 'paper', yref: 'y2', x0: 0, x1: 1, y0: 70, y1: 70, line: { color: 'rgba(148,163,184,0.55)', width: 1, dash: 'dot' } });
+          layout.shapes.push({ type: 'line', xref: 'paper', yref: 'y2', x0: 0, x1: 0.8, y0: 30, y1: 30, line: { color: 'rgba(148,163,184,0.55)', width: 1, dash: 'dot' } });
+          layout.shapes.push({ type: 'line', xref: 'paper', yref: 'y2', x0: 0, x1: 0.8, y0: 70, y1: 70, line: { color: 'rgba(148,163,184,0.55)', width: 1, dash: 'dot' } });
         } catch (e) {}
       }
     } catch (e) {}
@@ -2415,7 +2992,7 @@
       document.getElementById('triChartStatus').textContent = `已加载 ${items.length} 根K线`;
     }
 
-    Plotly.newPlot('triChart', traces, layout, { responsive: true, displayModeBar: true, scrollZoom: true });
+    Plotly.newPlot('triChart', traces, layout, PLOTLY_CONFIG);
   }
 
   let _mpLatestMap = {};
@@ -2905,7 +3482,7 @@
       margin: { l: 40, r: 20, t: 30, b: 40 },
       paper_bgcolor: 'rgba(0,0,0,0)',
       plot_bgcolor: 'rgba(0,0,0,0)',
-      xaxis: { gridcolor: 'rgba(255,255,255,0.06)' },
+      xaxis: { gridcolor: 'rgba(255,255,255,0.06)', domain: [0, 0.8] },
       yaxis: { gridcolor: 'rgba(255,255,255,0.06)' },
       font: { color: 'rgba(255,255,255,0.85)' },
       title: `${contract} / ${tf}`,
@@ -2921,13 +3498,14 @@
       const wantRsi = ((_mpStrategy === 'A' && tf === '1h') || (_mpStrategy === 'B' && tf === '1d'));
       const wantMacd = (_mpStrategy === 'B' && tf === '4h');
       if (wantRsi || wantMacd) {
-        layout.yaxis = { gridcolor: 'rgba(255,255,255,0.06)', domain: [0.28, 1] };
+        layout.yaxis = { gridcolor: 'rgba(255,255,255,0.06)', domain: [0.28, 1], side: 'right' };
         if (wantRsi) {
-          layout.yaxis2 = { gridcolor: 'rgba(255,255,255,0.06)', domain: [0, 0.22], range: [0, 100], title: 'RSI14' };
+          layout.yaxis2 = { gridcolor: 'rgba(255,255,255,0.06)', domain: [0, 0.22], range: [0, 100], title: 'RSI14', side: 'right' };
         } else {
-          layout.yaxis2 = { gridcolor: 'rgba(255,255,255,0.06)', domain: [0, 0.22], title: 'MACD' };
+          layout.yaxis2 = { gridcolor: 'rgba(255,255,255,0.06)', domain: [0, 0.22], title: 'MACD', side: 'right' };
         }
-        layout.xaxis = { gridcolor: 'rgba(255,255,255,0.06)', rangeslider: { visible: false } };
+        layout.xaxis = { gridcolor: 'rgba(255,255,255,0.06)', rangeslider: { visible: false }, domain: [0, 0.8] };
+        layout.xaxis2 = { domain: [0, 0.8], overlaying: 'x', anchor: 'y2', matches: 'x', showgrid: false, showticklabels: false };
       }
     } catch (e) {}
 
@@ -2935,8 +3513,8 @@
     try {
       const wantRsi = ((_mpStrategy === 'A' && tf === '1h') || (_mpStrategy === 'B' && tf === '1d'));
       if (wantRsi) {
-        layout.shapes.push({ type: 'line', xref: 'paper', yref: 'y2', x0: 0, x1: 1, y0: 30, y1: 30, line: { color: 'rgba(148,163,184,0.55)', width: 1, dash: 'dot' } });
-        layout.shapes.push({ type: 'line', xref: 'paper', yref: 'y2', x0: 0, x1: 1, y0: 70, y1: 70, line: { color: 'rgba(148,163,184,0.55)', width: 1, dash: 'dot' } });
+        layout.shapes.push({ type: 'line', xref: 'paper', yref: 'y2', x0: 0, x1: 0.8, y0: 30, y1: 30, line: { color: 'rgba(148,163,184,0.55)', width: 1, dash: 'dot' } });
+        layout.shapes.push({ type: 'line', xref: 'paper', yref: 'y2', x0: 0, x1: 0.8, y0: 70, y1: 70, line: { color: 'rgba(148,163,184,0.55)', width: 1, dash: 'dot' } });
       }
     } catch (e) {}
 
@@ -3016,7 +3594,7 @@
       }
     } catch (e) {}
 
-    Plotly.newPlot('mpChart', traces, layout, { responsive: true, displayModeBar: true, scrollZoom: true });
+    Plotly.newPlot('mpChart', traces, layout, PLOTLY_CONFIG);
 
     // 状态栏显示最新指标值（如存在）
     try {
@@ -3478,7 +4056,7 @@
         const wTime = x.latest_warn_time ? new Date(x.latest_warn_time * 1000).toLocaleString() : '—';
         const ratio = (x.latest_ratio === null || x.latest_ratio === undefined) ? '—' : Number(x.latest_ratio).toFixed(4);
         const barDir = x.latest_bar_dir === 'up' ? '↑' : (x.latest_bar_dir === 'down' ? '↓' : '—');
-        const symHtml = `<a href="#" class="pre-sym" data-contract="${x.contract}" data-symbol="${x.symbol}">${x.symbol}</a>`;
+        const symHtml = `<a href="#" class="pre-sym" data-contract="${x.contract}" data-symbol="${x.symbol}" data-center-ts="${String(wt).replace(/\"/g, '&quot;')}">${x.symbol}</a>`;
         rows.push([
           hasWarn,
           wt,
@@ -3523,34 +4101,279 @@
 
   async function _loadPreChart(contract, tf, mountId, title) {
     const payload = await fetchJson(`/api/macd_prealert_detail?contract=${encodeURIComponent(contract)}&tf=${encodeURIComponent(tf)}&limit=200`);
+    _renderMacdDetailPlot(mountId, title, payload);
+  }
+
+  async function _loadSignalChart(contract, tf, centerTs, mountId, title, levels) {
+    const cts = Number(centerTs) || 0;
+    const payload = await fetchJson(`/api/macd_signal_detail?contract=${encodeURIComponent(contract)}&tf=${encodeURIComponent(tf)}&center_ts=${encodeURIComponent(cts)}&before=80&after=40&max_fetch=320`);
+    try {
+      if (levels && typeof levels === 'object') payload.trade_levels = levels;
+    } catch (e) {}
+    _renderMacdDetailPlot(mountId, title, payload);
+  }
+
+  function _renderMacdDetailPlot(mountId, title, payload) {
     const t = (payload && payload.t) ? payload.t : [];
+    const open = (payload && payload.open) ? payload.open : [];
     const close = (payload && payload.close) ? payload.close : [];
     const dif = (payload && payload.dif) ? payload.dif : [];
     const dea = (payload && payload.dea) ? payload.dea : [];
     const hist = (payload && payload.hist) ? payload.hist : [];
+    const ema50 = (payload && payload.ema50) ? payload.ema50 : [];
+    const adx14 = (payload && payload.adx14) ? payload.adx14 : [];
+    const vol = (payload && payload.vol) ? payload.vol : [];
+    const volSma20 = (payload && payload.vol_sma20) ? payload.vol_sma20 : [];
     const x = t.map(ts => new Date(ts * 1000));
+
+    let _metricsHtml = '';
+    try {
+      const i = (Array.isArray(close) && close.length) ? (close.length - 1) : -1;
+      const _n = (v, d=4) => {
+        const n = Number(v);
+        if (!isFinite(n)) return '—';
+        try {
+          const s = n.toFixed(d);
+          return String(s).replace(/0+$/,'').replace(/\.$/,'');
+        } catch (e) {
+          return String(n);
+        }
+      };
+      const _n0 = (v) => {
+        const n = Number(v);
+        if (!isFinite(n)) return '—';
+        return Math.round(n).toString();
+      };
+      if (i >= 0) {
+        const parts = [];
+        parts.push(`<span style="color:rgba(255,255,255,0.78)">PX:</span> <span style="color:#93c5fd">${_n(close[i], 6)}</span>`);
+        if (Array.isArray(ema50) && ema50.length > i) parts.push(`<span style="color:rgba(255,255,255,0.78)">EMA50:</span> <span style="color:rgba(245,158,11,0.95)">${_n(ema50[i], 6)}</span>`);
+        if (Array.isArray(dif) && dif.length > i) parts.push(`<span style="color:rgba(255,255,255,0.78)">DIF:</span> <span style="color:rgba(239,68,68,0.92)">${_n(dif[i], 6)}</span>`);
+        if (Array.isArray(dea) && dea.length > i) parts.push(`<span style="color:rgba(255,255,255,0.78)">DEA:</span> <span style="color:rgba(59,130,246,0.95)">${_n(dea[i], 6)}</span>`);
+        if (Array.isArray(adx14) && adx14.length > i) parts.push(`<span style="color:rgba(255,255,255,0.78)">ADX14:</span> <span style="color:rgba(34,197,94,0.95)">${_n(adx14[i], 2)}</span>`);
+        if (Array.isArray(vol) && vol.length > i) parts.push(`<span style="color:rgba(255,255,255,0.78)">VOL:</span> <span style="color:rgba(255,255,255,0.92)">${_n0(vol[i])}</span>`);
+        if (Array.isArray(volSma20) && volSma20.length > i) parts.push(`<span style="color:rgba(255,255,255,0.78)">VOL SMA20:</span> <span style="color:rgba(168,85,247,0.95)">${_n0(volSma20[i])}</span>`);
+        _metricsHtml = parts.join('<br>');
+      }
+    } catch (e) {
+      _metricsHtml = '';
+    }
+
+    const levels = (payload && payload.trade_levels) ? payload.trade_levels : null;
+
+    let _centerX = null;
+    try {
+      const cts = Number(payload && payload.center_ts ? payload.center_ts : 0) || 0;
+      if (cts > 0 && Array.isArray(t) && t.length) {
+        let bestIdx = 0;
+        let bestD = null;
+        for (let i = 0; i < t.length; i++) {
+          const ts = Number(t[i] || 0) || 0;
+          const d = Math.abs(ts - cts);
+          if (bestD === null || d < bestD) {
+            bestD = d;
+            bestIdx = i;
+          }
+        }
+        _centerX = x[bestIdx] || null;
+      }
+    } catch (e) {}
+
+    let _macdAbsMax = 0;
+    try {
+      const arrs = [hist, dif, dea];
+      for (const a of arrs) {
+        for (const v of (a || [])) {
+          const n = Number(v);
+          if (!isFinite(n)) continue;
+          const an = Math.abs(n);
+          if (an > _macdAbsMax) _macdAbsMax = an;
+        }
+      }
+    } catch (e) {}
+    const _macdPad = Math.max(1e-12, _macdAbsMax * 0.35);
+    const _range = (_macdAbsMax > 0) ? [-(_macdAbsMax + _macdPad), (_macdAbsMax + _macdPad)] : null;
+
+    let _pMin = null;
+    let _pMax = null;
+    try {
+      for (const v of (close || [])) {
+        const n = Number(v);
+        if (!isFinite(n)) continue;
+        _pMin = (_pMin === null) ? n : Math.min(_pMin, n);
+        _pMax = (_pMax === null) ? n : Math.max(_pMax, n);
+      }
+    } catch (e) {}
+    const _pSpan = (_pMin !== null && _pMax !== null) ? Math.max(1e-12, (_pMax - _pMin)) : 0;
+    const _pPad = (_pSpan > 0) ? (_pSpan * 0.12) : 0;
+    const _priceRange = (_pMin !== null && _pMax !== null && _pSpan > 0) ? [(_pMin - _pPad), (_pMax + _pPad)] : null;
+
+    const histColors = (hist || []).map(v => {
+      const n = Number(v);
+      if (!isFinite(n)) return 'rgba(148,163,184,0.35)';
+      return (n >= 0) ? 'rgba(34,197,94,0.65)' : 'rgba(239,68,68,0.65)';
+    });
+
+    const volColors = (vol || []).map((vv, i) => {
+      const o = (Array.isArray(open) && open.length === close.length) ? Number(open[i]) : NaN;
+      const c = (Array.isArray(close) && close.length) ? Number(close[i]) : NaN;
+      if (isFinite(o) && isFinite(c)) {
+        return (c >= o) ? 'rgba(34,197,94,0.55)' : 'rgba(239,68,68,0.55)';
+      }
+      const pc = (i > 0 && Array.isArray(close) && close.length) ? Number(close[i - 1]) : NaN;
+      if (isFinite(pc) && isFinite(c)) {
+        return (c >= pc) ? 'rgba(34,197,94,0.55)' : 'rgba(239,68,68,0.55)';
+      }
+      return 'rgba(148,163,184,0.30)';
+    });
+
+    let _volRange = null;
+    try {
+      const vs = (Array.isArray(vol) ? vol : []).map(v => Number(v)).filter(v => isFinite(v));
+      if (vs.length >= 10) {
+        const s = vs.slice().sort((a, b) => a - b);
+        const q = (p) => {
+          const idx = Math.min(s.length - 1, Math.max(0, Math.floor((s.length - 1) * p)));
+          return s[idx];
+        };
+        const lo = q(0.05);
+        const hi = q(0.95);
+        if (isFinite(lo) && isFinite(hi) && hi > lo) {
+          const pad = (hi - lo) * 0.12;
+          _volRange = [Math.max(0, lo - pad), (hi + pad)];
+        }
+      }
+    } catch (e) {}
+
+    const hasExtra = (Array.isArray(adx14) && adx14.length) || (Array.isArray(vol) && vol.length) || (Array.isArray(volSma20) && volSma20.length);
 
     const traces = [
       { x, y: close, type: 'scatter', mode: 'lines', name: 'Close', yaxis: 'y1', line: { color: '#93c5fd' } },
-      { x, y: dif, type: 'scatter', mode: 'lines', name: 'DIF', yaxis: 'y2', line: { color: '#22c55e' } },
-      { x, y: dea, type: 'scatter', mode: 'lines', name: 'DEA', yaxis: 'y2', line: { color: '#f59e0b' } },
-      { x, y: hist, type: 'bar', name: 'HIST', yaxis: 'y3', marker: { color: 'rgba(255,255,255,0.35)' } },
     ];
+
+    if (Array.isArray(ema50) && ema50.length === close.length) {
+      traces.push({ x, y: ema50, type: 'scatter', mode: 'lines', name: 'EMA50', yaxis: 'y1', line: { color: 'rgba(245,158,11,0.95)', width: 1 } });
+    }
+
+    traces.push(
+      { x, y: hist, type: 'bar', name: 'HIST', yaxis: 'y2', xaxis: 'x2', marker: { color: histColors } },
+      { x, y: dif, type: 'scatter', mode: 'lines', name: 'DIF', yaxis: 'y2', xaxis: 'x2', line: { color: 'rgba(239,68,68,0.90)', width: 1 } },
+      { x, y: dea, type: 'scatter', mode: 'lines', name: 'DEA', yaxis: 'y2', xaxis: 'x2', line: { color: 'rgba(59,130,246,0.95)', width: 1 } },
+    );
+
+    if (hasExtra) {
+      if (Array.isArray(adx14) && adx14.length === close.length) {
+        traces.push({ x, y: adx14, type: 'scatter', mode: 'lines', name: 'ADX14', yaxis: 'y3', xaxis: 'x3', line: { color: 'rgba(34,197,94,0.95)', width: 1 } });
+      }
+      if (Array.isArray(vol) && vol.length === close.length) {
+        traces.push({ x, y: vol, type: 'bar', name: 'VOL', yaxis: 'y4', xaxis: 'x4', marker: { color: volColors } });
+      }
+      if (Array.isArray(volSma20) && volSma20.length === close.length) {
+        traces.push({ x, y: volSma20, type: 'scatter', mode: 'lines', name: 'VOL SMA20', yaxis: 'y4', xaxis: 'x4', line: { color: 'rgba(168,85,247,0.95)', width: 1 } });
+      }
+    }
 
     const layout = {
       title: { text: title, font: { color: 'rgba(255,255,255,0.85)', size: 14 } },
       paper_bgcolor: 'rgba(0,0,0,0)',
       plot_bgcolor: 'rgba(0,0,0,0)',
-      margin: { l: 40, r: 20, t: 40, b: 30 },
+      margin: { l: 20, r: 56, t: 46, b: 60 },
       font: { color: 'rgba(255,255,255,0.75)' },
-      xaxis: { showgrid: false },
-      yaxis: { domain: [0.45, 1.0], title: '' },
-      yaxis2: { domain: [0.20, 0.42], title: '' },
-      yaxis3: { domain: [0.0, 0.18], title: '' },
-      legend: { orientation: 'h' },
+      xaxis: { gridcolor: 'rgba(255,255,255,0.06)', rangeslider: { visible: false }, domain: [0, 0.8], automargin: true, tickfont: { size: 10 } },
+      yaxis: { domain: hasExtra ? [0.58, 1.0] : [0.32, 1.0], title: '', gridcolor: 'rgba(255,255,255,0.06)', range: _priceRange || undefined, automargin: true, nticks: 6, tickfont: { size: 10 }, side: 'right' },
+      yaxis2: { domain: hasExtra ? [0.33, 0.52] : [0.0, 0.26], title: 'MACD', gridcolor: 'rgba(255,255,255,0.06)', zerolinecolor: 'rgba(255,255,255,0.10)', range: _range || undefined, automargin: true, nticks: 5, tickfont: { size: 10 }, side: 'right' },
+      xaxis2: { domain: [0, 0.8], overlaying: 'x', anchor: 'y2', matches: 'x', showgrid: false, showticklabels: false },
+      yaxis3: hasExtra ? { domain: [0.16, 0.30], title: 'ADX', gridcolor: 'rgba(255,255,255,0.06)', rangemode: 'tozero', automargin: true, nticks: 4, tickfont: { size: 10 }, side: 'right' } : undefined,
+      xaxis3: hasExtra ? { domain: [0, 0.8], overlaying: 'x', anchor: 'y3', matches: 'x', showgrid: false, showticklabels: false } : undefined,
+      yaxis4: hasExtra ? { domain: [0.0, 0.12], title: 'VOL', gridcolor: 'rgba(255,255,255,0.06)', rangemode: 'tozero', range: (_volRange || undefined), automargin: true, nticks: 3, tickfont: { size: 10 }, side: 'right' } : undefined,
+      xaxis4: hasExtra ? { domain: [0, 0.8], overlaying: 'x', anchor: 'y4', matches: 'x', showgrid: false, automargin: true, tickfont: { size: 10 } } : undefined,
+      dragmode: 'pan',
+      showlegend: true,
+      legend: { orientation: 'h', y: -0.26 },
+      bargap: 0.08,
+      hovermode: 'x unified',
+      hoverlabel: {
+        bgcolor: 'rgba(15,23,42,0.92)',
+        bordercolor: 'rgba(148,163,184,0.35)',
+        font: { color: 'rgba(255,255,255,0.92)' }
+      },
+      annotations: (_metricsHtml ? [{
+        xref: 'paper',
+        yref: 'paper',
+        x: 0.84,
+        y: 0.995,
+        xanchor: 'left',
+        yanchor: 'top',
+        align: 'left',
+        showarrow: false,
+        text: _metricsHtml,
+        font: { size: 11, color: 'rgba(255,255,255,0.92)' },
+        opacity: 0.98,
+      }] : []),
+      shapes: ([
+        ...(_centerX ? [{
+        type: 'line',
+        xref: 'x',
+        yref: 'paper',
+        x0: _centerX,
+        x1: _centerX,
+        y0: 0,
+        y1: 1,
+        line: { color: 'rgba(251,191,36,0.55)', width: 1, dash: 'dot' }
+      }] : []),
+        ...((levels && isFinite(Number(levels.entry))) ? [{
+          type: 'line',
+          xref: 'paper',
+          yref: 'y',
+          x0: 0,
+          x1: 0.8,
+          y0: Number(levels.entry),
+          y1: Number(levels.entry),
+          line: { color: 'rgba(59,130,246,0.75)', width: 1, dash: 'dot' }
+        }] : []),
+        ...((levels && isFinite(Number(levels.sl))) ? [{
+          type: 'line',
+          xref: 'paper',
+          yref: 'y',
+          x0: 0,
+          x1: 0.8,
+          y0: Number(levels.sl),
+          y1: Number(levels.sl),
+          line: { color: 'rgba(239,68,68,0.80)', width: 1, dash: 'dash' }
+        }] : []),
+        ...((levels && isFinite(Number(levels.tp1))) ? [{
+          type: 'line',
+          xref: 'paper',
+          yref: 'y',
+          x0: 0,
+          x1: 0.8,
+          y0: Number(levels.tp1),
+          y1: Number(levels.tp1),
+          line: { color: 'rgba(34,197,94,0.80)', width: 1, dash: 'dash' }
+        }] : []),
+        ...(hasExtra ? [{
+          type: 'line',
+          xref: 'paper',
+          yref: 'y3',
+          x0: 0,
+          x1: 0.8,
+          y0: 20,
+          y1: 20,
+          line: { color: 'rgba(148,163,184,0.35)', width: 1, dash: 'dot' }
+        }, {
+          type: 'line',
+          xref: 'paper',
+          yref: 'y3',
+          x0: 0,
+          x1: 0.8,
+          y0: 25,
+          y1: 25,
+          line: { color: 'rgba(148,163,184,0.45)', width: 1, dash: 'dot' }
+        }] : [])
+      ]),
     };
 
-    Plotly.newPlot(mountId, traces, layout, { displayModeBar: false, responsive: true });
+    Plotly.newPlot(mountId, traces, layout, PLOTLY_CONFIG);
   }
 
   document.addEventListener('click', async (e) => {
@@ -3559,14 +4382,81 @@
     e.preventDefault();
     const contract = a.getAttribute('data-contract');
     const symbol = a.getAttribute('data-symbol');
+    const centerTs = Number(a.getAttribute('data-center-ts') || '0') || 0;
     document.getElementById('preDetailsTitle').textContent = `预警详情：${symbol}（${contract}）`;
     document.getElementById('preDetails').classList.remove('hidden');
-    await _loadPreChart(contract, '15m', 'preChart15m', `${symbol} 15m`);
-    await _loadPreChart(contract, '1h', 'preChart1h', `${symbol} 1h`);
-    await _loadPreChart(contract, '4h', 'preChart4h', `${symbol} 4h`);
-    await _loadPreChart(contract, '1d', 'preChart1d', `${symbol} 1d`);
-    await _loadPreChart(contract, '2d', 'preChart2d', `${symbol} 2d`);
+    await _loadSignalChart(contract, '15m', centerTs, 'preChart15m', `${symbol} 15m`);
+    await _loadSignalChart(contract, '1h', centerTs, 'preChart1h', `${symbol} 1h`);
+    await _loadSignalChart(contract, '4h', centerTs, 'preChart4h', `${symbol} 4h`);
+    await _loadSignalChart(contract, '1d', centerTs, 'preChart1d', `${symbol} 1d`);
+    await _loadSignalChart(contract, '2d', centerTs, 'preChart2d', `${symbol} 2d`);
 
+  });
+
+  document.addEventListener('click', async (e) => {
+    const a = e.target && e.target.closest ? e.target.closest('.macd-sym') : null;
+    if (!a) return;
+    e.preventDefault();
+    const contract = a.getAttribute('data-contract');
+    const symbol = a.getAttribute('data-symbol');
+    const tf = a.getAttribute('data-tf') || '1h';
+    const centerTs = Number(a.getAttribute('data-center-ts') || '0') || 0;
+    if (!contract) return;
+    document.getElementById('macdDetailsTitle').textContent = `信号详情：${symbol}（${contract}）`;
+    document.getElementById('macdDetails').classList.remove('hidden');
+    await _loadSignalChart(contract, '15m', centerTs, 'macdChart15m', `${symbol} 15m`);
+    await _loadSignalChart(contract, '1h', centerTs, 'macdChart1h', `${symbol} 1h`);
+    await _loadSignalChart(contract, '4h', centerTs, 'macdChart4h', `${symbol} 4h`);
+    await _loadSignalChart(contract, '1d', centerTs, 'macdChart1d', `${symbol} 1d`);
+    await _loadSignalChart(contract, '2d', centerTs, 'macdChart2d', `${symbol} 2d`);
+  });
+
+  document.addEventListener('click', async (e) => {
+    const a = e.target && e.target.closest ? e.target.closest('.entry-sym') : null;
+    if (!a) return;
+    e.preventDefault();
+    const contract = a.getAttribute('data-contract');
+    const symbol = a.getAttribute('data-symbol');
+    const centerTs = Number(a.getAttribute('data-center-ts') || '0') || 0;
+    const entry = Number(a.getAttribute('data-entry') || '');
+    const sl = Number(a.getAttribute('data-sl') || '');
+    const tp1 = Number(a.getAttribute('data-tp1') || '');
+    const levels = {
+      entry: isFinite(entry) ? entry : null,
+      sl: isFinite(sl) ? sl : null,
+      tp1: isFinite(tp1) ? tp1 : null,
+    };
+    if (!contract) return;
+    document.getElementById('entryDetailsTitle').textContent = `入场详情：${symbol}（${contract}）`;
+    document.getElementById('entryDetails').classList.remove('hidden');
+    await _loadSignalChart(contract, '15m', centerTs, 'entryChart15m', `${symbol} 15m`, levels);
+    await _loadSignalChart(contract, '1h', centerTs, 'entryChart1h', `${symbol} 1h`, levels);
+    await _loadSignalChart(contract, '4h', centerTs, 'entryChart4h', `${symbol} 4h`, levels);
+    await _loadSignalChart(contract, '1d', centerTs, 'entryChart1d', `${symbol} 1d`, levels);
+  });
+
+  document.addEventListener('click', async (e) => {
+    const a = e.target && e.target.closest ? e.target.closest('.preentry-sym') : null;
+    if (!a) return;
+    e.preventDefault();
+    const contract = a.getAttribute('data-contract');
+    const symbol = a.getAttribute('data-symbol');
+    const centerTs = Number(a.getAttribute('data-center-ts') || '0') || 0;
+    const entry = Number(a.getAttribute('data-entry') || '');
+    const sl = Number(a.getAttribute('data-sl') || '');
+    const tp1 = Number(a.getAttribute('data-tp1') || '');
+    const levels = {
+      entry: isFinite(entry) ? entry : null,
+      sl: isFinite(sl) ? sl : null,
+      tp1: isFinite(tp1) ? tp1 : null,
+    };
+    if (!contract) return;
+    document.getElementById('preEntryDetailsTitle').textContent = `预警入场详情：${symbol}（${contract}）`;
+    document.getElementById('preEntryDetails').classList.remove('hidden');
+    await _loadSignalChart(contract, '15m', centerTs, 'preEntryChart15m', `${symbol} 15m`, levels);
+    await _loadSignalChart(contract, '1h', centerTs, 'preEntryChart1h', `${symbol} 1h`, levels);
+    await _loadSignalChart(contract, '4h', centerTs, 'preEntryChart4h', `${symbol} 4h`, levels);
+    await _loadSignalChart(contract, '1d', centerTs, 'preEntryChart1d', `${symbol} 1d`, levels);
   });
 
   // 默认显示仪表板

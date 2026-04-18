@@ -3004,7 +3004,7 @@ _STABLE_SYMBOLS = {
 
 
 def coingecko_top_marketcap(limit: int = 50) -> List[dict]:
-    # CoinGecko 免费接口，无需 key；这里拿前 100 再过滤稳定币，最后截取 limit
+    # CoinGecko 免费接口，无需 key；这里拿 Top 列表再过滤稳定币，最后截取 limit
     ck = f"cg:top:{limit}"
     cached = _cache_get(ck, ttl=600)
     if cached is not None:
@@ -3030,13 +3030,14 @@ def coingecko_top_marketcap(limit: int = 50) -> List[dict]:
         _cache_set(ck, out2)
         return out2
     url = "https://api.coingecko.com/api/v3/coins/markets"
+    per_page = 250 if int(limit) > 100 else 100
     try:
         data = _rest_get_full_url(
             url,
             params={
                 "vs_currency": "usd",
                 "order": "market_cap_desc",
-                "per_page": 100,
+                "per_page": per_page,
                 "page": 1,
                 "sparkline": "false",
             },
@@ -5583,6 +5584,456 @@ def summary(timeframe: str = "1h", lookback: int = 6) -> JSONResponse:
     return JSONResponse(payload)
 
 
+@app.get("/api/macd_preentries")
+def macd_preentries(
+    limit: int = 50,
+    timeframe: str = "1h",
+    allow_adx_20_25: int = 1,
+) -> JSONResponse:
+    """MACD 预警入场：基于 detect_prealert 的“即将金叉/即将死叉”。"""
+    limit = max(10, min(120, int(limit)))
+    timeframe = (timeframe or "1h").strip().lower()
+    if timeframe not in ("15m", "1h", "4h", "1d"):
+        timeframe = "1h"
+    allow_adx_20_25 = 1 if str(allow_adx_20_25).strip() in ("1", "true", "True", "yes", "YES") else 0
+
+    ck = f"macd_preentries:{limit}:{timeframe}:{allow_adx_20_25}"
+    cached = _cache_get(ck, ttl=30)
+    if cached is not None:
+        return JSONResponse(cached)
+
+    errors: List[str] = []
+    items: List[dict] = []
+
+    try:
+        top = coingecko_top_marketcap(limit)
+    except Exception as e:
+        return JSONResponse({"error": f"CoinGecko 获取失败: {e}"}, status_code=200)
+
+    try:
+        contract_set = set(get_all_futures_contract_names())
+    except Exception as e:
+        return JSONResponse({"error": f"Gate 合约列表获取失败: {e}"}, status_code=200)
+
+    last_price_map = _ticker_last_price_map()
+
+    tf_sec_map = {
+        "15m": 15 * 60,
+        "1h": 60 * 60,
+        "4h": 4 * 60 * 60,
+        "1d": 24 * 60 * 60,
+    }
+    tf_sec = int(tf_sec_map.get(timeframe, 60 * 60))
+
+    candidates: List[dict] = []
+    for it in top:
+        sym = str(it.get("symbol") or "").upper().strip()
+        if not sym:
+            continue
+        contract = f"{sym}_USDT"
+        if contract not in contract_set:
+            continue
+        candidates.append({
+            "symbol": sym,
+            "contract": contract,
+            "market_cap_rank": it.get("market_cap_rank"),
+            "market_cap": it.get("market_cap"),
+        })
+
+    def _analyze_one(cand: dict) -> Optional[dict]:
+        contract = str(cand.get("contract") or "")
+        symbol = str(cand.get("symbol") or "")
+        last_px = last_price_map.get(contract)
+        now_ts = int(time.time())
+
+        try:
+            candles = get_macd_candles(contract, timeframe, limit=260)
+            seq = [x for x in candles if isinstance(x, dict)]
+            seq.sort(key=lambda x: int(x.get("t") or 0))
+
+            ts: List[int] = []
+            h: List[float] = []
+            l: List[float] = []
+            c: List[float] = []
+            v: List[float] = []
+            for x in seq:
+                tt = x.get("t")
+                hh = _safe_float(x.get("h"))
+                ll = _safe_float(x.get("l"))
+                cc = _safe_float(x.get("c"))
+                vv = _safe_float(x.get("v"))
+                if tt is None or hh is None or ll is None or cc is None:
+                    continue
+                try:
+                    ts.append(int(tt))
+                    h.append(float(hh))
+                    l.append(float(ll))
+                    c.append(float(cc))
+                    v.append(float(vv or 0.0))
+                except Exception:
+                    continue
+
+            if len(c) < 120:
+                return None
+
+            dif, dea, hist = _macd(c, 12, 26, 9)
+            if not dif or not dea:
+                return None
+
+            pre = detect_prealert(dif, dea, hist, lookback=2, ratio_threshold=0.75)
+            if not pre:
+                return None
+
+            pre_type = str(pre.get("type") or "")
+            side = "long" if pre_type == "pre_golden" else ("short" if pre_type == "pre_death" else "none")
+            if side == "none":
+                return None
+
+            idx = len(c) - 1
+            if idx < 0 or idx >= len(ts):
+                return None
+
+            vol_idx = idx
+            try:
+                # 若最后一根 tf K线未收盘，则量能确认改用前一根已收盘 K线
+                if vol_idx == (len(ts) - 1) and vol_idx > 0:
+                    last_open_ts = int(ts[vol_idx])
+                    if now_ts < (last_open_ts + tf_sec):
+                        vol_idx = vol_idx - 1
+            except Exception:
+                vol_idx = idx
+
+            ema50 = _ema(c, 50)
+            adx14 = _adx(h, l, c, 14)
+            atr14 = _atr(h, l, c, 14)
+            vol_sma20 = _sma(v, 20)
+
+            e50 = ema50[idx] if ema50 and idx < len(ema50) else None
+            adx_v = adx14[idx] if adx14 and idx < len(adx14) else None
+            atr_v = atr14[idx] if atr14 and idx < len(atr14) else None
+            vol_ma = vol_sma20[vol_idx] if vol_sma20 and vol_idx < len(vol_sma20) else None
+            if e50 is None or adx_v is None or atr_v is None or vol_ma is None:
+                return None
+
+            adx_f = float(adx_v)
+            if adx_f < 20.0:
+                return None
+            if (not allow_adx_20_25) and (adx_f < 25.0):
+                return None
+
+            entry = c[idx]
+            if not isinstance(entry, (int, float)):
+                return None
+
+            try:
+                vol_ratio = float(v[vol_idx]) / float(vol_ma) if float(vol_ma) > 0 else None
+            except Exception:
+                vol_ratio = None
+            if vol_ratio is None or vol_ratio <= 1.3:
+                return None
+
+            try:
+                if side == "long" and float(entry) <= float(e50):
+                    return None
+                if side == "short" and float(entry) >= float(e50):
+                    return None
+            except Exception:
+                return None
+
+            atr_f = float(atr_v) if isinstance(atr_v, (int, float)) else 0.0
+            if atr_f <= 0:
+                return None
+
+            if side == "long":
+                sl = float(entry) - 1.0 * atr_f
+                tp1 = float(entry) + 2.0 * atr_f
+            else:
+                sl = float(entry) + 1.0 * atr_f
+                tp1 = float(entry) - 2.0 * atr_f
+
+            return {
+                "symbol": symbol,
+                "contract": contract,
+                "timeframe": timeframe,
+                "market_cap_rank": cand.get("market_cap_rank"),
+                "current_price": last_px,
+                "signal_type": pre_type,
+                "signal_time": int(ts[idx]),
+                "entry_price": float(entry),
+                "ema50": float(e50),
+                "adx14": float(adx_f),
+                "vol": float(v[vol_idx]),
+                "vol_sma20": float(vol_ma),
+                "vol_ratio": float(vol_ratio),
+                "atr14": float(atr_f),
+                "sl": float(sl),
+                "tp1": float(tp1),
+                "side": side,
+                "pre_ratio": (float(pre.get("ratio")) if pre.get("ratio") is not None else None),
+                "pre_distance": (float(pre.get("distance")) if pre.get("distance") is not None else None),
+                "pre_bar_dir": pre.get("bar_dir"),
+                "updated_at": now_ts,
+            }
+        except Exception as e:
+            errors.append(f"{contract}: {e}")
+            return None
+
+    max_workers = 6
+    if limit <= 20:
+        max_workers = 4
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = [ex.submit(_analyze_one, c) for c in candidates[:limit]]
+        for f in as_completed(futs):
+            try:
+                r = f.result()
+                if r:
+                    items.append(r)
+            except Exception as e:
+                errors.append(str(e))
+
+    try:
+        items.sort(key=lambda x: int(x.get("signal_time") or 0), reverse=True)
+    except Exception:
+        pass
+
+    payload = {"items": items, "errors": errors}
+    _cache_set(ck, payload)
+    return JSONResponse(payload)
+
+@app.get("/api/macd_entries")
+def macd_entries(
+    limit: int = 50,
+    timeframe: str = "1h",
+    allow_adx_20_25: int = 1,
+) -> JSONResponse:
+    """MACD 监控入场（1H 为主）。
+
+    入场条件（做多/做空）：
+    - MACD 发生金叉/死叉（最近 lookback 根内的最近一次）
+    - 叠加过滤：EMA50、ADX14、成交量均线（SMA20）确认
+    - 禁止：ADX < 20
+    - 可选：ADX 20-25 是否允许（allow_adx_20_25）
+
+    输出：候选入场列表（包含各指标值与 ATR 风控参考）。
+    """
+    limit = max(10, min(120, int(limit)))
+    timeframe = (timeframe or "1h").strip().lower()
+    # 允许在页面对照更大周期趋势；默认仍为 1h
+    if timeframe not in ("15m", "1h", "4h", "1d"):
+        timeframe = "1h"
+    allow_adx_20_25 = 1 if str(allow_adx_20_25).strip() in ("1", "true", "True", "yes", "YES") else 0
+
+    ck = f"macd_entries:{limit}:{timeframe}:{allow_adx_20_25}"
+    cached = _cache_get(ck, ttl=30)
+    if cached is not None:
+        return JSONResponse(cached)
+
+    errors: List[str] = []
+    items: List[dict] = []
+
+    try:
+        top = coingecko_top_marketcap(limit)
+    except Exception as e:
+        return JSONResponse({"error": f"CoinGecko 获取失败: {e}"}, status_code=200)
+
+    try:
+        contract_set = set(get_all_futures_contract_names())
+    except Exception as e:
+        return JSONResponse({"error": f"Gate 合约列表获取失败: {e}"}, status_code=200)
+
+    last_price_map = _ticker_last_price_map()
+
+    tf_sec_map = {
+        "15m": 15 * 60,
+        "1h": 60 * 60,
+        "4h": 4 * 60 * 60,
+        "1d": 24 * 60 * 60,
+    }
+    tf_sec = int(tf_sec_map.get(timeframe, 60 * 60))
+
+    candidates: List[dict] = []
+    for it in top:
+        sym = str(it.get("symbol") or "").upper().strip()
+        if not sym:
+            continue
+        contract = f"{sym}_USDT"
+        if contract not in contract_set:
+            continue
+        candidates.append({
+            "symbol": sym,
+            "contract": contract,
+            "market_cap_rank": it.get("market_cap_rank"),
+            "market_cap": it.get("market_cap"),
+        })
+
+    def _analyze_one(cand: dict) -> Optional[dict]:
+        contract = str(cand.get("contract") or "")
+        symbol = str(cand.get("symbol") or "")
+        last_px = last_price_map.get(contract)
+        now_ts = int(time.time())
+
+        try:
+            # 需要足够长度：EMA50 / ADX14 / ATR14 / VOL SMA20
+            candles = get_macd_candles(contract, timeframe, limit=260)
+            seq = [x for x in candles if isinstance(x, dict)]
+            seq.sort(key=lambda x: int(x.get("t") or 0))
+
+            ts: List[int] = []
+            h: List[float] = []
+            l: List[float] = []
+            c: List[float] = []
+            v: List[float] = []
+            for x in seq:
+                tt = x.get("t")
+                hh = _safe_float(x.get("h"))
+                ll = _safe_float(x.get("l"))
+                cc = _safe_float(x.get("c"))
+                vv = _safe_float(x.get("v"))
+                if tt is None or hh is None or ll is None or cc is None:
+                    continue
+                try:
+                    ts.append(int(tt))
+                    h.append(float(hh))
+                    l.append(float(ll))
+                    c.append(float(cc))
+                    v.append(float(vv or 0.0))
+                except Exception:
+                    continue
+
+            if len(c) < 120:
+                return None
+
+            dif, dea, hist = _macd(c, 12, 26, 9)
+            if not dif or not dea:
+                return None
+
+            cross = detect_recent_cross(dif, dea, lookback=3)
+            if not cross:
+                return None
+            signal_type, signal_idx = cross
+            if signal_idx is None or signal_idx >= len(ts):
+                return None
+
+            vol_idx = int(signal_idx)
+            try:
+                # 若信号落在最后一根 tf K线且该 K线未收盘，则量能确认改用前一根已收盘 K线
+                if vol_idx == (len(ts) - 1) and vol_idx > 0:
+                    last_open_ts = int(ts[vol_idx])
+                    if now_ts < (last_open_ts + tf_sec):
+                        vol_idx = vol_idx - 1
+            except Exception:
+                vol_idx = int(signal_idx)
+
+            # EMA50、ADX14、ATR14、VOL SMA20
+            ema50 = _ema(c, 50)
+            adx14 = _adx(h, l, c, 14)
+            atr14 = _atr(h, l, c, 14)
+            vol_sma20 = _sma(v, 20)
+
+            e50 = ema50[signal_idx] if ema50 and signal_idx < len(ema50) else None
+            adx_v = adx14[signal_idx] if adx14 and signal_idx < len(adx14) else None
+            atr_v = atr14[signal_idx] if atr14 and signal_idx < len(atr14) else None
+            vol_ma = vol_sma20[vol_idx] if vol_sma20 and vol_idx < len(vol_sma20) else None
+
+            if e50 is None or adx_v is None or atr_v is None or vol_ma is None:
+                return None
+
+            try:
+                adx_f = float(adx_v)
+            except Exception:
+                return None
+
+            # ADX 禁止/可选开关
+            if adx_f < 20.0:
+                return None
+            if (not allow_adx_20_25) and (adx_f < 25.0):
+                return None
+
+            entry = c[signal_idx]
+            if not isinstance(entry, (int, float)):
+                return None
+
+            # 量能确认
+            try:
+                vol_ratio = float(v[vol_idx]) / float(vol_ma) if float(vol_ma) > 0 else None
+            except Exception:
+                vol_ratio = None
+            if vol_ratio is None or vol_ratio <= 1.3:
+                return None
+
+            side = "long" if signal_type == "golden" else ("short" if signal_type == "death" else "none")
+            if side == "none":
+                return None
+
+            # EMA50 过滤
+            try:
+                if side == "long" and float(entry) <= float(e50):
+                    return None
+                if side == "short" and float(entry) >= float(e50):
+                    return None
+            except Exception:
+                return None
+
+            atr_f = float(atr_v) if isinstance(atr_v, (int, float)) else 0.0
+            if atr_f <= 0:
+                return None
+
+            # 风控参考：SL=1*ATR，TP1=2*ATR（仅输出参考，不做撮合/下单）
+            if side == "long":
+                sl = float(entry) - 1.0 * atr_f
+                tp1 = float(entry) + 2.0 * atr_f
+            else:
+                sl = float(entry) + 1.0 * atr_f
+                tp1 = float(entry) - 2.0 * atr_f
+
+            return {
+                "symbol": symbol,
+                "contract": contract,
+                "timeframe": timeframe,
+                "market_cap_rank": cand.get("market_cap_rank"),
+                "current_price": last_px,
+                "signal_type": signal_type,
+                "signal_time": int(ts[signal_idx]),
+                "entry_price": float(entry),
+                "ema50": float(e50),
+                "adx14": float(adx_f),
+                "vol": float(v[vol_idx]),
+                "vol_sma20": float(vol_ma),
+                "vol_ratio": float(vol_ratio),
+                "atr14": float(atr_f),
+                "sl": float(sl),
+                "tp1": float(tp1),
+                "side": side,
+                "updated_at": now_ts,
+            }
+        except Exception as e:
+            errors.append(f"{contract}: {e}")
+            return None
+
+    max_workers = 6
+    if limit <= 20:
+        max_workers = 4
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = [ex.submit(_analyze_one, c) for c in candidates[:limit]]
+        for f in as_completed(futs):
+            try:
+                r = f.result()
+                if r:
+                    items.append(r)
+            except Exception as e:
+                errors.append(str(e))
+
+    # 统一排序：最新信号优先
+    try:
+        items.sort(key=lambda x: int(x.get("signal_time") or 0), reverse=True)
+    except Exception:
+        pass
+
+    payload = {"items": items, "errors": errors}
+    _cache_set(ck, payload)
+    return JSONResponse(payload)
+
+
 @app.get("/api/macd_monitor/auto_status")
 def api_macd_monitor_auto_status() -> JSONResponse:
     alive = False
@@ -5900,7 +6351,7 @@ def macd_prealerts(
     timeframe: str = "all",
     debug: int = 0,
 ) -> JSONResponse:
-    limit = max(10, min(100, int(limit)))
+    limit = max(10, min(200, int(limit)))
     warn_type = (warn_type or "all").strip().lower()
     if warn_type not in ("all", "pre_golden", "pre_death"):
         warn_type = "all"
@@ -6148,6 +6599,102 @@ def macd_prealert_detail(contract: str, tf: str = "1h", limit: int = 200) -> JSO
     return JSONResponse(out)
 
 
+@app.get("/api/macd_signal_detail")
+def macd_signal_detail(
+    contract: str,
+    tf: str = "1h",
+    center_ts: int = 0,
+    before: int = 80,
+    after: int = 40,
+    max_fetch: int = 320,
+) -> JSONResponse:
+    tf = (tf or "1h").strip()
+    if tf not in ("15m", "1h", "4h", "1d", "2d"):
+        tf = "1h"
+    try:
+        center_ts = int(center_ts or 0)
+    except Exception:
+        center_ts = 0
+    before = max(30, min(220, int(before)))
+    after = max(10, min(220, int(after)))
+    max_fetch = max(120, min(800, int(max_fetch)))
+
+    ck = f"macd_signal_detail:{contract}:{tf}:{center_ts}:{before}:{after}:{max_fetch}"
+    cached = _cache_get(ck, ttl=60)
+    if cached is not None:
+        return JSONResponse(cached)
+
+    fetch_limit = min(max_fetch, max(120, before + after + 60))
+    candles = get_macd_candles(contract, tf, limit=fetch_limit)
+    seq = [x for x in candles if isinstance(x, dict)]
+    seq.sort(key=lambda x: int(x.get("t") or 0))
+
+    if not seq:
+        out_empty = {"contract": contract, "timeframe": tf, "t": [], "close": [], "dif": [], "dea": [], "hist": []}
+        _cache_set(ck, out_empty)
+        return JSONResponse(out_empty)
+
+    # 找到最接近 center_ts 的 candle index（如果 center_ts 为空，则默认取最后一根）
+    if center_ts > 0:
+        best_i = len(seq) - 1
+        best_d = None
+        for i, it in enumerate(seq):
+            ts = int(it.get("t") or 0)
+            d = abs(ts - center_ts)
+            if best_d is None or d < best_d:
+                best_d = d
+                best_i = i
+        center_i = best_i
+    else:
+        center_i = len(seq) - 1
+
+    start_i = max(0, center_i - before)
+    end_i = min(len(seq), center_i + after + 1)
+    win = seq[start_i:end_i]
+
+    highs: List[float] = []
+    lows: List[float] = []
+    closes: List[float] = []
+    vols: List[float] = []
+    valid_win: List[dict] = []
+    for it in win:
+        c = _safe_float(it.get("c"))
+        h = _safe_float(it.get("h"))
+        l = _safe_float(it.get("l"))
+        v = _safe_float(it.get("v"))
+        if c is None or h is None or l is None:
+            continue
+        valid_win.append(it)
+        highs.append(float(h))
+        lows.append(float(l))
+        closes.append(float(c))
+        vols.append(float(v or 0.0))
+
+    dif, dea, hist = _macd(closes, 12, 26, 9)
+    ema50 = _ema(closes, 50) if closes else []
+    adx14 = _adx(highs, lows, closes, 14) if closes else []
+    vol_sma20 = _sma(vols, 20) if vols else []
+    n = min(len(closes), len(dif), len(dea), len(hist), len(valid_win))
+    out = {
+        "contract": contract,
+        "timeframe": tf,
+        "center_ts": center_ts,
+        "center_i": int(center_i - start_i),
+        "t": [int(valid_win[i].get("t") or 0) for i in range(len(valid_win) - n, len(valid_win))],
+        "close": closes[len(closes) - n :],
+        "dif": dif[len(dif) - n :],
+        "dea": dea[len(dea) - n :],
+        "hist": hist[len(hist) - n :],
+        # 额外指标：用于前端叠加画线（EMA50/ADX14/成交量SMA20）
+        "ema50": ema50[len(ema50) - n :] if ema50 else [],
+        "adx14": adx14[len(adx14) - n :] if adx14 else [],
+        "vol": vols[len(vols) - n :] if vols else [],
+        "vol_sma20": vol_sma20[len(vol_sma20) - n :] if vol_sma20 else [],
+    }
+    _cache_set(ck, out)
+    return JSONResponse(out)
+
+
 @app.get("/api/anomalies")
 def anomalies(timeframe: str = "1h", top_n: int = 50, lookback: int = 1) -> JSONResponse:
     """市场异动检测（TopN 合约池）。
@@ -6225,7 +6772,7 @@ def anomalies(timeframe: str = "1h", top_n: int = 50, lookback: int = 1) -> JSON
 @app.get("/api/macd_signals")
 def macd_signals(limit: int = 50, only_signal: int = 0, timeframe: str = "all") -> JSONResponse:
     # 返回：市值前N（过滤稳定币）对应的 Gate USDT 永续合约，在 15m/1h/1d 的 MACD 金叉/死叉信号
-    limit = max(10, min(100, int(limit)))
+    limit = max(10, min(200, int(limit)))
     timeframe = (timeframe or "all").strip().lower()
     if timeframe not in ("all", "15m", "1h", "4h", "1d", "2d"):
         timeframe = "all"
