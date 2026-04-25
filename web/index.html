@@ -97,6 +97,8 @@
             <button class="nav-item" data-target="page-news" id="nav-news">新闻多空哨兵</button>
             <button class="nav-item" data-target="page-tri-signal" id="nav-tri-signal">三周期信号矩阵</button>
             <button class="nav-item" data-target="page-master-a" id="nav-master-a">量化策略</button>
+            <button class="nav-item" data-target="page-whales" id="nav-whales">鲸鱼动向</button>
+            <button class="nav-item" data-target="page-move3m" id="nav-move3m">3分钟异动监控</button>
             <button class="nav-item" data-target="page-telegram" id="nav-telegram">Telegram 推送</button>
           </div>
         </div>
@@ -218,6 +220,575 @@
                 </thead>
                 <tbody></tbody>
               </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="page-move3m" class="hidden">
+          <header class="mb-8">
+            <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+              <div>
+                <h1 class="text-3xl font-extrabold text-blue-300">3分钟异动币种监控器（>10%）</h1>
+                <p class="muted mt-2">数据源：Binance 现货 WebSocket（USDT 交易对）。当最近3分钟涨跌幅超过阈值时触发警报，可选声音/浏览器通知/TG 推送。</p>
+              </div>
+              <div class="flex flex-wrap items-end gap-3">
+                <div>
+                  <label class="muted text-sm">阈值（%）</label>
+                  <input id="move3mThreshold" type="number" step="0.1" value="10" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 mt-2 w-[140px]" />
+                </div>
+                <div>
+                  <label class="muted text-sm">订阅数量（TopN USDT）</label>
+                  <input id="move3mTopN" type="number" step="50" value="400" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 mt-2 w-[160px]" />
+                </div>
+                <div>
+                  <label class="muted text-sm">每页</label>
+                  <select id="move3mPageSize" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 mt-2 w-[140px]">
+                    <option value="20" selected>20</option>
+                    <option value="30">30</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                  </select>
+                </div>
+                <div class="flex items-end">
+                  <label class="muted text-sm flex items-center gap-2">
+                    <input id="move3mSound" type="checkbox" class="accent-blue-500" checked />
+                    声音提示
+                  </label>
+                </div>
+                <div class="flex items-end">
+                  <label class="muted text-sm flex items-center gap-2">
+                    <input id="move3mNotify" type="checkbox" class="accent-blue-500" />
+                    浏览器通知
+                  </label>
+                </div>
+                <div class="flex items-end">
+                  <label class="muted text-sm flex items-center gap-2">
+                    <input id="move3mTg" type="checkbox" class="accent-blue-500" checked />
+                    TG 推送
+                  </label>
+                </div>
+                <button id="move3mStart" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg font-semibold">启动</button>
+                <button id="move3mStop" class="btn">停止</button>
+                <button id="move3mClear" class="btn">清空日志</button>
+                <span id="move3mStatus" class="muted text-sm"></span>
+              </div>
+            </div>
+          </header>
+
+          <section class="mb-10">
+            <div class="card rounded-2xl p-4">
+              <div class="text-xl font-extrabold mb-3">警报区（自动置顶）</div>
+              <div class="overflow-x-auto">
+                <table class="min-w-[1100px] w-full text-sm" id="move3mAlertTable">
+                  <thead>
+                    <tr class="text-left muted">
+                      <th class="py-2">币种</th>
+                      <th class="py-2">当前价</th>
+                      <th class="py-2">3min涨跌幅</th>
+                      <th class="py-2">24h涨跌幅</th>
+                      <th class="py-2">24h成交额(USDT)</th>
+                      <th class="py-2">更新时间</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+              <div class="mt-3 flex items-center justify-between">
+                <div class="muted text-sm" id="move3mAlertPageInfo">—</div>
+                <div class="flex items-center gap-2">
+                  <button class="btn" id="move3mAlertPrev">上一页</button>
+                  <button class="btn" id="move3mAlertNext">下一页</button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="mb-10">
+            <div class="card rounded-2xl p-4">
+              <div class="text-xl font-extrabold mb-3">实时列表</div>
+              <div class="overflow-x-auto">
+                <table class="min-w-[1100px] w-full text-sm" id="move3mTable">
+                  <thead>
+                    <tr class="text-left muted">
+                      <th class="py-2">币种</th>
+                      <th class="py-2">当前价</th>
+                      <th class="py-2">3min涨跌幅</th>
+                      <th class="py-2">24h涨跌幅</th>
+                      <th class="py-2">24h成交额(USDT)</th>
+                      <th class="py-2">更新时间</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+              <div class="mt-3 flex items-center justify-between">
+                <div class="muted text-sm" id="move3mPageInfo">—</div>
+                <div class="flex items-center gap-2">
+                  <button class="btn" id="move3mPrev">上一页</button>
+                  <button class="btn" id="move3mNext">下一页</button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="mb-10">
+            <div class="card rounded-2xl p-4">
+              <div class="flex items-center justify-between mb-3">
+                <div class="text-xl font-extrabold">历史异动日志</div>
+                <div class="muted text-sm">本地内存记录（刷新页面会清空）</div>
+              </div>
+              <div class="overflow-x-auto">
+                <table class="min-w-[1100px] w-full text-sm" id="move3mLogTable">
+                  <thead>
+                    <tr class="text-left muted">
+                      <th class="py-2">时间</th>
+                      <th class="py-2">币种</th>
+                      <th class="py-2">3min涨跌幅</th>
+                      <th class="py-2">当前价</th>
+                      <th class="py-2">24h涨跌幅</th>
+                      <th class="py-2">24h成交额</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+              <div class="mt-3 flex items-center justify-between">
+                <div class="muted text-sm" id="move3mLogPageInfo">—</div>
+                <div class="flex items-center gap-2">
+                  <button class="btn" id="move3mLogPrev">上一页</button>
+                  <button class="btn" id="move3mLogNext">下一页</button>
+                </div>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <section id="page-whales" class="hidden">
+          <header class="mb-8">
+            <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+              <div>
+                <h1 class="text-3xl font-extrabold text-blue-300">虚拟币鲸鱼动向监控（Mock）</h1>
+                <p class="muted mt-2">实时/近实时监控大额转账：转入交易所（潜在卖压）/转出交易所（潜在积累）。当前为 Mock 数据，后续可替换真实链上数据源。</p>
+              </div>
+              <div class="flex flex-wrap items-end gap-3">
+                <div>
+                  <label class="muted text-sm">链</label>
+                  <select id="whaleChain" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 mt-2">
+                    <option value="ETH">ETH</option>
+                    <option value="SOL">SOL</option>
+                    <option value="BTC" selected>BTC</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="muted text-sm">阈值（USD）</label>
+                  <input id="whaleMinUsd" type="number" step="100000" value="1000000" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 mt-2 w-[180px]" />
+                </div>
+                <div>
+                  <label class="muted text-sm">方向</label>
+                  <select id="whaleDirection" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 mt-2">
+                    <option value="all" selected>全部</option>
+                    <option value="to_exchange">转入交易所</option>
+                    <option value="from_exchange">转出交易所</option>
+                    <option value="wallet">钱包间</option>
+                    <option value="unknown">未知</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="muted text-sm">刷新间隔</label>
+                  <select id="whaleRefreshSec" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 mt-2">
+                    <option value="10">10s</option>
+                    <option value="20">20s</option>
+                    <option value="30">30s</option>
+                    <option value="60">60s</option>
+                    <option value="180" selected>180s</option>
+                  </select>
+                </div>
+                <button id="whaleRefresh" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg font-semibold">刷新</button>
+                <span id="whaleStatus" class="muted text-sm"></span>
+              </div>
+            </div>
+          </header>
+
+          <section class="mb-6">
+            <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+              <div class="card rounded-2xl p-4">
+                <div class="muted text-xs">24h 转入交易所（USD, M）</div>
+                <div class="text-2xl font-extrabold mt-2" id="whaleKpiIn">—</div>
+              </div>
+              <div class="card rounded-2xl p-4">
+                <div class="muted text-xs">24h 转出交易所（USD, M）</div>
+                <div class="text-2xl font-extrabold mt-2" id="whaleKpiOut">—</div>
+              </div>
+              <div class="card rounded-2xl p-4">
+                <div class="muted text-xs">24h 净流（Out-In, USD, M）</div>
+                <div class="text-2xl font-extrabold mt-2" id="whaleKpiNet">—</div>
+              </div>
+              <div class="card rounded-2xl p-4">
+                <div class="muted text-xs">24h 大额交易数（≥阈值）</div>
+                <div class="text-2xl font-extrabold mt-2" id="whaleKpiCount">—</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="mb-10">
+            <div class="card rounded-2xl p-4">
+              <div class="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4 mb-3">
+                <div>
+                  <div class="text-xl font-extrabold">交易所大额成交（TopN 多币种）</div>
+                  <div class="muted text-sm mt-1">监控交易所撮合成交（非链上转账）。按成交额(USD)过滤与排序。</div>
+                </div>
+                <div class="flex flex-wrap items-end gap-3">
+                  <div>
+                    <label class="muted text-sm">交易所来源</label>
+                    <select id="spotLargeExchange" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 mt-2 w-[180px]">
+                      <option value="binance" selected>Binance</option>
+                      <option value="gate">Gate</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="muted text-sm">阈值（USD）</label>
+                    <input id="spotLargeMinUsd" type="number" step="10000" value="10000" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 mt-2 w-[180px]" />
+                  </div>
+                  <div>
+                    <label class="muted text-sm">TopN（USDT 交易对）</label>
+                    <input id="spotLargeTopN" type="number" step="5" value="100" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 mt-2 w-[180px]" />
+                  </div>
+                  <div>
+                    <label class="muted text-sm">每页</label>
+                    <select id="spotLargePageSize" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-2 mt-2 text-sm">
+                      <option value="15" selected>15</option>
+                      <option value="30">30</option>
+                      <option value="50">50</option>
+                      <option value="100">100</option>
+                    </select>
+                  </div>
+                  <button id="spotLargeRefresh" class="btn">刷新</button>
+                  <button id="spotLargePrev" class="btn">上一页</button>
+                  <button id="spotLargeNext" class="btn">下一页</button>
+                  <span id="spotLargeInfo" class="muted text-sm">—</span>
+                  <span id="spotLargeStatus" class="muted text-sm"></span>
+                </div>
+              </div>
+              <div class="overflow-x-auto">
+                <table class="min-w-[1100px] w-full text-sm" id="spotLargeTable">
+                  <thead>
+                    <tr class="text-left muted">
+                      <th class="py-2">时间</th>
+                      <th class="py-2">交易对</th>
+                      <th class="py-2">方向</th>
+                      <th class="py-2">成交额</th>
+                      <th class="py-2">价格</th>
+                      <th class="py-2">数量</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+
+              <div class="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div class="card rounded-2xl p-4">
+                  <div class="text-lg font-extrabold">BTC 汇总（近24h）</div>
+                  <div class="muted text-sm mt-1" id="spotLargeBtcStats">—</div>
+                </div>
+                <div class="card rounded-2xl p-4">
+                  <div class="text-lg font-extrabold">ETH 汇总（近24h）</div>
+                  <div class="muted text-sm mt-1" id="spotLargeEthStats">—</div>
+                </div>
+                <div class="card rounded-2xl p-4">
+                  <div class="text-lg font-extrabold">全部币种汇总（近24h）</div>
+                  <div class="muted text-sm mt-1" id="spotLargeAllStats">—</div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="mb-10">
+            <div class="card rounded-2xl p-4">
+              <div class="flex items-center justify-between">
+                <div class="text-xl font-extrabold">净流趋势（24h）</div>
+                <div class="muted text-sm">单位：USD（百万）</div>
+              </div>
+              <div id="whaleChart" style="height:360px" class="mt-4"></div>
+            </div>
+          </section>
+
+          <section class="mb-10">
+            <div class="card rounded-2xl p-4">
+              <div class="flex items-center justify-between mb-3">
+                <div class="text-xl font-extrabold">实时大额转账</div>
+                <div class="flex items-center gap-3">
+                  <div class="muted text-sm" id="whaleListHint">—</div>
+                  <div class="flex items-center gap-2">
+                    <label class="muted text-sm">每页</label>
+                    <select id="whalePageSize" class="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-sm">
+                      <option value="20" selected>20</option>
+                      <option value="30">30</option>
+                      <option value="50">50</option>
+                      <option value="100">100</option>
+                    </select>
+                    <button id="whalePagePrev" class="btn">上一页</button>
+                    <button id="whalePageNext" class="btn">下一页</button>
+                    <span id="whalePageInfo" class="muted text-sm">—</span>
+                  </div>
+                </div>
+              </div>
+              <div class="overflow-x-auto">
+                <table class="min-w-[1100px] w-full text-sm" id="whaleTable">
+                  <thead>
+                    <tr class="text-left muted">
+                      <th class="py-2">时间</th>
+                      <th class="py-2">链</th>
+                      <th class="py-2">资产</th>
+                      <th class="py-2">金额</th>
+                      <th class="py-2">方向</th>
+                      <th class="py-2">From</th>
+                      <th class="py-2">To</th>
+                      <th class="py-2">标签</th>
+                      <th class="py-2">链接</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+
+          <section class="mb-10">
+            <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+              <div class="card rounded-2xl p-4">
+                <div class="flex items-center justify-between">
+                  <div class="text-xl font-extrabold">Watchlist 地址</div>
+                  <button id="whaleWatchRefresh" class="btn">刷新</button>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4">
+                  <div>
+                    <label class="muted text-sm">链</label>
+                    <select id="whaleWatchChain" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 mt-2 w-full">
+                      <option value="ETH">ETH</option>
+                      <option value="SOL">SOL</option>
+                      <option value="BTC" selected>BTC</option>
+                    </select>
+                  </div>
+                  <div class="md:col-span-2">
+                    <label class="muted text-sm">地址</label>
+                    <input id="whaleWatchAddress" class="w-full mt-2 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2" placeholder="0x... / bc1... / Sol..." />
+                  </div>
+                  <div class="md:col-span-3">
+                    <label class="muted text-sm">标签/备注</label>
+                    <div class="flex gap-2 mt-2">
+                      <input id="whaleWatchLabel" class="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2" placeholder="例如：Binance 冷钱包 / 自己的钱包" />
+                      <button id="whaleWatchAdd" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg font-semibold">添加/更新</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="muted text-sm mt-3" id="whaleWatchStatus"></div>
+                <div class="overflow-x-auto mt-3">
+                  <table class="min-w-[700px] w-full text-sm" id="whaleWatchTable">
+                    <thead>
+                      <tr class="text-left muted">
+                        <th class="py-2">链</th>
+                        <th class="py-2">地址</th>
+                        <th class="py-2">标签</th>
+                        <th class="py-2">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div class="card rounded-2xl p-4">
+                <div class="flex items-center justify-between">
+                  <div class="text-xl font-extrabold">告警规则</div>
+                  <button id="whaleRulesRefresh" class="btn">刷新</button>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
+                  <div class="md:col-span-2">
+                    <label class="muted text-sm">规则名称</label>
+                    <input id="whaleRuleName" class="w-full mt-2 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2" placeholder="例如：大额转入交易所" />
+                  </div>
+                  <div>
+                    <label class="muted text-sm">链</label>
+                    <select id="whaleRuleChain" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 mt-2 w-full">
+                      <option value="ETH" selected>ETH</option>
+                      <option value="SOL">SOL</option>
+                      <option value="BTC">BTC</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="muted text-sm">阈值（USD）</label>
+                    <input id="whaleRuleMinUsd" type="number" step="100000" value="1000000" class="w-full mt-2 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2" />
+                  </div>
+                  <div>
+                    <label class="muted text-sm">方向</label>
+                    <select id="whaleRuleDirection" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 mt-2 w-full">
+                      <option value="all" selected>全部</option>
+                      <option value="to_exchange">转入交易所</option>
+                      <option value="from_exchange">转出交易所</option>
+                      <option value="wallet">钱包间</option>
+                      <option value="unknown">未知</option>
+                    </select>
+                  </div>
+                  <div class="flex items-end">
+                    <label class="muted text-sm flex items-center gap-2">
+                      <input id="whaleRuleWatchOnly" type="checkbox" class="accent-blue-500" />
+                      仅 Watchlist
+                    </label>
+                  </div>
+                  <div class="flex items-end">
+                    <label class="muted text-sm flex items-center gap-2">
+                      <input id="whaleRuleEnabled" type="checkbox" class="accent-blue-500" checked />
+                      启用
+                    </label>
+                  </div>
+                  <div class="md:col-span-2 flex items-center gap-2">
+                    <button id="whaleRuleCreate" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg font-semibold">新增规则</button>
+                    <button id="whalePushNow" class="btn">立即检测/推送</button>
+                    <span id="whaleRulesStatus" class="muted text-sm"></span>
+                  </div>
+                </div>
+
+                <div class="overflow-x-auto mt-4">
+                  <table class="min-w-[780px] w-full text-sm" id="whaleRulesTable">
+                    <thead>
+                      <tr class="text-left muted">
+                        <th class="py-2">ID</th>
+                        <th class="py-2">启用</th>
+                        <th class="py-2">名称</th>
+                        <th class="py-2">链</th>
+                        <th class="py-2">阈值</th>
+                        <th class="py-2">方向</th>
+                        <th class="py-2">仅 Watchlist</th>
+                        <th class="py-2">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="mb-10">
+            <div class="card rounded-2xl p-4">
+              <div class="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4">
+                <div>
+                  <div class="text-xl font-extrabold">地址追踪</div>
+                  <div class="muted text-sm mt-1">点击 Watchlist 地址可快速查看该地址最近交易、余额/变化与历史大额动作。</div>
+                </div>
+                <div class="flex flex-wrap items-end gap-3">
+                  <div>
+                    <label class="muted text-sm">链</label>
+                    <select id="whaleAddrChain" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 mt-2">
+                      <option value="ETH">ETH</option>
+                      <option value="BTC" selected>BTC</option>
+                    </select>
+                  </div>
+                  <div class="min-w-[280px]">
+                    <label class="muted text-sm">地址</label>
+                    <input id="whaleAddrInput" class="w-full mt-2 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2" placeholder="0x... / bc1..." />
+                  </div>
+                  <div>
+                    <label class="muted text-sm">大额阈值（USD）</label>
+                    <input id="whaleAddrMinUsd" type="number" step="100000" value="1000000" class="w-full mt-2 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2" />
+                  </div>
+                  <button id="whaleAddrLoad" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg font-semibold">加载</button>
+                  <span id="whaleAddrStatus" class="muted text-sm"></span>
+                </div>
+              </div>
+
+              <div class="grid grid-cols-1 xl:grid-cols-3 gap-4 mt-4">
+                <div class="card rounded-2xl p-4">
+                  <div class="muted text-xs">余额</div>
+                  <div class="text-2xl font-extrabold mt-2" id="whaleAddrBal">—</div>
+                  <div class="muted text-sm mt-1" id="whaleAddrBalUsd">—</div>
+                  <div class="muted text-xs mt-3" id="whaleAddrNote"></div>
+                </div>
+                <div class="card rounded-2xl p-4 xl:col-span-2">
+                  <div class="flex items-center justify-between">
+                    <div class="text-lg font-extrabold">24h 净流入（地址维度）</div>
+                    <div class="muted text-sm">单位：USD（百万）</div>
+                  </div>
+                  <div id="whaleAddrChart" style="height:260px" class="mt-3"></div>
+                </div>
+              </div>
+
+              <div class="grid grid-cols-1 xl:grid-cols-2 gap-4 mt-4">
+                <div class="card rounded-2xl p-4">
+                  <div class="flex items-center justify-between mb-2">
+                    <div class="text-lg font-extrabold">最近交易</div>
+                    <div class="muted text-sm" id="whaleAddrRecentHint">—</div>
+                  </div>
+                  <div class="overflow-x-auto">
+                    <table class="min-w-[900px] w-full text-sm" id="whaleAddrRecentTable">
+                      <thead>
+                        <tr class="text-left muted">
+                          <th class="py-2">时间</th>
+                          <th class="py-2">Δ</th>
+                          <th class="py-2">Δ(USD)</th>
+                          <th class="py-2">In</th>
+                          <th class="py-2">Out</th>
+                          <th class="py-2">Tx</th>
+                        </tr>
+                      </thead>
+                      <tbody></tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div class="card rounded-2xl p-4">
+                  <div class="flex items-center justify-between mb-2">
+                    <div class="text-lg font-extrabold">历史大额动作（≥阈值）</div>
+                    <div class="muted text-sm" id="whaleAddrBigHint">—</div>
+                  </div>
+                  <div class="overflow-x-auto">
+                    <table class="min-w-[900px] w-full text-sm" id="whaleAddrBigTable">
+                      <thead>
+                        <tr class="text-left muted">
+                          <th class="py-2">时间</th>
+                          <th class="py-2">Δ</th>
+                          <th class="py-2">Δ(USD)</th>
+                          <th class="py-2">In</th>
+                          <th class="py-2">Out</th>
+                          <th class="py-2">Tx</th>
+                        </tr>
+                      </thead>
+                      <tbody></tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="mb-10">
+            <div class="card rounded-2xl p-4">
+              <div class="flex items-center justify-between mb-3">
+                <div class="text-xl font-extrabold">告警历史</div>
+                <div class="flex items-center gap-2">
+                  <button id="whaleAlertsRefresh" class="btn">刷新</button>
+                  <span id="whaleAlertsStatus" class="muted text-sm"></span>
+                </div>
+              </div>
+              <div class="overflow-x-auto">
+                <table class="min-w-[1100px] w-full text-sm" id="whaleAlertsTable">
+                  <thead>
+                    <tr class="text-left muted">
+                      <th class="py-2">时间</th>
+                      <th class="py-2">结果</th>
+                      <th class="py-2">规则</th>
+                      <th class="py-2">链</th>
+                      <th class="py-2">方向</th>
+                      <th class="py-2">金额</th>
+                      <th class="py-2">资产</th>
+                      <th class="py-2">From</th>
+                      <th class="py-2">To</th>
+                      <th class="py-2">链接</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
             </div>
           </section>
         </section>
@@ -967,6 +1538,14 @@
                       <input id="pushMasterBEnabled" type="checkbox" class="accent-blue-500" />
                       量化策略B（触发）
                     </label>
+                    <label class="muted text-sm flex items-center gap-2">
+                      <input id="pushWhalesEnabled" type="checkbox" class="accent-blue-500" />
+                      鲸鱼动向
+                    </label>
+                    <label class="muted text-sm flex items-center gap-2">
+                      <input id="pushMove3mEnabled" type="checkbox" class="accent-blue-500" />
+                      3分钟异动监控
+                    </label>
                   </div>
                 </div>
               </div>
@@ -1371,6 +1950,15 @@
   let sigDT = null;
   let sigTimer = null;
 
+  let whaleTimer = null;
+  let whaleTransfersRaw = [];
+  let whalePage = 1;
+  let whalePageSize = 20;
+
+  let spotLargeRaw = [];
+  let spotLargePage = 1;
+  let spotLargePageSize = 15;
+
   let newsDT = null;
   let pushDT = null;
   let newsTimer = null;
@@ -1393,9 +1981,732 @@
 
   async function fetchJson(url) {
     const r = await fetch(url);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok) {
+      try {
+        const payload = await r.json();
+        const msg = (payload && (payload.source_status || payload.error)) ? String(payload.source_status || payload.error) : '';
+        throw new Error(`HTTP ${r.status}${msg ? ' | ' + msg : ''}`);
+      } catch (e) {
+        throw new Error(`HTTP ${r.status}`);
+      }
+    }
     return await r.json();
   }
+
+  function _fmtUsd(x) {
+    const n = Number(x);
+    if (!isFinite(n)) return '—';
+    if (n >= 1e9) return `$${(n/1e9).toFixed(2)}B`;
+    if (n >= 1e6) return `$${(n/1e6).toFixed(2)}M`;
+    if (n >= 1e3) return `$${(n/1e3).toFixed(2)}K`;
+    return `$${n.toFixed(0)}`;
+  }
+
+  function _fmtTs(ts) {
+    const t = Number(ts);
+    if (!isFinite(t) || t <= 0) return '—';
+    return new Date(t * 1000).toLocaleString();
+  }
+
+  function _pillDir(dir) {
+    const d = String(dir || 'unknown');
+    if (d === 'to_exchange') return `<span class="pill" style="color:#fca5a5">转入交易所</span>`;
+    if (d === 'from_exchange') return `<span class="pill" style="color:#86efac">转出交易所</span>`;
+    if (d === 'wallet') return `<span class="pill">钱包间</span>`;
+    return `<span class="pill neu">未知</span>`;
+  }
+
+  function _shortAddr(s) {
+    const v = String(s || '');
+    if (v.length <= 14) return v || '—';
+    return v.slice(0, 6) + '…' + v.slice(-6);
+  }
+
+  function _normAddr(s) {
+    return String(s || '').trim().toLowerCase();
+  }
+
+  function _renderWhaleSummary(data) {
+    const kpi = (data && data.kpi) ? data.kpi : null;
+    if (!kpi) return;
+    const inM = Number(kpi.inflow_usd_m);
+    const outM = Number(kpi.outflow_usd_m);
+    const netM = Number(kpi.netflow_usd_m);
+    document.getElementById('whaleKpiIn').textContent = isFinite(inM) ? inM.toFixed(2) : '—';
+    document.getElementById('whaleKpiOut').textContent = isFinite(outM) ? outM.toFixed(2) : '—';
+    const netEl = document.getElementById('whaleKpiNet');
+    if (netEl) {
+      netEl.textContent = isFinite(netM) ? netM.toFixed(2) : '—';
+      netEl.classList.remove('pos','neg','neu');
+      if (isFinite(netM)) netEl.classList.add(netM >= 0 ? 'pos' : 'neg');
+    }
+    document.getElementById('whaleKpiCount').textContent = kpi.tx_count === null || kpi.tx_count === undefined ? '—' : String(kpi.tx_count);
+
+    const xs = (data && data.series_24h) ? data.series_24h : [];
+    const x = xs.map(p => new Date((p.ts || 0) * 1000));
+    const y = xs.map(p => Number(p.netflow_usd_m || 0));
+    const trace = { x, y, type: 'scatter', mode: 'lines', name: 'Netflow', line: { color: 'rgba(59,130,246,0.95)', width: 2 }, hovertemplate: '%{x}<br>%{y:.3f}M<extra></extra>' };
+    const layout = {
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      margin: { l: 30, r: 20, t: 10, b: 40 },
+      xaxis: { gridcolor: 'rgba(255,255,255,0.06)', automargin: true, tickfont: { size: 10 } },
+      yaxis: { gridcolor: 'rgba(255,255,255,0.06)', automargin: true, nticks: 6, tickfont: { size: 10 }, side: 'right' },
+      showlegend: false,
+    };
+    try {
+      Plotly.newPlot('whaleChart', [trace], layout, PLOTLY_CONFIG);
+    } catch (e) {}
+  }
+
+  function _renderWhaleTransfers(items) {
+    whaleTransfersRaw = Array.isArray(items) ? items : [];
+    whalePage = 1;
+    _renderWhaleTransfersPaged();
+  }
+
+  function _renderWhaleTransfersPaged() {
+    const dirSel = document.getElementById('whaleDirection');
+    const dir = dirSel ? (dirSel.value || 'all') : 'all';
+
+    const maxShow = 100;
+    const arr0 = Array.isArray(whaleTransfersRaw) ? whaleTransfersRaw : [];
+    const arr1 = (dir === 'all') ? arr0 : arr0.filter(x => String(x.direction || '') === dir);
+    const arr2 = arr1
+      .filter(x => {
+        const f = _normAddr(x.from);
+        const t = _normAddr(x.to);
+        if (!f || !t) return true;
+        return f !== t;
+      })
+      .sort((a, b) => Number(b.amount_usd || 0) - Number(a.amount_usd || 0));
+    const arr = arr2.slice(0, maxShow);
+
+    const tb = document.querySelector('#whaleTable tbody');
+    if (!tb) return;
+
+    const total = arr.length;
+    const sizeSel = document.getElementById('whalePageSize');
+    const sizeNow = Number(sizeSel ? sizeSel.value : whalePageSize);
+    whalePageSize = (isFinite(sizeNow) && sizeNow > 0) ? sizeNow : whalePageSize;
+    const pageSize = whalePageSize;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    whalePage = Math.max(1, Math.min(totalPages, Number(whalePage) || 1));
+    const start = (whalePage - 1) * pageSize;
+    const end = start + pageSize;
+    const pageItems = arr.slice(start, end);
+
+    if (!pageItems.length) {
+      tb.innerHTML = `<tr><td colspan="9" class="muted py-3">暂无数据</td></tr>`;
+    } else {
+      tb.innerHTML = pageItems.map(x => {
+      const tags = x.tags || {};
+      const fromLabel = tags.fromLabel ? `<span class="pill">${tags.fromLabel}</span>` : '';
+      const toLabel = tags.toLabel ? `<span class="pill">${tags.toLabel}</span>` : '';
+      const ex = tags.exchange ? `<span class="pill" style="color:rgba(147,197,253,0.95)">${tags.exchange}</span>` : '';
+      const tagHtml = [fromLabel, toLabel, ex].filter(Boolean).join(' ');
+      const usd = _fmtUsd(x.amount_usd);
+      const amt = (x.amount === null || x.amount === undefined) ? '—' : String(x.amount);
+      const asset = x.asset || '—';
+      const chain = x.chain || '—';
+      const link = x.explorer_url || '';
+      const linkHtml = link ? `<a class="text-blue-300 hover:underline" href="${link}" target="_blank" rel="noreferrer">Tx</a>` : '—';
+
+      let rowBg = '';
+      if (x.direction === 'to_exchange') rowBg = 'background: rgba(127,29,29,0.18);';
+      if (x.direction === 'from_exchange') rowBg = 'background: rgba(20,83,45,0.18);';
+
+      return `
+        <tr style="${rowBg}">
+          <td class="py-2">${_fmtTs(x.ts)}</td>
+          <td class="py-2"><span class="pill">${chain}</span></td>
+          <td class="py-2">${asset}</td>
+          <td class="py-2">${usd}<div class="muted text-xs">${amt} ${asset}</div></td>
+          <td class="py-2">${_pillDir(x.direction)}</td>
+          <td class="py-2"><span class="muted">${_shortAddr(x.from)}</span></td>
+          <td class="py-2"><span class="muted">${_shortAddr(x.to)}</span></td>
+          <td class="py-2">${tagHtml || '<span class="muted">—</span>'}</td>
+          <td class="py-2">${linkHtml}</td>
+        </tr>
+      `;
+      }).join('');
+    }
+
+    const hint = document.getElementById('whaleListHint');
+    if (hint) hint.textContent = `展示 ${total} 条（已过滤同地址、按金额降序，最多 100 条）`;
+
+    const pageInfo = document.getElementById('whalePageInfo');
+    if (pageInfo) pageInfo.textContent = `${whalePage}/${totalPages}页｜本页 ${pageItems.length} 条`;
+
+    const prevBtn = document.getElementById('whalePagePrev');
+    const nextBtn = document.getElementById('whalePageNext');
+    if (prevBtn) prevBtn.disabled = whalePage <= 1;
+    if (nextBtn) nextBtn.disabled = whalePage >= totalPages;
+  }
+
+  async function loadWhales() {
+    const status = document.getElementById('whaleStatus');
+    if (status) status.textContent = '更新中…';
+    const chain = (document.getElementById('whaleChain').value || 'ETH').toUpperCase();
+    const minUsd = Number(document.getElementById('whaleMinUsd').value || 1000000);
+    const minUsdSafe = isFinite(minUsd) ? Math.max(10000, minUsd) : 1000000;
+
+    try {
+      const [s, t] = await Promise.all([
+        fetchJson(`/api/whales/summary?chain=${encodeURIComponent(chain)}&min_usd=${encodeURIComponent(minUsdSafe)}`),
+        fetchJson(`/api/whales/transfers?chain=${encodeURIComponent(chain)}&min_usd=${encodeURIComponent(minUsdSafe)}&limit=200&offset=0`),
+      ]);
+      _renderWhaleSummary(s);
+      _renderWhaleTransfers((t && t.items) ? t.items : []);
+      loadSpotLargeTrades().catch(() => {});
+      const now = new Date();
+      const src = (t && t.source) ? String(t.source) : '';
+      const srcSt = (t && t.source_status) ? String(t.source_status) : '';
+      const srcTxt = src ? `｜source=${src}${srcSt ? ':'+srcSt : ''}` : '';
+      if (status) status.textContent = `更新时间：${now.toLocaleString()}${srcTxt}`;
+    } catch (e) {
+      if (status) status.textContent = `错误：${String(e)}`;
+    }
+  }
+
+  function _pillSide(side) {
+    const s = String(side || '').toLowerCase();
+    if (s === 'buy') return `<span class="pill pos">买入</span>`;
+    if (s === 'sell') return `<span class="pill neg">卖出</span>`;
+    return `<span class="pill neu">—</span>`;
+  }
+
+  function _renderSpotLargeTrades(items) {
+    spotLargeRaw = Array.isArray(items) ? items : [];
+    spotLargePage = 1;
+    _renderSpotLargeTradesPaged();
+    _renderSpotLargeStats();
+  }
+
+  function _renderSpotLargeStats() {
+    const btcEl = document.getElementById('spotLargeBtcStats');
+    const ethEl = document.getElementById('spotLargeEthStats');
+    const allEl = document.getElementById('spotLargeAllStats');
+    const arr = Array.isArray(spotLargeRaw) ? spotLargeRaw : [];
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const lookbackSec = 24 * 3600;
+    const cutoff = nowSec - lookbackSec;
+
+    function calc(asset) {
+      const a = String(asset || '').toUpperCase();
+      let buyN = 0;
+      let sellN = 0;
+      let buyUsd = 0;
+      let sellUsd = 0;
+      for (const x of arr) {
+        if (!x) continue;
+        const pair = String(x.pair || '').toUpperCase();
+        if (!pair.startsWith(a + '_')) continue;
+        const ts = Number(x.ts || 0);
+        if (!isFinite(ts) || ts <= 0) continue;
+        if (ts < cutoff) continue;
+        const side = String(x.side || '').toLowerCase();
+        const usd = Number(x.amount_usd || 0);
+        if (!isFinite(usd) || usd <= 0) continue;
+        if (side === 'buy') { buyN += 1; buyUsd += usd; }
+        else if (side === 'sell') { sellN += 1; sellUsd += usd; }
+      }
+      return { buyN, sellN, buyUsd, sellUsd };
+    }
+
+    const b = calc('BTC');
+    const e = calc('ETH');
+    if (btcEl) btcEl.textContent = `买入 ${b.buyN} 笔｜卖出 ${b.sellN} 笔｜买入金额 ${_fmtUsd(b.buyUsd)}｜卖出金额 ${_fmtUsd(b.sellUsd)}`;
+    if (ethEl) ethEl.textContent = `买入 ${e.buyN} 笔｜卖出 ${e.sellN} 笔｜买入金额 ${_fmtUsd(e.buyUsd)}｜卖出金额 ${_fmtUsd(e.sellUsd)}`;
+
+    let buyN = 0;
+    let sellN = 0;
+    let buyUsd = 0;
+    let sellUsd = 0;
+    for (const x of arr) {
+      if (!x) continue;
+      const ts = Number(x.ts || 0);
+      if (!isFinite(ts) || ts <= 0) continue;
+      if (ts < cutoff) continue;
+      const side = String(x.side || '').toLowerCase();
+      const usd = Number(x.amount_usd || 0);
+      if (!isFinite(usd) || usd <= 0) continue;
+      if (side === 'buy') { buyN += 1; buyUsd += usd; }
+      else if (side === 'sell') { sellN += 1; sellUsd += usd; }
+    }
+    if (allEl) allEl.textContent = `买入 ${buyN} 笔｜卖出 ${sellN} 笔｜买入金额 ${_fmtUsd(buyUsd)}｜卖出金额 ${_fmtUsd(sellUsd)}`;
+  }
+
+  function _renderSpotLargeTradesPaged() {
+    const maxShow = 10000;
+    const arr0 = Array.isArray(spotLargeRaw) ? spotLargeRaw : [];
+    const arr = arr0
+      .slice(0, maxShow)
+      .sort((a, b) => Number(b.amount_usd || 0) - Number(a.amount_usd || 0));
+
+    const total = arr.length;
+    const sizeSel = document.getElementById('spotLargePageSize');
+    const sizeNow = Number(sizeSel ? sizeSel.value : spotLargePageSize);
+    spotLargePageSize = (isFinite(sizeNow) && sizeNow > 0) ? sizeNow : spotLargePageSize;
+    const pageSize = spotLargePageSize;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    spotLargePage = Math.max(1, Math.min(totalPages, Number(spotLargePage) || 1));
+    const start = (spotLargePage - 1) * pageSize;
+    const end = start + pageSize;
+    const pageItems = arr.slice(start, end);
+
+    const tb = document.querySelector('#spotLargeTable tbody');
+    if (!tb) return;
+    if (!pageItems.length) {
+      tb.innerHTML = `<tr><td colspan="6" class="muted py-3">暂无数据</td></tr>`;
+    } else {
+      tb.innerHTML = pageItems.map(x => {
+        const usd = _fmtUsd(x.amount_usd);
+        const pair = x.pair || '—';
+        const side = _pillSide(x.side);
+        const price = (x.price === null || x.price === undefined) ? '—' : String(x.price);
+        const amount = (x.amount === null || x.amount === undefined) ? '—' : String(x.amount);
+        return `
+          <tr>
+            <td class="py-2">${_fmtTs(x.ts)}</td>
+            <td class="py-2"><span class="pill">${pair}</span></td>
+            <td class="py-2">${side}</td>
+            <td class="py-2">${usd}</td>
+            <td class="py-2"><span class="muted">${price}</span></td>
+            <td class="py-2"><span class="muted">${amount}</span></td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    const info = document.getElementById('spotLargeInfo');
+    if (info) info.textContent = `${spotLargePage}/${totalPages}页｜展示 ${total} 条（最多 10000 条）`;
+    const prevBtn = document.getElementById('spotLargePrev');
+    const nextBtn = document.getElementById('spotLargeNext');
+    if (prevBtn) prevBtn.disabled = spotLargePage <= 1;
+    if (nextBtn) nextBtn.disabled = spotLargePage >= totalPages;
+  }
+
+  async function loadSpotLargeTrades() {
+    const st = document.getElementById('spotLargeStatus');
+    if (st) st.textContent = '更新中…';
+    const exSel = document.getElementById('spotLargeExchange');
+    const exchange = exSel ? String(exSel.value || 'binance') : 'binance';
+    const minUsd = Number(document.getElementById('spotLargeMinUsd').value || 100000);
+    const minUsdSafe = isFinite(minUsd) ? Math.max(1000, minUsd) : 100000;
+    const topN = Number(document.getElementById('spotLargeTopN').value || 20);
+    const topNSafe = isFinite(topN) ? Math.max(5, Math.min(200, topN)) : 20;
+    try {
+      const payload = await fetchJson(`/api/exchange/spot/large_trades?exchange=${encodeURIComponent(exchange)}&min_usd=${encodeURIComponent(minUsdSafe)}&topn=${encodeURIComponent(topNSafe)}&limit=10000&offset=0`);
+      _renderSpotLargeTrades((payload && payload.items) ? payload.items : []);
+      const src = (payload && payload.source) ? String(payload.source) : '';
+      const srcSt = (payload && payload.source_status) ? String(payload.source_status) : '';
+      if (st) st.textContent = src ? `source=${src}${srcSt ? ':' + srcSt : ''}` : '';
+    } catch (e) {
+      if (st) st.textContent = `错误：${String(e)}`;
+    }
+  }
+
+  async function loadWhaleWatchlist() {
+    const st = document.getElementById('whaleWatchStatus');
+    if (st) st.textContent = '更新中…';
+    try {
+      const payload = await fetchJson('/api/whales/watchlist');
+      const items = (payload && payload.items) ? payload.items : [];
+      const tb = document.querySelector('#whaleWatchTable tbody');
+      if (!tb) return;
+      if (!items.length) {
+        tb.innerHTML = `<tr><td colspan="4" class="muted py-3">暂无 Watchlist</td></tr>`;
+      } else {
+        tb.innerHTML = items.map(x => {
+          const id = x.id;
+          const chain = x.chain || '—';
+          const addr = x.address || '—';
+          const label = x.label || '';
+          return `
+            <tr>
+              <td class="py-2"><span class="pill">${chain}</span></td>
+              <td class="py-2"><button class="whale-addr-open text-blue-300 hover:underline" data-chain="${chain}" data-addr="${addr}">${addr}</button></td>
+              <td class="py-2">${label ? label : '<span class="muted">—</span>'}</td>
+              <td class="py-2"><button class="btn whale-watch-del" data-id="${id}">删除</button></td>
+            </tr>
+          `;
+        }).join('');
+      }
+      if (st) st.textContent = `数量：${items.length}`;
+
+      document.querySelectorAll('.whale-watch-del').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const id = btn.getAttribute('data-id');
+          if (!id) return;
+          try {
+            await fetch(`/api/whales/watchlist/${encodeURIComponent(id)}`, { method: 'DELETE' });
+          } catch (e) {}
+          loadWhaleWatchlist().catch(() => {});
+        });
+      });
+
+      document.querySelectorAll('.whale-addr-open').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const chain = (btn.getAttribute('data-chain') || 'ETH').toUpperCase();
+          const addr = (btn.getAttribute('data-addr') || '').trim();
+          if (!addr) return;
+          const chainEl = document.getElementById('whaleAddrChain');
+          const addrEl = document.getElementById('whaleAddrInput');
+          if (chainEl) chainEl.value = chain;
+          if (addrEl) addrEl.value = addr;
+          await loadWhaleAddressDetail().catch(() => {});
+          const panel = document.getElementById('whaleAddrChart');
+          if (panel && panel.scrollIntoView) panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+      });
+    } catch (e) {
+      if (st) st.textContent = `错误：${String(e)}`;
+    }
+  }
+
+  function _renderWhaleAddrDetail(payload) {
+    const st = document.getElementById('whaleAddrStatus');
+    const balEl = document.getElementById('whaleAddrBal');
+    const balUsdEl = document.getElementById('whaleAddrBalUsd');
+    const noteEl = document.getElementById('whaleAddrNote');
+    const recentHint = document.getElementById('whaleAddrRecentHint');
+    const bigHint = document.getElementById('whaleAddrBigHint');
+
+    const ok = payload && payload.ok;
+    if (!ok) {
+      if (balEl) balEl.textContent = '—';
+      if (balUsdEl) balUsdEl.textContent = '—';
+      if (noteEl) noteEl.textContent = payload && payload.error ? String(payload.error) : '';
+      return;
+    }
+
+    const holdings = payload.holdings || {};
+    const asset = holdings.asset || '—';
+    const bal = holdings.balance;
+    const balUsd = holdings.balance_usd;
+    if (balEl) balEl.textContent = (bal === null || bal === undefined) ? '—' : `${bal} ${asset}`;
+    if (balUsdEl) balUsdEl.textContent = (balUsd === null || balUsd === undefined) ? '—' : _fmtUsd(balUsd);
+    if (noteEl) noteEl.textContent = payload.note ? String(payload.note) : '';
+
+    const xs = payload.series_24h || [];
+    const x = xs.map(p => new Date((p.ts || 0) * 1000));
+    const y = xs.map(p => Number((p.netflow_usd || 0) / 1e6));
+    const trace = { x, y, type: 'scatter', mode: 'lines', name: 'Netflow', line: { color: 'rgba(34,197,94,0.95)', width: 2 }, hovertemplate: '%{x}<br>%{y:.3f}M<extra></extra>' };
+    const layout = {
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      font: { color: 'rgba(229,231,235,0.95)' },
+      margin: { l: 40, r: 20, t: 10, b: 40 },
+      xaxis: { gridcolor: 'rgba(75,85,99,0.25)', zerolinecolor: 'rgba(75,85,99,0.25)' },
+      yaxis: { gridcolor: 'rgba(75,85,99,0.25)', zerolinecolor: 'rgba(75,85,99,0.25)' },
+    };
+    if (window.Plotly) Plotly.react('whaleAddrChart', [trace], layout, PLOTLY_CONFIG);
+
+    const recent = payload.recent_txs || [];
+    const big = payload.big_moves || [];
+    if (recentHint) recentHint.textContent = `数量：${recent.length}`;
+    if (bigHint) bigHint.textContent = `数量：${big.length}`;
+
+    const rtb = document.querySelector('#whaleAddrRecentTable tbody');
+    if (rtb) {
+      if (!recent.length) {
+        rtb.innerHTML = `<tr><td colspan="6" class="muted py-3">暂无数据</td></tr>`;
+      } else {
+        rtb.innerHTML = recent.map(x => {
+          const link = x.explorer_url || '';
+          const txh = x.tx_hash || '';
+          const linkHtml = link ? `<a class="text-blue-300 hover:underline" href="${link}" target="_blank" rel="noreferrer">${txh ? txh.slice(0,8)+'…' : 'Tx'}</a>` : '—';
+          const delta = Number(x.delta || 0);
+          const deltaUsd = Number(x.delta_usd || 0);
+          const cls = delta > 0 ? 'pos' : (delta < 0 ? 'neg' : 'neu');
+          return `
+            <tr>
+              <td class="py-2">${_fmtTs(x.ts)}</td>
+              <td class="py-2"><span class="${cls}">${delta}</span></td>
+              <td class="py-2">${_fmtUsd(deltaUsd)}</td>
+              <td class="py-2">${x.in === null || x.in === undefined ? '—' : x.in}</td>
+              <td class="py-2">${x.out === null || x.out === undefined ? '—' : x.out}</td>
+              <td class="py-2">${linkHtml}</td>
+            </tr>
+          `;
+        }).join('');
+      }
+    }
+
+    const btb = document.querySelector('#whaleAddrBigTable tbody');
+    if (btb) {
+      if (!big.length) {
+        btb.innerHTML = `<tr><td colspan="6" class="muted py-3">暂无数据</td></tr>`;
+      } else {
+        btb.innerHTML = big.map(x => {
+          const link = x.explorer_url || '';
+          const txh = x.tx_hash || '';
+          const linkHtml = link ? `<a class="text-blue-300 hover:underline" href="${link}" target="_blank" rel="noreferrer">${txh ? txh.slice(0,8)+'…' : 'Tx'}</a>` : '—';
+          const delta = Number(x.delta || 0);
+          const deltaUsd = Number(x.delta_usd || 0);
+          const cls = delta > 0 ? 'pos' : (delta < 0 ? 'neg' : 'neu');
+          return `
+            <tr>
+              <td class="py-2">${_fmtTs(x.ts)}</td>
+              <td class="py-2"><span class="${cls}">${delta}</span></td>
+              <td class="py-2">${_fmtUsd(deltaUsd)}</td>
+              <td class="py-2">${x.in === null || x.in === undefined ? '—' : x.in}</td>
+              <td class="py-2">${x.out === null || x.out === undefined ? '—' : x.out}</td>
+              <td class="py-2">${linkHtml}</td>
+            </tr>
+          `;
+        }).join('');
+      }
+    }
+
+    if (st) {
+      const src = payload.source ? String(payload.source) : '';
+      const srcSt = payload.source_status ? String(payload.source_status) : '';
+      st.textContent = `OK${src ? ' | ' + src + (srcSt ? ':' + srcSt : '') : ''}`;
+    }
+  }
+
+  async function loadWhaleAddressDetail() {
+    const st = document.getElementById('whaleAddrStatus');
+    if (st) st.textContent = '加载中…';
+    const chain = (document.getElementById('whaleAddrChain').value || 'ETH').toUpperCase();
+    const addr = (document.getElementById('whaleAddrInput').value || '').trim();
+    const minUsd = Number(document.getElementById('whaleAddrMinUsd').value || 1000000);
+    const minUsdSafe = isFinite(minUsd) ? Math.max(10000, minUsd) : 1000000;
+    if (!addr) {
+      if (st) st.textContent = '请输入地址';
+      return;
+    }
+    try {
+      const payload = await fetchJson(`/api/whales/address/detail?chain=${encodeURIComponent(chain)}&address=${encodeURIComponent(addr)}&min_usd=${encodeURIComponent(minUsdSafe)}&limit=80`);
+      _renderWhaleAddrDetail(payload);
+    } catch (e) {
+      if (st) st.textContent = `错误：${String(e)}`;
+      _renderWhaleAddrDetail({ ok: false, error: String(e) });
+    }
+  }
+
+  async function whaleWatchAdd() {
+    const chain = (document.getElementById('whaleWatchChain').value || 'ETH').toUpperCase();
+    const addr = (document.getElementById('whaleWatchAddress').value || '').trim();
+    const label = (document.getElementById('whaleWatchLabel').value || '').trim();
+    const st = document.getElementById('whaleWatchStatus');
+    if (st) st.textContent = '提交中…';
+    try {
+      const r = await fetch('/api/whales/watchlist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chain, address: addr, label, tags: {} }),
+      });
+      const out = await r.json();
+      if (out && out.ok) {
+        if (st) st.textContent = `已保存：${new Date().toLocaleString()}`;
+        document.getElementById('whaleWatchAddress').value = '';
+        document.getElementById('whaleWatchLabel').value = '';
+        loadWhaleWatchlist().catch(() => {});
+      } else {
+        if (st) st.textContent = (out && out.error) ? out.error : '保存失败';
+      }
+    } catch (e) {
+      if (st) st.textContent = `错误：${String(e)}`;
+    }
+  }
+
+  async function loadWhaleRules() {
+    const st = document.getElementById('whaleRulesStatus');
+    if (st) st.textContent = '更新中…';
+    try {
+      const payload = await fetchJson('/api/whales/rules');
+      const items = (payload && payload.items) ? payload.items : [];
+      const tb = document.querySelector('#whaleRulesTable tbody');
+      if (!tb) return;
+      if (!items.length) {
+        tb.innerHTML = `<tr><td colspan="8" class="muted py-3">暂无规则</td></tr>`;
+      } else {
+        tb.innerHTML = items.map(x => {
+          const id = x.id;
+          const enabled = (x.enabled === 1 || x.enabled === true) ? '<span class="pill pos">ON</span>' : '<span class="pill neg">OFF</span>';
+          const name = x.name || '—';
+          const chain = x.chain || '—';
+          const minUsd = x.min_usd === null || x.min_usd === undefined ? '—' : _fmtUsd(x.min_usd);
+          const dir = x.direction || 'all';
+          const watchOnly = (x.watchlist_only === 1 || x.watchlist_only === true) ? '<span class="pill">YES</span>' : '<span class="muted">NO</span>';
+          return `
+            <tr>
+              <td class="py-2"><span class="muted">${id}</span></td>
+              <td class="py-2">${enabled}</td>
+              <td class="py-2">${name}</td>
+              <td class="py-2"><span class="pill">${chain}</span></td>
+              <td class="py-2">${minUsd}</td>
+              <td class="py-2"><span class="pill">${dir}</span></td>
+              <td class="py-2">${watchOnly}</td>
+              <td class="py-2"><button class="btn whale-rule-del" data-id="${id}">删除</button></td>
+            </tr>
+          `;
+        }).join('');
+      }
+      if (st) st.textContent = `数量：${items.length}`;
+
+      document.querySelectorAll('.whale-rule-del').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const id = btn.getAttribute('data-id');
+          if (!id) return;
+          try {
+            await fetch(`/api/whales/rules/${encodeURIComponent(id)}`, { method: 'DELETE' });
+          } catch (e) {}
+          loadWhaleRules().catch(() => {});
+        });
+      });
+    } catch (e) {
+      if (st) st.textContent = `错误：${String(e)}`;
+    }
+  }
+
+  async function whaleRuleCreate() {
+    const st = document.getElementById('whaleRulesStatus');
+    if (st) st.textContent = '提交中…';
+    const payload = {
+      name: (document.getElementById('whaleRuleName').value || '').trim(),
+      chain: (document.getElementById('whaleRuleChain').value || 'ETH').toUpperCase(),
+      min_usd: Number(document.getElementById('whaleRuleMinUsd').value || 1000000),
+      direction: (document.getElementById('whaleRuleDirection').value || 'all'),
+      watchlist_only: !!document.getElementById('whaleRuleWatchOnly').checked,
+      enabled: !!document.getElementById('whaleRuleEnabled').checked,
+    };
+    try {
+      const r = await fetch('/api/whales/rules', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const out = await r.json();
+      if (out && out.ok) {
+        if (st) st.textContent = `已创建：${new Date().toLocaleString()}`;
+        document.getElementById('whaleRuleName').value = '';
+        loadWhaleRules().catch(() => {});
+      } else {
+        if (st) st.textContent = (out && out.error) ? out.error : '创建失败';
+      }
+    } catch (e) {
+      if (st) st.textContent = `错误：${String(e)}`;
+    }
+  }
+
+  async function loadWhaleAlerts() {
+    const st = document.getElementById('whaleAlertsStatus');
+    if (st) st.textContent = '更新中…';
+    try {
+      const payload = await fetchJson('/api/whales/alerts?limit=200');
+      const items = (payload && payload.items) ? payload.items : [];
+      const tb = document.querySelector('#whaleAlertsTable tbody');
+      if (!tb) return;
+      if (!items.length) {
+        tb.innerHTML = `<tr><td colspan="10" class="muted py-3">暂无告警历史</td></tr>`;
+      } else {
+        tb.innerHTML = items.map(x => {
+          const ok = (x.ok === 1 || x.ok === true) ? `<span class="pill pos">OK</span>` : `<span class="pill neg">FAIL</span>`;
+          const link = x.explorer_url || '';
+          const linkHtml = link ? `<a class="text-blue-300 hover:underline" href="${link}" target="_blank" rel="noreferrer">Tx</a>` : '—';
+          return `
+            <tr>
+              <td class="py-2">${_fmtTs(x.created_at)}</td>
+              <td class="py-2">${ok}</td>
+              <td class="py-2"><span class="muted">${x.rule_id || '—'}</span></td>
+              <td class="py-2"><span class="pill">${x.chain || '—'}</span></td>
+              <td class="py-2"><span class="pill">${x.direction || '—'}</span></td>
+              <td class="py-2">${_fmtUsd(x.amount_usd)}</td>
+              <td class="py-2">${x.asset || '—'}</td>
+              <td class="py-2"><span class="muted">${_shortAddr(x.from_addr)}</span></td>
+              <td class="py-2"><span class="muted">${_shortAddr(x.to_addr)}</span></td>
+              <td class="py-2">${linkHtml}</td>
+            </tr>
+          `;
+        }).join('');
+      }
+      if (st) st.textContent = `数量：${items.length}`;
+    } catch (e) {
+      if (st) st.textContent = `错误：${String(e)}`;
+    }
+  }
+
+  async function whalesPushNow() {
+    const st = document.getElementById('whaleRulesStatus');
+    if (st) st.textContent = '检测中…';
+    try {
+      const payload = await fetchJson('/api/whales/push_now?force=0');
+      if (payload && payload.ok) {
+        if (st) st.textContent = `已完成：pushed=${payload.pushed || 0}, skipped=${payload.skipped || 0}`;
+        loadWhaleAlerts().catch(() => {});
+      } else {
+        if (st) st.textContent = (payload && payload.errors) ? String(payload.errors) : '失败';
+      }
+    } catch (e) {
+      if (st) st.textContent = `错误：${String(e)}`;
+    }
+  }
+
+  const _whaleWatchRefreshEl = document.getElementById('whaleWatchRefresh');
+  if (_whaleWatchRefreshEl) _whaleWatchRefreshEl.addEventListener('click', () => loadWhaleWatchlist().catch(() => {}));
+  const _whaleWatchAddEl = document.getElementById('whaleWatchAdd');
+  if (_whaleWatchAddEl) _whaleWatchAddEl.addEventListener('click', () => whaleWatchAdd().catch(() => {}));
+
+  const _whaleAddrLoadEl = document.getElementById('whaleAddrLoad');
+  if (_whaleAddrLoadEl) _whaleAddrLoadEl.addEventListener('click', () => loadWhaleAddressDetail().catch(() => {}));
+
+  const _whaleRulesRefreshEl = document.getElementById('whaleRulesRefresh');
+  if (_whaleRulesRefreshEl) _whaleRulesRefreshEl.addEventListener('click', () => loadWhaleRules().catch(() => {}));
+  const _whaleRuleCreateEl = document.getElementById('whaleRuleCreate');
+  if (_whaleRuleCreateEl) _whaleRuleCreateEl.addEventListener('click', () => whaleRuleCreate().catch(() => {}));
+  const _whalePushNowEl = document.getElementById('whalePushNow');
+  if (_whalePushNowEl) _whalePushNowEl.addEventListener('click', () => whalesPushNow().catch(() => {}));
+
+  const _whaleAlertsRefreshEl = document.getElementById('whaleAlertsRefresh');
+  if (_whaleAlertsRefreshEl) _whaleAlertsRefreshEl.addEventListener('click', () => loadWhaleAlerts().catch(() => {}));
+
+  function setWhaleTimer() {
+    if (whaleTimer) { clearInterval(whaleTimer); whaleTimer = null; }
+    const sec = Number(document.getElementById('whaleRefreshSec').value || 20);
+    whaleTimer = setInterval(() => {
+      const page = document.getElementById('page-whales');
+      if (!page || page.classList.contains('hidden')) return;
+      loadWhales().catch(() => {});
+    }, Math.max(10, sec) * 1000);
+  }
+
+  const _whaleRefreshEl = document.getElementById('whaleRefresh');
+  if (_whaleRefreshEl) _whaleRefreshEl.addEventListener('click', () => loadWhales().catch(() => {}));
+  const _whaleChainEl = document.getElementById('whaleChain');
+  if (_whaleChainEl) _whaleChainEl.addEventListener('change', () => loadWhales().catch(() => {}));
+  const _whaleMinUsdEl = document.getElementById('whaleMinUsd');
+  if (_whaleMinUsdEl) _whaleMinUsdEl.addEventListener('change', () => loadWhales().catch(() => {}));
+  const _whaleDirectionEl = document.getElementById('whaleDirection');
+  if (_whaleDirectionEl) _whaleDirectionEl.addEventListener('change', () => { whalePage = 1; _renderWhaleTransfersPaged(); });
+  const _whaleRefreshSecEl = document.getElementById('whaleRefreshSec');
+  if (_whaleRefreshSecEl) _whaleRefreshSecEl.addEventListener('change', () => { setWhaleTimer(); loadWhales().catch(() => {}); });
+
+  const _whalePageSizeEl = document.getElementById('whalePageSize');
+  if (_whalePageSizeEl) _whalePageSizeEl.addEventListener('change', () => { whalePage = 1; _renderWhaleTransfersPaged(); });
+  const _whalePagePrevEl = document.getElementById('whalePagePrev');
+  if (_whalePagePrevEl) _whalePagePrevEl.addEventListener('click', () => { whalePage = Math.max(1, Number(whalePage || 1) - 1); _renderWhaleTransfersPaged(); });
+  const _whalePageNextEl = document.getElementById('whalePageNext');
+  if (_whalePageNextEl) _whalePageNextEl.addEventListener('click', () => { whalePage = Number(whalePage || 1) + 1; _renderWhaleTransfersPaged(); });
+
+  const _spotLargeRefreshEl = document.getElementById('spotLargeRefresh');
+  if (_spotLargeRefreshEl) _spotLargeRefreshEl.addEventListener('click', () => loadSpotLargeTrades().catch(() => {}));
+  const _spotLargeExchangeEl = document.getElementById('spotLargeExchange');
+  if (_spotLargeExchangeEl) _spotLargeExchangeEl.addEventListener('change', () => loadSpotLargeTrades().catch(() => {}));
+  const _spotLargeMinUsdEl = document.getElementById('spotLargeMinUsd');
+  if (_spotLargeMinUsdEl) _spotLargeMinUsdEl.addEventListener('change', () => loadSpotLargeTrades().catch(() => {}));
+  const _spotLargeTopNEl = document.getElementById('spotLargeTopN');
+  if (_spotLargeTopNEl) _spotLargeTopNEl.addEventListener('change', () => loadSpotLargeTrades().catch(() => {}));
+  const _spotLargePageSizeEl = document.getElementById('spotLargePageSize');
+  if (_spotLargePageSizeEl) _spotLargePageSizeEl.addEventListener('change', () => { spotLargePage = 1; _renderSpotLargeTradesPaged(); });
+  const _spotLargePrevEl = document.getElementById('spotLargePrev');
+  if (_spotLargePrevEl) _spotLargePrevEl.addEventListener('click', () => { spotLargePage = Math.max(1, Number(spotLargePage || 1) - 1); _renderSpotLargeTradesPaged(); });
+  const _spotLargeNextEl = document.getElementById('spotLargeNext');
+  if (_spotLargeNextEl) _spotLargeNextEl.addEventListener('click', () => { spotLargePage = Number(spotLargePage || 1) + 1; _renderSpotLargeTradesPaged(); });
 
   function fmtNum(v, digits=2) {
     if (v === null || v === undefined) return '—';
@@ -1515,7 +2826,7 @@
   // - 同步左侧导航 active 状态
   // - DataTables 在 hidden 状态下初始化会列宽异常，因此切页后做 columns.adjust()
   function showPage(pageId) {
-    const pages = ['page-dashboard', 'page-macd', 'page-macd-entry', 'page-macd-preentry', 'page-prealert', 'page-signal', 'page-news', 'page-telegram', 'page-tri-signal', 'page-master-a'];
+    const pages = ['page-dashboard', 'page-whales', 'page-move3m', 'page-macd', 'page-macd-entry', 'page-macd-preentry', 'page-prealert', 'page-signal', 'page-news', 'page-telegram', 'page-tri-signal', 'page-master-a'];
     pages.forEach(pid => {
       const el = document.getElementById(pid);
       if (!el) return;
@@ -1577,6 +2888,28 @@
           if (preEntryDT) preEntryDT.columns.adjust().draw(false);
         } catch (e) {}
       }, 30);
+    }
+
+    if (pageId !== 'page-whales') {
+      if (whaleTimer) { clearInterval(whaleTimer); whaleTimer = null; }
+    }
+
+    // move3m：不因切页自动停止（避免切到其他页后回来看不到更新）
+    // 如需停止请手动点“停止”按钮
+    if (pageId === 'page-move3m') {
+      try {
+        if (move3mStarted) {
+          _renderMove3m();
+        }
+      } catch (e) {}
+    }
+
+    if (pageId === 'page-whales') {
+      loadWhales().catch(() => {});
+      loadWhaleWatchlist().catch(() => {});
+      loadWhaleRules().catch(() => {});
+      loadWhaleAlerts().catch(() => {});
+      setWhaleTimer();
     }
 
   }
@@ -2272,8 +3605,384 @@
       if (pageId === 'page-master-a') {
         loadMpMatrix();
       }
+      if (pageId === 'page-move3m') {
+        // 进入页面不自动启动，避免不必要的 WS 连接
+      }
     });
   });
+
+  // ==========================
+  // 3分钟异动监控（Binance WS）
+  // ==========================
+  let move3mWS = null;
+  let move3mReconnectTimer = null;
+  let move3mReconnectTry = 0;
+  let move3mStarted = false;
+  let move3mMonitored = new Set();
+  let move3mState = new Map(); // sym -> { price, ts, pct24h, quote24h, hist: [{ts, price}], pct3m }
+  let move3mAlerts = new Map(); // sym -> lastAlertTs
+  let move3mLog = [];
+  let move3mPageSize = 20;
+  let move3mPage = 1;
+  let move3mAlertPage = 1;
+  let move3mLogPage = 1;
+  let move3mBeepTimer = null;
+  let move3mBeepUntilSec = 0;
+
+  function _beep() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'sine';
+      o.frequency.value = 880;
+      g.gain.value = 0.06;
+      o.connect(g);
+      g.connect(ctx.destination);
+      o.start();
+      setTimeout(() => { try { o.stop(); ctx.close(); } catch(e) {} }, 160);
+    } catch (e) {}
+  }
+
+  async function _notify(title, body) {
+    try {
+      if (!('Notification' in window)) return;
+      if (Notification.permission === 'default') {
+        await Notification.requestPermission();
+      }
+      if (Notification.permission !== 'granted') return;
+      new Notification(title, { body });
+    } catch (e) {}
+  }
+
+  function _fmtPct(v) {
+    const n = Number(v);
+    if (!isFinite(n)) return '—';
+    return `${n>=0?'+':''}${n.toFixed(2)}%`;
+  }
+
+  function _pctClass(v, th) {
+    const n = Number(v);
+    const t = Number(th);
+    if (!isFinite(n)) return 'muted';
+    if (Math.abs(n) >= t) return (n >= 0) ? 'text-green-300 font-extrabold' : 'text-red-300 font-extrabold';
+    return (n >= 0) ? 'text-green-200' : 'text-red-200';
+  }
+
+  function _renderMove3m() {
+    const th = Number(document.getElementById('move3mThreshold').value || 10);
+    const items = Array.from(move3mState.entries()).map(([sym, st]) => ({ sym, ...st }));
+    const filtered = items;
+    filtered.sort((a,b) => Math.abs(Number(b.pct3m||0)) - Math.abs(Number(a.pct3m||0)));
+
+    const alerts = filtered.filter(x => Math.abs(Number(x.pct3m||0)) >= th);
+    const tbA = document.querySelector('#move3mAlertTable tbody');
+    if (tbA) {
+      const totalA = alerts.length;
+      const totalPagesA = Math.max(1, Math.ceil(totalA / move3mPageSize));
+      if (move3mAlertPage > totalPagesA) move3mAlertPage = totalPagesA;
+      if (move3mAlertPage < 1) move3mAlertPage = 1;
+      const startA = (move3mAlertPage - 1) * move3mPageSize;
+      const pageAlerts = alerts.slice(startA, startA + move3mPageSize);
+      const infoA = document.getElementById('move3mAlertPageInfo');
+      if (infoA) infoA.textContent = `共 ${totalA} 条｜第 ${move3mAlertPage}/${totalPagesA} 页｜每页 ${move3mPageSize} 条`;
+      if (!pageAlerts.length) tbA.innerHTML = `<tr><td colspan="6" class="muted py-3">暂无异动</td></tr>`;
+      else tbA.innerHTML = pageAlerts.map(x => {
+        const url = `https://www.binance.com/en/trade/${x.sym}?type=spot`;
+        return `
+          <tr class="${Number(x.pct3m||0) >= 0 ? 'bg-green-900/20' : 'bg-red-900/20'}">
+            <td class="py-2 font-semibold"><a class="hover:underline text-blue-200" href="${url}" target="_blank" rel="noreferrer">${x.sym}</a></td>
+            <td class="py-2">${String(x.price ?? '—')}</td>
+            <td class="py-2 ${_pctClass(x.pct3m, th)}">${_fmtPct(x.pct3m)}</td>
+            <td class="py-2">${_fmtPct(x.pct24h)}</td>
+            <td class="py-2">${_fmtUsd(x.quote24h)}</td>
+            <td class="py-2">${_fmtTs(x.ts)}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    const tb = document.querySelector('#move3mTable tbody');
+    if (tb) {
+      const total = filtered.length;
+      const totalPages = Math.max(1, Math.ceil(total / move3mPageSize));
+      if (move3mPage > totalPages) move3mPage = totalPages;
+      if (move3mPage < 1) move3mPage = 1;
+      const start = (move3mPage - 1) * move3mPageSize;
+      const pageItems = filtered.slice(start, start + move3mPageSize);
+      const info = document.getElementById('move3mPageInfo');
+      if (info) info.textContent = `共 ${total} 条｜第 ${move3mPage}/${totalPages} 页｜每页 ${move3mPageSize} 条`;
+      if (!pageItems.length) tb.innerHTML = `<tr><td colspan="6" class="muted py-3">暂无数据</td></tr>`;
+      else tb.innerHTML = pageItems.map(x => {
+        const url = `https://www.binance.com/en/trade/${x.sym}?type=spot`;
+        return `
+          <tr>
+            <td class="py-2 font-semibold"><a class="hover:underline text-blue-200" href="${url}" target="_blank" rel="noreferrer">${x.sym}</a></td>
+            <td class="py-2">${String(x.price ?? '—')}</td>
+            <td class="py-2 ${_pctClass(x.pct3m, th)}">${_fmtPct(x.pct3m)}</td>
+            <td class="py-2">${_fmtPct(x.pct24h)}</td>
+            <td class="py-2">${_fmtUsd(x.quote24h)}</td>
+            <td class="py-2">${_fmtTs(x.ts)}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    const tbL = document.querySelector('#move3mLogTable tbody');
+    if (tbL) {
+      const logs = move3mLog.slice().reverse();
+      const totalL = logs.length;
+      const totalPagesL = Math.max(1, Math.ceil(totalL / move3mPageSize));
+      if (move3mLogPage > totalPagesL) move3mLogPage = totalPagesL;
+      if (move3mLogPage < 1) move3mLogPage = 1;
+      const startL = (move3mLogPage - 1) * move3mPageSize;
+      const pageLogs = logs.slice(startL, startL + move3mPageSize);
+      const infoL = document.getElementById('move3mLogPageInfo');
+      if (infoL) infoL.textContent = `共 ${totalL} 条｜第 ${move3mLogPage}/${totalPagesL} 页｜每页 ${move3mPageSize} 条`;
+      if (!pageLogs.length) tbL.innerHTML = `<tr><td colspan="6" class="muted py-3">暂无记录</td></tr>`;
+      else tbL.innerHTML = pageLogs.map(x => {
+        const url = `https://www.binance.com/en/trade/${x.sym}?type=spot`;
+        const dt = new Date(Number(x.ts||0) * 1000);
+        const tstr = dt.toLocaleString();
+        return `
+          <tr>
+            <td class="py-2">${tstr}</td>
+            <td class="py-2"><a href="${url}" target="_blank" class="text-blue-300 hover:underline font-extrabold">${x.sym}</a></td>
+            <td class="py-2 ${_pctClass(x.pct3m, th)}">${_fmtPct(x.pct3m)}</td>
+            <td class="py-2">${String(x.price ?? '—')}</td>
+            <td class="py-2">${_fmtPct(x.pct24h)}</td>
+            <td class="py-2">${_fmtUsd(x.quote24h)}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    const hint = document.getElementById('move3mSymbolsHint');
+    if (hint) hint.textContent = `监控 ${move3mMonitored.size} 个交易对｜状态缓存 ${move3mState.size}｜日志 ${move3mLog.length}`;
+  }
+
+  async function loadMove3mTopList() {
+    const st = document.getElementById('move3mStatus');
+    if (st) st.textContent = '加载TopN…';
+    try {
+      const topN = Number(document.getElementById('move3mTopN').value || 400);
+      const topNSafe = isFinite(topN) ? Math.max(5, Math.min(1000, topN)) : 400;
+      const payload = await fetchJson(`/api/exchange/spot/top_usdt_symbols?exchange=binance&topn=${encodeURIComponent(topNSafe)}`);
+      const syms = (payload && payload.symbols) ? payload.symbols : [];
+      const arr = Array.isArray(syms) ? syms.map(x => String(x || '').toUpperCase()).filter(Boolean) : [];
+      move3mMonitored = new Set(arr);
+      if (st) st.textContent = `已加载 Top${topNSafe}（${arr.length}）`;
+    } catch (e) {
+      if (st) st.textContent = `加载失败：${String(e)}`;
+    }
+  }
+
+  function _move3mSetStatus(msg) {
+    const st = document.getElementById('move3mStatus');
+    if (st) st.textContent = msg;
+  }
+
+  function _move3mOnTick(sym, price, pct24h, quote24h, ts) {
+    if (!move3mMonitored.has(sym)) return;
+    const nowSec = ts;
+    const cutoff = nowSec - 180;
+    let st = move3mState.get(sym);
+    if (!st) st = { hist: [], pct3m: 0, price: null, ts: 0, pct24h: 0, quote24h: 0 };
+    const hist = Array.isArray(st.hist) ? st.hist : [];
+    hist.push({ ts: nowSec, price: price });
+    while (hist.length && hist[0].ts < cutoff) hist.shift();
+    const base = (hist.length ? hist[0].price : null);
+    let pct3m = 0;
+    if (base && isFinite(base) && base > 0) pct3m = ((price - base) / base) * 100;
+    st.hist = hist;
+    st.price = price;
+    st.ts = nowSec;
+    st.pct24h = pct24h;
+    st.quote24h = quote24h;
+    st.pct3m = pct3m;
+    move3mState.set(sym, st);
+
+    const th = Number(document.getElementById('move3mThreshold').value || 10);
+    if (!isFinite(pct3m) || Math.abs(pct3m) < th) return;
+
+    const last = move3mAlerts.get(sym) || 0;
+    if ((nowSec - last) < 120) return;
+    move3mAlerts.set(sym, nowSec);
+    move3mLog.push({ ts: nowSec, sym, pct3m, pct24h, quote24h, price });
+
+    // 声音策略：任一币种触发预警后持续响铃3分钟；期间继续触发则延长
+    if (document.getElementById('move3mSound').checked) {
+      move3mBeepUntilSec = Math.max(move3mBeepUntilSec || 0, nowSec + 180);
+      if (!move3mBeepTimer) {
+        move3mBeepTimer = setInterval(() => {
+          try {
+            if (!move3mStarted) return;
+            const chk = document.getElementById('move3mSound');
+            if (!chk || !chk.checked) {
+              clearInterval(move3mBeepTimer);
+              move3mBeepTimer = null;
+              return;
+            }
+            const cur = Math.floor(Date.now() / 1000);
+            if (cur >= (move3mBeepUntilSec || 0)) {
+              clearInterval(move3mBeepTimer);
+              move3mBeepTimer = null;
+              return;
+            }
+            _beep();
+          } catch (e) {}
+        }, 900);
+      }
+    }
+    if (document.getElementById('move3mNotify').checked) {
+      _notify('3分钟异动', `${sym} ${pct3m>=0?'+':''}${pct3m.toFixed(2)}% (3m)`);
+    }
+    if (document.getElementById('move3mTg').checked) {
+      fetch('/api/move3m/push', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ exchange: 'binance', symbol: sym, pct_3m: pct3m, pct_24h: pct24h, quote_24h: quote24h, price: price }),
+      }).then(r => r.json()).then(() => {}).catch(() => {});
+    }
+  }
+
+  function _move3mConnectWS() {
+    if (!move3mStarted) return;
+    try { if (move3mWS) { move3mWS.close(); move3mWS = null; } } catch(e) {}
+    const url = 'wss://stream.binance.com:9443/ws';
+    const ws = new WebSocket(url);
+    move3mWS = ws;
+    ws.onopen = () => {
+      move3mReconnectTry = 0;
+      _move3mSetStatus('WS 已连接，订阅中…');
+      try {
+        ws.send(JSON.stringify({ method: 'SUBSCRIBE', params: ['!miniTicker@arr'], id: 1 }));
+      } catch(e) {}
+    };
+    ws.onmessage = (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch(e) { return; }
+
+      // SUBSCRIBE ACK: {result:null,id:1}
+      if (msg && Object.prototype.hasOwnProperty.call(msg, 'result') && Object.prototype.hasOwnProperty.call(msg, 'id')) {
+        return;
+      }
+
+      // /ws SUBSCRIBE(!miniTicker@arr) 返回通常是直接数组；combined stream 则是 {stream,data:[...]}
+      let data = null;
+      if (Array.isArray(msg)) data = msg;
+      else if (msg && Array.isArray(msg.data)) data = msg.data;
+      if (!Array.isArray(data)) return;
+
+      const nowSec = Math.floor(Date.now() / 1000);
+      for (const t of data) {
+        if (!t || typeof t !== 'object') continue;
+        const sym = String(t.s || '').toUpperCase();
+        if (!sym.endsWith('USDT')) continue;
+        if (!move3mMonitored.has(sym)) continue;
+
+        const c = Number(t.c || 0);
+        if (!isFinite(c) || c <= 0) continue;
+        const q = Number(t.q || 0);
+        const open = Number(t.o || 0);
+        const pct24h = (isFinite(open) && open > 0) ? ((c - open) / open) * 100 : 0;
+        _move3mOnTick(sym, c, pct24h, q, nowSec);
+      }
+
+      // 限制渲染频率
+      if (!window.__move3m_last_render || (Date.now() - window.__move3m_last_render) > 800) {
+        window.__move3m_last_render = Date.now();
+        _renderMove3m();
+      }
+    };
+    ws.onerror = () => {
+      _move3mSetStatus('WS 错误，准备重连…');
+    };
+    ws.onclose = () => {
+      if (!move3mStarted) return;
+      move3mWS = null;
+      const delay = Math.min(30000, 800 * (2 ** Math.min(6, move3mReconnectTry)));
+      move3mReconnectTry += 1;
+      _move3mSetStatus(`WS 断开，${Math.round(delay/1000)}s 后重连…`);
+      if (move3mReconnectTimer) clearTimeout(move3mReconnectTimer);
+      move3mReconnectTimer = setTimeout(() => _move3mConnectWS(), delay);
+    };
+  }
+
+  function startMove3m() {
+    if (move3mStarted) return;
+    move3mStarted = true;
+    move3mState = new Map();
+    move3mAlerts = new Map();
+    move3mPage = 1;
+    move3mAlertPage = 1;
+    move3mLogPage = 1;
+    move3mBeepUntilSec = 0;
+    try { if (move3mBeepTimer) { clearInterval(move3mBeepTimer); move3mBeepTimer = null; } } catch(e) {}
+    _move3mSetStatus('启动中…');
+    _renderMove3m();
+    loadMove3mTopList().then(() => {
+      if (!move3mStarted) return;
+      if (!move3mMonitored.size) {
+        _move3mSetStatus('TopN 为空，无法启动');
+        return;
+      }
+      _move3mConnectWS();
+    }).catch(() => {
+      _move3mSetStatus('加载TopN失败，无法启动');
+    });
+  }
+
+  function stopMove3m() {
+    move3mStarted = false;
+    move3mBeepUntilSec = 0;
+    try { if (move3mBeepTimer) { clearInterval(move3mBeepTimer); move3mBeepTimer = null; } } catch(e) {}
+    try { if (move3mReconnectTimer) { clearTimeout(move3mReconnectTimer); move3mReconnectTimer = null; } } catch(e) {}
+    try { if (move3mWS) { move3mWS.close(); move3mWS = null; } } catch(e) {}
+  }
+
+  // 绑定按钮
+  const _mStart = document.getElementById('move3mStart');
+  if (_mStart) _mStart.addEventListener('click', () => startMove3m());
+  const _mStop = document.getElementById('move3mStop');
+  if (_mStop) _mStop.addEventListener('click', () => { stopMove3m(); _move3mSetStatus('已停止'); });
+  const _mClear = document.getElementById('move3mClear');
+  if (_mClear) _mClear.addEventListener('click', () => { move3mLog = []; _renderMove3m(); });
+
+  const _mPageSize = document.getElementById('move3mPageSize');
+  if (_mPageSize) {
+    _mPageSize.addEventListener('change', () => {
+      const v = Number(_mPageSize.value || 20);
+      move3mPageSize = (isFinite(v) && v > 0) ? v : 20;
+      move3mPage = 1;
+      move3mAlertPage = 1;
+      move3mLogPage = 1;
+      _renderMove3m();
+    });
+  }
+
+  const _mAP = document.getElementById('move3mAlertPrev');
+  if (_mAP) _mAP.addEventListener('click', () => { move3mAlertPage = Math.max(1, move3mAlertPage - 1); _renderMove3m(); });
+  const _mAN = document.getElementById('move3mAlertNext');
+  if (_mAN) _mAN.addEventListener('click', () => { move3mAlertPage = move3mAlertPage + 1; _renderMove3m(); });
+
+  const _mP = document.getElementById('move3mPrev');
+  if (_mP) _mP.addEventListener('click', () => { move3mPage = Math.max(1, move3mPage - 1); _renderMove3m(); });
+  const _mN = document.getElementById('move3mNext');
+  if (_mN) _mN.addEventListener('click', () => { move3mPage = move3mPage + 1; _renderMove3m(); });
+
+  const _mLP = document.getElementById('move3mLogPrev');
+  if (_mLP) _mLP.addEventListener('click', () => { move3mLogPage = Math.max(1, move3mLogPage - 1); _renderMove3m(); });
+  const _mLN = document.getElementById('move3mLogNext');
+  if (_mLN) _mLN.addEventListener('click', () => { move3mLogPage = move3mLogPage + 1; _renderMove3m(); });
+
+  // 自动启动：打开网页即开始监控 TopN（无需手动点击“启动”）
+  // 说明：部分浏览器的音频需要用户交互后才能播放；监控仍会运行，声音可能在首次点击页面后才生效。
+  setTimeout(() => {
+    try {
+      if (!move3mStarted) startMove3m();
+    } catch (e) {}
+  }, 400);
 
   // ==========================
   // 三周期信号矩阵（Tri-Signal）
@@ -3753,6 +5462,10 @@
     if (aEl) aEl.checked = (s.push_master_a_enabled === undefined) ? true : !!s.push_master_a_enabled;
     const bEl = document.getElementById('pushMasterBEnabled');
     if (bEl) bEl.checked = (s.push_master_b_enabled === undefined) ? true : !!s.push_master_b_enabled;
+    const wEl = document.getElementById('pushWhalesEnabled');
+    if (wEl) wEl.checked = (s.push_whales_enabled === undefined) ? true : !!s.push_whales_enabled;
+    const mEl = document.getElementById('pushMove3mEnabled');
+    if (mEl) mEl.checked = (s.push_move3m_enabled === undefined) ? true : !!s.push_move3m_enabled;
   }
 
   // saveNewsSettings():
@@ -3771,6 +5484,8 @@
       push_tri_signal_enabled: !!document.getElementById('pushTriSignalEnabled').checked,
       push_master_a_enabled: !!document.getElementById('pushMasterAEnabled').checked,
       push_master_b_enabled: !!document.getElementById('pushMasterBEnabled').checked,
+      push_whales_enabled: !!document.getElementById('pushWhalesEnabled').checked,
+      push_move3m_enabled: !!document.getElementById('pushMove3mEnabled').checked,
     };
     document.getElementById('newsSettingsStatus').textContent = '保存中…';
     const r = await fetch('/api/news/settings', {

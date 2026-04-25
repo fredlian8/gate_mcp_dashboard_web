@@ -4,7 +4,7 @@ import sqlite3
 import threading
 import time
 import warnings
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse, quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -13,13 +13,15 @@ import datetime
 import hashlib
 import json
 import math
+import random
+import re
 
 import requests
 try:
     import feedparser  # type: ignore
 except Exception:
     feedparser = None
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -73,9 +75,13 @@ _load_dotenv_if_present()
 APP_TITLE = "Gate 永续合约仪表板"
 
 GATE_REST_FUTURES_USDT_BASE = "https://api.gateio.ws/api/v4/futures/usdt"
+GATE_REST_SPOT_BASE = "https://api.gateio.ws/api/v4/spot"
+BINANCE_REST_SPOT_BASE = "https://api.binance.com"
 
 # 复用连接，减少每次请求的握手开销
 HTTP = requests.Session()
+HTTP_NO_PROXY = requests.Session()
+HTTP_NO_PROXY.trust_env = False
 _http_trust_env_raw = (os.getenv("HTTP_TRUST_ENV", "") or "").strip()
 if _http_trust_env_raw:
     HTTP.trust_env = _http_trust_env_raw in ("1", "true", "True", "yes", "YES")
@@ -113,6 +119,11 @@ if not NEWS_HTTP_VERIFY:
 TELEGRAM_API_BASE = os.getenv("TELEGRAM_API_BASE", "https://api.telegram.org").strip() or "https://api.telegram.org"
 TELEGRAM_CONNECT_TIMEOUT = float(os.getenv("TELEGRAM_CONNECT_TIMEOUT", "10") or "10")
 TELEGRAM_READ_TIMEOUT = float(os.getenv("TELEGRAM_READ_TIMEOUT", "20") or "20")
+
+WHALE_ALERT_ENABLED = os.getenv("WHALE_ALERT_ENABLED", "0").strip() in ("1", "true", "True", "yes", "YES")
+WHALE_ALERT_API_KEY = os.getenv("WHALE_ALERT_API_KEY", "").strip()
+WHALES_ALERT_LOOP_ENABLED = os.getenv("WHALES_ALERT_LOOP_ENABLED", "0").strip() in ("1", "true", "True", "yes", "YES")
+WHALES_ALERT_INTERVAL_SEC = int(float(os.getenv("WHALES_ALERT_INTERVAL_SEC", "30") or "30"))
 
 NEWS_AUTO_PUSH_ENABLED = os.getenv("NEWS_AUTO_PUSH_ENABLED", "0").strip() in ("1", "true", "True", "yes", "YES")
 NEWS_AUTO_PUSH_INTERVAL_SEC = int(float(os.getenv("NEWS_AUTO_PUSH_INTERVAL_SEC", "300") or "300"))
@@ -224,6 +235,76 @@ def _db_init() -> None:
         except Exception:
             pass
         cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS whale_watchlist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at INTEGER,
+                chain TEXT,
+                address TEXT,
+                label TEXT,
+                tags TEXT
+            )
+            """
+        )
+        try:
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_whale_watchlist_chain_addr ON whale_watchlist(chain, address)")
+        except Exception:
+            pass
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_whale_watchlist_chain ON whale_watchlist(chain, created_at)")
+        except Exception:
+            pass
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS whale_alert_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at INTEGER,
+                enabled INTEGER,
+                name TEXT,
+                chain TEXT,
+                min_usd REAL,
+                direction TEXT,
+                watchlist_only INTEGER
+            )
+            """
+        )
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_whale_alert_rules_enabled ON whale_alert_rules(enabled, created_at)")
+        except Exception:
+            pass
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS whale_alert_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at INTEGER,
+                uniq TEXT,
+                rule_id INTEGER,
+                chain TEXT,
+                direction TEXT,
+                amount_usd REAL,
+                asset TEXT,
+                from_addr TEXT,
+                to_addr TEXT,
+                tx_hash TEXT,
+                explorer_url TEXT,
+                message TEXT,
+                ok INTEGER,
+                error TEXT
+            )
+            """
+        )
+        try:
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_whale_alert_history_uniq ON whale_alert_history(uniq)")
+        except Exception:
+            pass
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_whale_alert_history_created ON whale_alert_history(created_at)")
+        except Exception:
+            pass
+
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS news_items (
@@ -426,6 +507,1821 @@ def _db_init() -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _whale_addr_norm(addr: str) -> str:
+    a = (addr or "").strip()
+    return a.lower()
+
+
+def _whale_chain_norm(chain: str) -> str:
+    c = (chain or "ETH").strip().upper()
+    if c not in ("ETH", "SOL", "BTC"):
+        c = "ETH"
+    return c
+
+
+def _whale_direction_norm(direction: str) -> str:
+    d = (direction or "all").strip().lower()
+    if d in ("to_exchange", "from_exchange", "wallet", "unknown"):
+        return d
+    return "all"
+
+
+def _get_gate_spot_last_usdt(symbol: str) -> Optional[float]:
+    """获取 Gate 现货 USDT 最新价（免 Key）。仅用于 whales 模块的 USD 估算与过滤。"""
+    sym = (symbol or "").strip().upper()
+    if not sym:
+        return None
+    ck = f"gate_spot_last:{sym}"
+    cached = _cache_get(ck, ttl=30)
+    if cached is not None:
+        try:
+            return float(cached)
+        except Exception:
+            return None
+
+    url = "https://api.gateio.ws/api/v4/spot/tickers"
+    pair = f"{sym}_USDT"
+    try:
+        r = HTTP.get(url, params={"currency_pair": pair}, timeout=(8, 15))
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if isinstance(data, list) and data:
+            last = data[0].get("last")
+        elif isinstance(data, dict):
+            last = data.get("last")
+        else:
+            last = None
+        if last is None:
+            return None
+        px = float(last)
+        if not math.isfinite(px) or px <= 0:
+            return None
+        _cache_set(ck, px)
+        return px
+    except Exception:
+        return None
+
+
+def _gate_spot_top_usdt_pairs(topn: int) -> Tuple[List[str], str]:
+    try:
+        n = max(5, min(1000, int(topn)))
+    except Exception:
+        n = 20
+
+    ck = f"gate_spot:top_usdt_pairs:{n}"
+    cached = _cache_get(ck, ttl=30)
+    if cached is not None:
+        try:
+            arr = list(cached) if isinstance(cached, list) else []
+            return [str(x) for x in arr if x], "ok"
+        except Exception:
+            pass
+
+    url = f"{GATE_REST_SPOT_BASE}/tickers"
+    stable = {
+        "U",
+        "USDT",
+        "USDC",
+        "DAI",
+        "TUSD",
+        "BUSD",
+        "FDUSD",
+        "USDP",
+        "GUSD",
+        "PAX",
+        "USDJ",
+        "USDD",
+        "USDE",
+        "PYUSD",
+        "USD1",
+    }
+
+    lev_suffix = ("3L", "3S", "5L", "5S", "UP", "DOWN", "BULL", "BEAR")
+    try:
+        r = HTTP.get(url, timeout=(8, 18))
+        if r.status_code != 200:
+            return [], f"http {r.status_code}"
+        data = r.json()
+        if not isinstance(data, list):
+            return [], "invalid_response"
+
+        pairs: List[Tuple[str, float]] = []
+        for it in data:
+            if not isinstance(it, dict):
+                continue
+            cp = str(it.get("currency_pair") or "").strip().upper()
+            if not cp or not cp.endswith("_USDT"):
+                continue
+            base = cp.split("_")[0] if "_" in cp else cp
+            if base in stable:
+                continue
+            if base.endswith(lev_suffix):
+                continue
+            qv = it.get("quote_volume")
+            try:
+                qvf = float(qv) if qv is not None else 0.0
+            except Exception:
+                qvf = 0.0
+            if not math.isfinite(qvf) or qvf <= 0:
+                continue
+            pairs.append((cp, qvf))
+
+        pairs.sort(key=lambda x: x[1], reverse=True)
+        out = [p for p, _ in pairs[:n]]
+        _cache_set(ck, out)
+        return out, "ok"
+    except Exception as e:
+        return [], str(e)
+
+
+def _binance_spot_top_usdt_symbols(topn: int) -> Tuple[List[str], str]:
+    try:
+        n = max(5, min(1000, int(topn)))
+    except Exception:
+        n = 20
+
+    ck = f"binance_spot:top_usdt_symbols:{n}"
+    cached = _cache_get(ck, ttl=30)
+    if cached is not None:
+        try:
+            arr = list(cached) if isinstance(cached, list) else []
+            return [str(x) for x in arr if x], "ok"
+        except Exception:
+            pass
+
+    stable = {
+        "U",
+        "USDT",
+        "USDC",
+        "DAI",
+        "TUSD",
+        "BUSD",
+        "FDUSD",
+        "USDP",
+        "GUSD",
+        "PAX",
+        "USDJ",
+        "USDD",
+        "USDE",
+        "PYUSD",
+        "USD1",
+
+    }
+    lev_suffix = ("3L", "3S", "5L", "5S", "UP", "DOWN", "BULL", "BEAR")
+
+    url = f"{BINANCE_REST_SPOT_BASE}/api/v3/ticker/24hr"
+    try:
+        r = HTTP.get(url, timeout=(8, 18))
+        if r.status_code != 200:
+            return [], f"http {r.status_code}"
+        data = r.json()
+        if not isinstance(data, list):
+            return [], "invalid_response"
+
+        pairs: List[Tuple[str, float]] = []
+        for it in data:
+            if not isinstance(it, dict):
+                continue
+            sym = str(it.get("symbol") or "").strip().upper()
+            if not sym or not sym.endswith("USDT"):
+                continue
+            base = sym[: -4]
+            if not base:
+                continue
+            if base in stable:
+                continue
+            if base.endswith(lev_suffix):
+                continue
+            qv = it.get("quoteVolume")
+            try:
+                qvf = float(qv) if qv is not None else 0.0
+            except Exception:
+                qvf = 0.0
+            if not math.isfinite(qvf) or qvf <= 0:
+                continue
+            pairs.append((sym, qvf))
+
+        pairs.sort(key=lambda x: x[1], reverse=True)
+        out = [p for p, _ in pairs[:n]]
+        _cache_set(ck, out)
+        return out, "ok"
+    except Exception as e:
+        return [], str(e)
+
+
+def _fetch_binance_spot_trades(symbol: str, limit: int = 200) -> Tuple[List[dict], str]:
+    sym = (symbol or "").strip().upper()
+    if not sym:
+        return [], "missing_symbol"
+    try:
+        lim = max(10, min(1000, int(limit)))
+    except Exception:
+        lim = 200
+    url = f"{BINANCE_REST_SPOT_BASE}/api/v3/trades"
+    try:
+        r = HTTP.get(url, params={"symbol": sym, "limit": lim}, timeout=(8, 18))
+        if r.status_code != 200:
+            return [], f"http {r.status_code}"
+        data = r.json()
+        if not isinstance(data, list):
+            return [], "invalid_response"
+        return data, "ok"
+    except Exception as e:
+        return [], str(e)
+
+
+def _fetch_gate_spot_trades(currency_pair: str, limit: int = 50) -> Tuple[List[dict], str]:
+    cp = (currency_pair or "").strip().upper()
+    if not cp:
+        return [], "missing_pair"
+    try:
+        lim = max(10, min(200, int(limit)))
+    except Exception:
+        lim = 50
+    url = f"{GATE_REST_SPOT_BASE}/trades"
+    try:
+        r = HTTP.get(url, params={"currency_pair": cp, "limit": lim}, timeout=(8, 18))
+        if r.status_code != 200:
+            return [], f"http {r.status_code}"
+        data = r.json()
+        if not isinstance(data, list):
+            return [], "invalid_response"
+        return data, "ok"
+    except Exception as e:
+        return [], str(e)
+
+
+def api_exchange_spot_large_trades(
+    exchange: str = "binance",
+    min_usd: float = 100_000,
+    topn: int = 20,
+    limit: int = 100,
+    offset: int = 0,
+) -> JSONResponse:
+    try:
+        min_usd = float(min_usd)
+    except Exception:
+        min_usd = 100_000.0
+    min_usd = max(1_000.0, min(200_000_000.0, float(min_usd)))
+    try:
+        topn = max(5, min(200, int(topn)))
+    except Exception:
+        topn = 20
+    try:
+        limit = max(10, min(10000, int(limit)))
+    except Exception:
+        limit = 100
+    try:
+        offset = max(0, int(offset))
+    except Exception:
+        offset = 0
+
+    ex_name = (exchange or "binance").strip().lower()
+    if ex_name not in ("binance", "gate"):
+        ex_name = "binance"
+
+    stable = {
+        "U",
+        "USDT",
+        "USDC",
+        "DAI",
+        "TUSD",
+        "BUSD",
+        "FDUSD",
+        "USDP",
+        "GUSD",
+        "PAX",
+        "USDJ",
+        "USDD",
+        "USDE",
+        "PYUSD",
+        "USDS",
+        "SUSD",
+        "LUSD",
+        "FRAX",
+        "USDX",
+        "EURC",
+        "USD1",
+    }
+
+    def _is_stable(sym: str) -> bool:
+        s = (sym or "").strip().upper()
+        if not s:
+            return False
+        if s in stable:
+            return True
+        # 启发式：常见稳定币多以 USD 结尾（例如：LUSD/SUSD/USDS），同时排除非稳定币的 BTC/ETH 等
+        if s.endswith("USD") and len(s) <= 6:
+            return True
+        return False
+
+    ck = f"ex:spot_large_trades:{ex_name}:{int(min_usd)}:{topn}:{limit}:{offset}"
+    cached = _cache_get(ck, ttl=6)
+    if cached is not None:
+        return JSONResponse(cached)
+
+    if ex_name == "gate":
+        pairs, st_pairs = _gate_spot_top_usdt_pairs(topn)
+    else:
+        pairs, st_pairs = _binance_spot_top_usdt_symbols(topn)
+    if not pairs:
+        payload0 = {
+            "ok": False,
+            "items": [],
+            "exchange": ex_name,
+            "min_usd": min_usd,
+            "topn": topn,
+            "limit": limit,
+            "offset": offset,
+            "source": f"{ex_name}_spot",
+            "source_status": f"tickers:{st_pairs}",
+            "generated_at": int(time.time()),
+        }
+        return JSONResponse(payload0, status_code=502)
+
+    if ex_name == "gate":
+        max_workers = int(os.getenv("GATE_SPOT_TRADES_WORKERS", "6") or "6")
+        max_workers = max(1, min(16, max_workers))
+        per_pair = int(os.getenv("GATE_SPOT_TRADES_PER_PAIR", "200") or "200")
+        per_pair = max(20, min(200, per_pair))
+    else:
+        max_workers = int(os.getenv("BINANCE_SPOT_TRADES_WORKERS", "10") or "10")
+        max_workers = max(1, min(24, max_workers))
+        per_pair = int(os.getenv("BINANCE_SPOT_TRADES_PER_PAIR", "1000") or "1000")
+        per_pair = max(20, min(1000, per_pair))
+
+    trades_all: List[dict] = []
+    errs: List[str] = []
+    seen: set = set()
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        if ex_name == "gate":
+            futs = {ex.submit(_fetch_gate_spot_trades, cp, per_pair): cp for cp in pairs}
+        else:
+            futs = {ex.submit(_fetch_binance_spot_trades, sym, per_pair): sym for sym in pairs}
+        for fut in as_completed(futs):
+            cp = futs.get(fut) or ""
+            try:
+                rows, st = fut.result()
+            except Exception as e:
+                errs.append(f"{cp}:{str(e)}")
+                continue
+            if st != "ok":
+                errs.append(f"{cp}:{st}")
+                continue
+            for t in rows:
+                if not isinstance(t, dict):
+                    continue
+                if ex_name == "gate":
+                    tid = str(t.get("id") or "").strip()
+                    if tid:
+                        uniq = f"gate:{cp}:{tid}"
+                    else:
+                        uniq = f"gate:{cp}:{t.get('create_time') or ''}:{t.get('price') or ''}:{t.get('amount') or ''}:{t.get('side') or ''}"
+                    price = t.get("price")
+                    amount = t.get("amount")
+                    try:
+                        p = float(price) if price is not None else 0.0
+                        a = float(amount) if amount is not None else 0.0
+                    except Exception:
+                        continue
+                    try:
+                        ts = int(float(t.get("create_time") or 0))
+                    except Exception:
+                        ts = 0
+                    side = str(t.get("side") or "").strip().lower() or "unknown"
+                    pair_name = cp
+                    asset = cp.split("_")[0] if "_" in cp else cp
+                else:
+                    tid = str(t.get("id") or "").strip()
+                    if tid:
+                        uniq = f"binance:{cp}:{tid}"
+                    else:
+                        uniq = f"binance:{cp}:{t.get('time') or ''}:{t.get('price') or ''}:{t.get('qty') or ''}"
+                    price = t.get("price")
+                    amount = t.get("qty")
+                    try:
+                        p = float(price) if price is not None else 0.0
+                        a = float(amount) if amount is not None else 0.0
+                    except Exception:
+                        continue
+                    try:
+                        ts = int(float(t.get("time") or 0) / 1000.0)
+                    except Exception:
+                        ts = 0
+                    is_buyer_maker = bool(t.get("isBuyerMaker"))
+                    side = "sell" if is_buyer_maker else "buy"
+                    base = cp[: -4] if cp.endswith("USDT") else cp
+                    pair_name = f"{base}_USDT"
+                    asset = base
+
+                if _is_stable(asset):
+                    continue
+
+                if uniq in seen:
+                    continue
+                seen.add(uniq)
+                if not math.isfinite(p) or not math.isfinite(a) or p <= 0 or a <= 0:
+                    continue
+                usd = p * a
+                if usd < min_usd:
+                    continue
+                trades_all.append(
+                    {
+                        "id": uniq,
+                        "ts": ts if ts > 0 else int(time.time()),
+                        "exchange": ex_name,
+                        "market": "spot",
+                        "pair": pair_name,
+                        "asset": asset,
+                        "price": round(p, 10),
+                        "amount": round(a, 10),
+                        "amount_usd": round(float(usd), 2),
+                        "side": side,
+                        "trade_id": tid,
+                        "source": f"{ex_name}_spot",
+                    }
+                )
+
+    trades_all.sort(key=lambda x: float(x.get("amount_usd") or 0), reverse=True)
+    page = trades_all[offset : offset + limit]
+    payload = {
+        "ok": True,
+        "items": page,
+        "exchange": ex_name,
+        "min_usd": min_usd,
+        "topn": topn,
+        "limit": limit,
+        "offset": offset,
+        "source": f"{ex_name}_spot",
+        "source_status": f"pairs:{st_pairs};errs:{len(errs)}",
+        "errors": errs[:20],
+        "generated_at": int(time.time()),
+    }
+    _cache_set(ck, payload)
+    return JSONResponse(payload)
+
+
+def api_exchange_spot_top_usdt_symbols(exchange: str = "binance", topn: int = 400) -> JSONResponse:
+    ex_name = (exchange or "binance").strip().lower()
+    if ex_name not in ("binance", "gate"):
+        ex_name = "binance"
+    try:
+        topn_i = int(topn)
+    except Exception:
+        topn_i = 400
+    topn_i = max(5, min(1000, topn_i))
+
+    if ex_name == "gate":
+        pairs, st = _gate_spot_top_usdt_pairs(topn_i)
+        # gate pairs already like BTC_USDT
+        symbols = [str(x).replace("_", "").upper() for x in pairs if x]
+    else:
+        symbols, st = _binance_spot_top_usdt_symbols(topn_i)
+
+    return JSONResponse({"ok": True, "exchange": ex_name, "topn": topn_i, "symbols": symbols, "source_status": st})
+
+
+def api_move3m_push(payload: Dict[str, Any]) -> JSONResponse:
+    """3分钟异动 TG 推送（由前端触发，复用 Telegram 设置）。"""
+    s = _news_settings()
+    bot_token = (s.get("tg_bot_token") or "").strip()
+    chat_id = (s.get("tg_chat_id") or "").strip()
+    enabled_global = _setting_bool(s, "push_enabled", True)
+    enabled_mod = _setting_bool(s, "push_move3m_enabled", True)
+    if not enabled_global or not enabled_mod:
+        return JSONResponse({"ok": True, "skipped": True, "error": "push_disabled"})
+    if not bot_token or not chat_id:
+        return JSONResponse({"ok": False, "error": "未配置 Telegram Bot Token 或 Chat ID"}, status_code=400)
+
+    sym = str((payload or {}).get("symbol") or "").strip().upper()
+    if not sym:
+        return JSONResponse({"ok": False, "error": "missing symbol"}, status_code=400)
+    try:
+        pct3m = float((payload or {}).get("pct_3m") or 0.0)
+    except Exception:
+        pct3m = 0.0
+    try:
+        pct24h = float((payload or {}).get("pct_24h") or 0.0)
+    except Exception:
+        pct24h = 0.0
+    try:
+        price = float((payload or {}).get("price") or 0.0)
+    except Exception:
+        price = 0.0
+    ex_name = str((payload or {}).get("exchange") or "binance").strip().lower() or "binance"
+
+    # 去重/冷却：同一 symbol 每 120 秒最多推一次
+    now_ts = int(time.time())
+    bucket = int(now_ts / 120)
+    uniq = f"move3m:{ex_name}:{sym}:{bucket}"
+    if _cache_get(f"push:{uniq}", ttl=3600) is not None:
+        return JSONResponse({"ok": True, "skipped": True, "error": "cooldown"})
+    _cache_set(f"push:{uniq}", 1)
+
+    ts_txt = datetime.datetime.fromtimestamp(now_ts).strftime("%Y-%m-%d %H:%M:%S")
+    sign = "+" if pct3m >= 0 else ""
+    msg = (
+        f"【3分钟异动】{sym} ({ex_name})\n"
+        f"时间：{ts_txt}\n"
+        f"价格：{price:.10g}\n"
+        f"3m涨跌：{sign}{pct3m:.2f}%\n"
+        f"24h涨跌：{( '+' if pct24h >= 0 else '' )}{pct24h:.2f}%"
+    )
+
+    ok, err = _tg_send(bot_token=bot_token, chat_id=chat_id, text=msg)
+    # 复用 push_history（写入 news_push_history，module=move3m 通过 level 区分）
+    try:
+        _push_history_add(
+            uniq=uniq,
+            level="move3m",
+            title=f"{sym} {pct3m:+.2f}% (3m)",
+            link=f"https://www.binance.com/en/trade/{sym}?type=spot" if ex_name == "binance" else "",
+            message=msg,
+            ok=ok,
+            error=err,
+        )
+    except Exception:
+        pass
+
+    if not ok:
+        return JSONResponse({"ok": False, "error": err or "send failed"}, status_code=502)
+    return JSONResponse({"ok": True})
+
+
+def _eth_rpc_call(method: str, params: list) -> dict:
+    url_raw = os.getenv("WHALES_ETH_RPC_URL", "https://cloudflare-eth.com").strip() or "https://cloudflare-eth.com"
+    # 允许配置多个 RPC，逗号分隔：优先尝试前面的，失败自动切换
+    urls = [u.strip() for u in str(url_raw).split(",") if u and str(u).strip()]
+    if not urls:
+        urls = ["https://cloudflare-eth.com"]
+
+    payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+    try:
+        max_retry = int(os.getenv("WHALES_ETH_RPC_RETRIES", "3") or "3")
+    except Exception:
+        max_retry = 3
+    max_retry = max(0, min(10, max_retry))
+    try:
+        base_backoff = float(os.getenv("WHALES_ETH_RPC_BACKOFF_SEC", "0.6") or "0.6")
+    except Exception:
+        base_backoff = 0.6
+    base_backoff = max(0.05, min(5.0, base_backoff))
+
+    last_err: Optional[str] = None
+    for url in urls:
+        for attempt in range(max_retry + 1):
+            try:
+                r = HTTP_NO_PROXY.post(url, json=payload, timeout=(10, 25))
+                if r.status_code != 200:
+                    # 429/5xx 常见为限流或上游过载
+                    if r.status_code in (429, 500, 502, 503, 504) and attempt < max_retry:
+                        time.sleep(base_backoff * (2**attempt))
+                        continue
+                    raise RuntimeError(f"eth rpc http {r.status_code}")
+                data = r.json()
+                if not isinstance(data, dict):
+                    raise RuntimeError("eth rpc invalid response")
+                if data.get("error"):
+                    err = data.get("error")
+                    # Cloudflare/上游在压力大时常见：-32046 Cannot fulfill request
+                    try:
+                        code = err.get("code") if isinstance(err, dict) else None
+                    except Exception:
+                        code = None
+                    msg = str(err)
+                    if (code in (-32046, -32005, -32000) or "Cannot fulfill request" in msg) and attempt < max_retry:
+                        time.sleep(base_backoff * (2**attempt))
+                        continue
+                    raise RuntimeError(msg)
+                return data
+            except Exception as e:
+                last_err = f"{url}: {str(e)}"
+                # 网络抖动/超时：重试
+                if attempt < max_retry:
+                    time.sleep(base_backoff * (2**attempt))
+                    continue
+                break
+        # 本节点失败，切换下一个
+        continue
+    raise RuntimeError(last_err or "eth rpc failed")
+
+
+def _eth_hex_to_int(x: Any) -> int:
+    if x is None:
+        return 0
+    if isinstance(x, int):
+        return x
+    s = str(x)
+    try:
+        return int(s, 16) if s.startswith("0x") else int(s)
+    except Exception:
+        return 0
+
+
+def _fetch_eth_rpc_transfers(min_usd: float, limit: int) -> Tuple[List[dict], str]:
+    px = _get_gate_spot_last_usdt("ETH")
+    if px is None:
+        return [], "price_unavailable"
+
+    try:
+        # 总耗时预算：公共 RPC 扫块在高阈值（可能很难命中）时容易跑很久
+        try:
+            budget_sec = float(os.getenv("WHALES_ETH_SCAN_BUDGET_SEC", "12") or "12")
+        except Exception:
+            budget_sec = 12.0
+        budget_sec = max(3.0, min(60.0, budget_sec))
+        deadline = time.time() + budget_sec
+
+        head = _eth_rpc_call("eth_blockNumber", [])
+        bn_hex = head.get("result")
+        head_n = _eth_hex_to_int(bn_hex)
+        if head_n <= 0:
+            return [], "invalid_head"
+
+        want = max(1, min(400, int(limit)))
+        items: List[dict] = []
+
+        # 从最新区块往回扫，直到收集到足够多的大额 ETH 转账
+        # 公共 RPC 容易限流，因此默认更保守；可用环境变量调大
+        max_blocks = int(os.getenv("WHALES_ETH_SCAN_BLOCKS", "30") or "30")
+        max_blocks = max(5, min(200, max_blocks))
+        for i in range(max_blocks):
+            if time.time() > deadline:
+                return [], "timeout_budget_exceeded"
+            n = head_n - i
+            blk = _eth_rpc_call("eth_getBlockByNumber", [hex(n), True]).get("result")
+            if not isinstance(blk, dict):
+                continue
+            ts = _eth_hex_to_int(blk.get("timestamp"))
+            txs = blk.get("transactions")
+            if not isinstance(txs, list):
+                continue
+
+            for tx in txs:
+                if time.time() > deadline:
+                    return [], "timeout_budget_exceeded"
+                if not isinstance(tx, dict):
+                    continue
+                v = _eth_hex_to_int(tx.get("value"))
+                if v <= 0:
+                    continue
+                amt = float(v) / 1e18
+                usd = amt * float(px)
+                if usd < float(min_usd):
+                    continue
+                tx_hash = str(tx.get("hash") or "").strip()
+                from_addr = str(tx.get("from") or "").strip()
+                to_addr = str(tx.get("to") or "").strip()
+                if not tx_hash:
+                    continue
+                items.append(
+                    {
+                        "id": f"ETH:{tx_hash}",
+                        "ts": int(ts) if ts > 0 else int(time.time()),
+                        "chain": "ETH",
+                        "asset": "ETH",
+                        "amount": round(amt, 6),
+                        "amount_usd": round(float(usd), 2),
+                        "from": from_addr,
+                        "to": to_addr,
+                        "direction": "wallet",
+                        "tags": {"fromLabel": "", "toLabel": "", "exchange": ""},
+                        "tx_hash": tx_hash,
+                        "explorer_url": f"https://etherscan.io/tx/{tx_hash}",
+                        "source": "eth_rpc",
+                    }
+                )
+                if len(items) >= want:
+                    break
+            if len(items) >= want:
+                break
+
+        items.sort(key=lambda x: int(x.get("ts") or 0), reverse=True)
+        return items[:want], "ok"
+    except Exception as e:
+        return [], str(e)
+
+
+def _blockscout_eth_base() -> str:
+    # 可通过环境变量覆盖为其他链/自建 Blockscout
+    return os.getenv("WHALES_ETH_BLOCKSCOUT_BASE", "https://eth.blockscout.com").strip() or "https://eth.blockscout.com"
+
+
+def _fetch_eth_blockscout_transfers(min_usd: float, limit: int) -> Tuple[List[dict], str]:
+    """使用 Blockscout v2 最近交易接口作为 ETH transfers 的降级数据源。
+
+    说明：Blockscout v2 的字段在不同部署可能略有差异，因此这里尽量做容错解析。
+    仅统计原生 ETH value 转账（value>0）。
+    """
+    px = _get_gate_spot_last_usdt("ETH")
+    if px is None:
+        return [], "price_unavailable"
+
+    base = _blockscout_eth_base().rstrip("/")
+    try:
+        want = max(1, min(500, int(limit)))
+    except Exception:
+        want = 50
+
+    # 多取一些以便过滤 min_usd 后仍能返回足够条数
+    fetch_n = max(50, min(200, want * 3))
+    url = f"{base}/api/v2/transactions"
+    try:
+        # 部分 Blockscout 部署对参数校验严格，会对未知/不支持的参数返回 422
+        r = HTTP_NO_PROXY.get(url, params={"limit": fetch_n}, timeout=(10, 25))
+        if r.status_code == 422:
+            r = HTTP_NO_PROXY.get(url, timeout=(10, 25))
+        if r.status_code != 200:
+            return [], f"http {r.status_code}"
+        data = r.json()
+        items0 = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items0, list):
+            # 兼容直接返回 list 的实现
+            items0 = data if isinstance(data, list) else None
+        if not isinstance(items0, list):
+            return [], "invalid_response"
+
+        out: List[dict] = []
+        for tx in items0:
+            if not isinstance(tx, dict):
+                continue
+            # hash
+            txh = str(tx.get("hash") or tx.get("tx_hash") or "").strip()
+            if not txh:
+                continue
+            # from/to
+            frm = tx.get("from")
+            to = tx.get("to")
+            from_addr = str(frm.get("hash") if isinstance(frm, dict) else frm or "").strip()
+            to_addr = str(to.get("hash") if isinstance(to, dict) else to or "").strip()
+
+            # timestamp
+            ts = 0
+            tsv = tx.get("timestamp") or tx.get("block_timestamp") or tx.get("timeStamp")
+            if isinstance(tsv, (int, float)):
+                ts = int(tsv)
+            elif isinstance(tsv, str):
+                # 尝试解析 "2024-..." 或者秒字符串
+                try:
+                    if tsv.isdigit():
+                        ts = int(tsv)
+                    else:
+                        ts = int(datetime.datetime.fromisoformat(tsv.replace("Z", "+00:00")).timestamp())
+                except Exception:
+                    ts = 0
+
+            # value (wei)
+            val = tx.get("value")
+            wei = 0
+            try:
+                if isinstance(val, int):
+                    wei = int(val)
+                elif isinstance(val, str):
+                    if val.startswith("0x"):
+                        wei = int(val, 16)
+                    elif val.isdigit():
+                        wei = int(val)
+            except Exception:
+                wei = 0
+            if wei <= 0:
+                continue
+            amt = float(wei) / 1e18
+            usd = amt * float(px)
+            if usd < float(min_usd):
+                continue
+
+            out.append(
+                {
+                    "id": f"ETH:{txh}",
+                    "ts": ts if ts > 0 else int(time.time()),
+                    "chain": "ETH",
+                    "asset": "ETH",
+                    "amount": round(float(amt), 6),
+                    "amount_usd": round(float(usd), 2),
+                    "from": from_addr,
+                    "to": to_addr,
+                    "direction": "wallet",
+                    "tags": {"fromLabel": "", "toLabel": "", "exchange": ""},
+                    "tx_hash": txh,
+                    "explorer_url": f"https://etherscan.io/tx/{txh}",
+                    "source": "blockscout_recent",
+                }
+            )
+            if len(out) >= want:
+                break
+
+        if not out:
+            return [], "no_items_under_threshold"
+        out.sort(key=lambda x: float(x.get("amount_usd") or 0), reverse=True)
+        return out[:want], "ok"
+    except Exception as e:
+        return [], str(e)
+
+
+def _fetch_eth_blockscout_txs(address: str, limit: int = 50) -> Tuple[List[dict], str]:
+    addr = (address or "").strip()
+    if not addr:
+        return [], "missing_address"
+    base = _blockscout_eth_base().rstrip("/")
+    url = f"{base}/api"
+    try:
+        params = {
+            "module": "account",
+            "action": "txlist",
+            "address": addr,
+            "startblock": 0,
+            "endblock": 99999999,
+            "sort": "desc",
+        }
+        r = HTTP.get(url, params=params, timeout=(10, 25))
+        if r.status_code != 200:
+            return [], f"http {r.status_code}"
+        data = r.json()
+        if not isinstance(data, dict):
+            return [], "invalid_response"
+        status = str(data.get("status") or "")
+        if status not in ("1", "0"):
+            # 有些 blockscout 不用 status 字段
+            pass
+        res = data.get("result")
+        if not isinstance(res, list):
+            return [], "invalid_result"
+        return res[: max(1, min(200, int(limit)))], "ok"
+    except Exception as e:
+        return [], str(e)
+
+
+def _fetch_eth_balance_native(address: str) -> Tuple[Optional[float], str]:
+    addr = (address or "").strip()
+    if not addr:
+        return None, "missing_address"
+    try:
+        data = _eth_rpc_call("eth_getBalance", [addr, "latest"])
+        bal_hex = data.get("result")
+        wei = _eth_hex_to_int(bal_hex)
+        eth = float(wei) / 1e18
+        return eth, "ok"
+    except Exception as e:
+        return None, str(e)
+
+
+def _btc_is_testnet_address(address: str) -> bool:
+    a = (address or "").strip()
+    if not a:
+        return False
+    al = a.lower()
+    # 常见 testnet 前缀：tb1(bech32), m/n(p2pkh), 2(p2sh)
+    if al.startswith("tb1"):
+        return True
+    if al[0] in ("m", "n", "2"):
+        return True
+    return False
+
+
+def _mempool_base(address: str = "") -> str:
+    allow_testnet = os.getenv("WHALES_BTC_ALLOW_TESTNET", "0").strip() in ("1", "true", "True", "yes", "YES")
+    if _btc_is_testnet_address(address) and allow_testnet:
+        return os.getenv("WHALES_BTC_API_BASE_TESTNET", "https://mempool.space/testnet/api").strip() or "https://mempool.space/testnet/api"
+    return os.getenv("WHALES_BTC_API_BASE", "https://mempool.space/api").strip() or "https://mempool.space/api"
+
+
+def _fetch_btc_address_info(address: str) -> Tuple[dict, str]:
+    addr = (address or "").strip()
+    if not addr:
+        return {}, "missing_address"
+    if _btc_is_testnet_address(addr) and not (os.getenv("WHALES_BTC_ALLOW_TESTNET", "0").strip() in ("1", "true", "True", "yes", "YES")):
+        return {}, "testnet_not_allowed"
+    base = _mempool_base(addr).rstrip("/")
+    addr_q = quote(addr, safe="")
+    try:
+        r = HTTP.get(f"{base}/address/{addr_q}", timeout=(10, 25))
+        if r.status_code != 200:
+            if r.status_code == 400:
+                return {}, "invalid_btc_address"
+            return {}, f"http {r.status_code}"
+        data = r.json()
+        return data if isinstance(data, dict) else {}, "ok"
+    except Exception as e:
+        return {}, str(e)
+
+
+def _fetch_btc_address_txs(address: str, limit: int = 50) -> Tuple[List[dict], str]:
+    addr = (address or "").strip()
+    if not addr:
+        return [], "missing_address"
+    if _btc_is_testnet_address(addr) and not (os.getenv("WHALES_BTC_ALLOW_TESTNET", "0").strip() in ("1", "true", "True", "yes", "YES")):
+        return [], "testnet_not_allowed"
+    base = _mempool_base(addr).rstrip("/")
+    addr_q = quote(addr, safe="")
+    try:
+        r = HTTP.get(f"{base}/address/{addr_q}/txs", timeout=(10, 25))
+        if r.status_code != 200:
+            if r.status_code == 400:
+                return [], "invalid_btc_address"
+            return [], f"http {r.status_code}"
+        data = r.json()
+        if not isinstance(data, list):
+            return [], "invalid_response"
+        return data[: max(1, min(200, int(limit)))], "ok"
+    except Exception as e:
+        return [], str(e)
+
+
+def _btc_tx_value_delta_to_addr(tx: dict, addr: str) -> Tuple[float, float, float]:
+    """返回 (delta_btc, in_btc, out_btc)；delta = in - out。"""
+    a = (addr or "").strip()
+    if not isinstance(tx, dict) or not a:
+        return 0.0, 0.0, 0.0
+
+    vin = tx.get("vin")
+    vout = tx.get("vout")
+    in_sat = 0
+    out_sat = 0
+
+    if isinstance(vout, list):
+        for o in vout:
+            if not isinstance(o, dict):
+                continue
+            if _btc_addr_from_scriptpubkey(o) == a:
+                try:
+                    in_sat += int(o.get("value") or 0)
+                except Exception:
+                    pass
+
+    if isinstance(vin, list):
+        for i in vin:
+            if not isinstance(i, dict):
+                continue
+            prev = i.get("prevout")
+            if isinstance(prev, dict) and _btc_addr_from_scriptpubkey(prev) == a:
+                try:
+                    out_sat += int(prev.get("value") or 0)
+                except Exception:
+                    pass
+
+    in_btc = float(in_sat) / 1e8
+    out_btc = float(out_sat) / 1e8
+    return (in_btc - out_btc), in_btc, out_btc
+
+
+def _eth_tx_value_delta_to_addr(tx: dict, addr: str) -> Tuple[float, float, float]:
+    """返回 (delta_eth, in_eth, out_eth)；仅统计原生 ETH value。"""
+    a = (addr or "").strip().lower()
+    if not isinstance(tx, dict) or not a:
+        return 0.0, 0.0, 0.0
+    try:
+        frm = str(tx.get("from") or "").strip().lower()
+        to = str(tx.get("to") or "").strip().lower()
+        val = tx.get("value")
+        wei = int(val) if val is not None and str(val).isdigit() else 0
+    except Exception:
+        frm, to, wei = "", "", 0
+    eth = float(wei) / 1e18
+    in_eth = eth if to == a else 0.0
+    out_eth = eth if frm == a else 0.0
+    return (in_eth - out_eth), in_eth, out_eth
+
+
+def _build_addr_series_24h(now: int) -> Dict[int, dict]:
+    buckets: Dict[int, dict] = {}
+    for k in range(24):
+        ts0 = now - (23 - k) * 3600
+        hour = int(ts0 // 3600) * 3600
+        buckets[hour] = {"ts": hour, "in_usd": 0.0, "out_usd": 0.0, "net_usd": 0.0, "count": 0}
+    return buckets
+
+
+def api_whales_address_detail(
+    chain: str,
+    address: str,
+    min_usd: float = 1_000_000,
+    limit: int = 50,
+) -> JSONResponse:
+    try:
+        limit_i = max(10, min(200, int(limit)))
+    except Exception:
+        limit_i = 50
+    try:
+        min_usd_f = float(min_usd)
+    except Exception:
+        min_usd_f = 1_000_000.0
+    min_usd_f = max(10_000.0, min(200_000_000.0, min_usd_f))
+
+    chain_u = _whale_chain_norm(chain)
+    addr = (address or "").strip()
+    if not addr:
+        return JSONResponse({"ok": False, "error": "missing address"}, status_code=400)
+
+    now = int(time.time())
+    buckets = _build_addr_series_24h(now)
+    big_moves: List[dict] = []
+    recent: List[dict] = []
+
+    if chain_u == "BTC":
+        px = _get_gate_spot_last_usdt("BTC")
+        if px is None:
+            return JSONResponse({"ok": False, "error": "price_unavailable"}, status_code=502)
+        info, st_info = _fetch_btc_address_info(addr)
+        txs, st_txs = _fetch_btc_address_txs(addr, limit=limit_i)
+        if not txs:
+            return JSONResponse({"ok": False, "error": f"mempool_failed:{st_txs}"}, status_code=502)
+
+        # 当前余额（BTC）
+        bal_btc = None
+        try:
+            cs = info.get("chain_stats") if isinstance(info, dict) else None
+            if isinstance(cs, dict):
+                funded = int(cs.get("funded_txo_sum") or 0)
+                spent = int(cs.get("spent_txo_sum") or 0)
+                bal_btc = float(funded - spent) / 1e8
+        except Exception:
+            bal_btc = None
+
+        for tx in txs:
+            ts = 0
+            try:
+                status = tx.get("status") if isinstance(tx, dict) else None
+                ts = int(status.get("block_time") or 0) if isinstance(status, dict) else 0
+            except Exception:
+                ts = 0
+            delta_btc, in_btc, out_btc = _btc_tx_value_delta_to_addr(tx, addr)
+            usd_abs = abs(delta_btc) * float(px)
+            hour = int(ts // 3600) * 3600 if ts > 0 else None
+            if hour is not None and hour in buckets:
+                if delta_btc >= 0:
+                    buckets[hour]["in_usd"] += float(in_btc) * float(px)
+                else:
+                    buckets[hour]["out_usd"] += float(out_btc) * float(px)
+                buckets[hour]["count"] += 1
+
+            txid = str(tx.get("txid") or "").strip() if isinstance(tx, dict) else ""
+            recent.append(
+                {
+                    "ts": ts,
+                    "tx_hash": txid,
+                    "explorer_url": f"https://mempool.space/tx/{txid}" if txid else "",
+                    "delta": round(delta_btc, 8),
+                    "delta_usd": round(float(delta_btc) * float(px), 2),
+                    "in": round(in_btc, 8),
+                    "out": round(out_btc, 8),
+                    "asset": "BTC",
+                }
+            )
+            if usd_abs >= float(min_usd_f):
+                big_moves.append(recent[-1])
+
+        for h in buckets:
+            buckets[h]["net_usd"] = float(buckets[h]["in_usd"]) - float(buckets[h]["out_usd"])
+
+        payload = {
+            "ok": True,
+            "chain": chain_u,
+            "address": addr,
+            "generated_at": int(time.time()),
+            "source": "mempool",
+            "source_status": f"info:{st_info};txs:{st_txs}",
+            "price_usd": float(px),
+            "holdings": {
+                "asset": "BTC",
+                "balance": bal_btc,
+                "balance_usd": round(float(bal_btc) * float(px), 2) if bal_btc is not None else None,
+            },
+            "series_24h": [
+                {
+                    "ts": int(b["ts"]),
+                    "inflow_usd": round(float(b["in_usd"]), 2),
+                    "outflow_usd": round(float(b["out_usd"]), 2),
+                    "netflow_usd": round(float(b["net_usd"]), 2),
+                    "tx_count": int(b["count"]),
+                }
+                for b in [buckets[k] for k in sorted(buckets.keys())]
+            ],
+            "recent_txs": recent[:limit_i],
+            "big_moves": big_moves[:limit_i],
+        }
+        return JSONResponse(payload)
+
+    if chain_u == "ETH":
+        px = _get_gate_spot_last_usdt("ETH")
+        if px is None:
+            return JSONResponse({"ok": False, "error": "price_unavailable"}, status_code=502)
+
+        bal_eth, st_bal = _fetch_eth_balance_native(addr)
+        txs, st_txs = _fetch_eth_blockscout_txs(addr, limit=limit_i)
+        # txlist 失败也不直接报错：至少返回余额 + 降级提示
+
+        if txs:
+            for tx in txs:
+                try:
+                    ts = int(tx.get("timeStamp") or 0)
+                except Exception:
+                    ts = 0
+                delta_eth, in_eth, out_eth = _eth_tx_value_delta_to_addr(tx, addr)
+                usd_abs = abs(delta_eth) * float(px)
+                hour = int(ts // 3600) * 3600 if ts > 0 else None
+                if hour is not None and hour in buckets:
+                    if delta_eth >= 0:
+                        buckets[hour]["in_usd"] += float(in_eth) * float(px)
+                    else:
+                        buckets[hour]["out_usd"] += float(out_eth) * float(px)
+                    buckets[hour]["count"] += 1
+
+                txh = str(tx.get("hash") or "").strip()
+                recent.append(
+                    {
+                        "ts": ts,
+                        "tx_hash": txh,
+                        "explorer_url": f"https://etherscan.io/tx/{txh}" if txh else "",
+                        "delta": round(delta_eth, 6),
+                        "delta_usd": round(float(delta_eth) * float(px), 2),
+                        "in": round(in_eth, 6),
+                        "out": round(out_eth, 6),
+                        "asset": "ETH",
+                        "from": str(tx.get("from") or ""),
+                        "to": str(tx.get("to") or ""),
+                    }
+                )
+                if usd_abs >= float(min_usd_f):
+                    big_moves.append(recent[-1])
+
+        for h in buckets:
+            buckets[h]["net_usd"] = float(buckets[h]["in_usd"]) - float(buckets[h]["out_usd"])
+
+        payload = {
+            "ok": True,
+            "chain": chain_u,
+            "address": addr,
+            "generated_at": int(time.time()),
+            "source": "eth_rpc+blockscout",
+            "source_status": f"balance:{st_bal};txs:{st_txs}",
+            "price_usd": float(px),
+            "holdings": {
+                "asset": "ETH",
+                "balance": bal_eth,
+                "balance_usd": round(float(bal_eth) * float(px), 2) if bal_eth is not None else None,
+            },
+            "series_24h": [
+                {
+                    "ts": int(b["ts"]),
+                    "inflow_usd": round(float(b["in_usd"]), 2),
+                    "outflow_usd": round(float(b["out_usd"]), 2),
+                    "netflow_usd": round(float(b["net_usd"]), 2),
+                    "tx_count": int(b["count"]),
+                }
+                for b in [buckets[k] for k in sorted(buckets.keys())]
+            ],
+            "recent_txs": recent[:limit_i],
+            "big_moves": big_moves[:limit_i],
+            "note": "ETH 交易列表来自 Blockscout（免费公共索引）；若失败将只展示余额。",
+        }
+        return JSONResponse(payload)
+
+    return JSONResponse({"ok": False, "error": f"unsupported_chain:{chain_u}"}, status_code=400)
+
+
+def _btc_addr_from_scriptpubkey(vout: dict) -> str:
+    if not isinstance(vout, dict):
+        return ""
+    spk = vout.get("scriptpubkey")
+    if isinstance(spk, str) and spk:
+        # 某些接口直接给 scriptpubkey_address；此处兼容不同字段
+        pass
+    addr = vout.get("scriptpubkey_address")
+    if isinstance(addr, str) and addr:
+        return addr
+    addrs = vout.get("scriptpubkey_addresses")
+    if isinstance(addrs, list) and addrs:
+        a0 = addrs[0]
+        return str(a0) if a0 else ""
+    return ""
+
+
+def _fetch_btc_mempool_transfers(min_usd: float, limit: int) -> Tuple[List[dict], str]:
+    px = _get_gate_spot_last_usdt("BTC")
+    if px is None:
+        return [], "price_unavailable"
+
+    base = _mempool_base("").rstrip("/")
+    want = max(1, min(400, int(limit)))
+    ex_map = _whale_exchange_addr_map("BTC")
+    try:
+        blocks = HTTP.get(f"{base}/blocks", timeout=(8, 15)).json()
+        if not isinstance(blocks, list) or not blocks:
+            return [], "no_blocks"
+
+        max_blocks = int(os.getenv("WHALES_BTC_SCAN_BLOCKS", "20") or "20")
+        max_blocks = max(5, min(80, max_blocks))
+        items: List[dict] = []
+        for b in blocks[:max_blocks]:
+            if not isinstance(b, dict):
+                continue
+            blk_id = b.get("id")
+            ts = int(b.get("timestamp") or 0)
+            if not blk_id:
+                continue
+
+            # 每个 block 先扫前 50 笔（2 页）；够用了
+            for start in (0, 25):
+                txs = HTTP.get(f"{base}/block/{blk_id}/txs/{start}", timeout=(10, 25)).json()
+                if not isinstance(txs, list) or not txs:
+                    continue
+                for tx in txs:
+                    if not isinstance(tx, dict):
+                        continue
+                    txid = str(tx.get("txid") or "").strip()
+                    vout = tx.get("vout")
+                    vin = tx.get("vin")
+                    if not txid or not isinstance(vout, list):
+                        continue
+
+                    # 取最大的单输出作为“转入地址/金额”的近似（whale 监控够用）
+                    max_v = 0
+                    max_o: Optional[dict] = None
+                    for o in vout:
+                        if not isinstance(o, dict):
+                            continue
+                        try:
+                            vv = int(o.get("value") or 0)
+                        except Exception:
+                            vv = 0
+                        if vv > max_v:
+                            max_v = vv
+                            max_o = o
+                    if max_v <= 0 or max_o is None:
+                        continue
+
+                    btc = float(max_v) / 1e8
+                    usd = btc * float(px)
+                    if usd < float(min_usd):
+                        continue
+
+                    to_addr = _btc_addr_from_scriptpubkey(max_o)
+                    from_addr = ""
+                    if isinstance(vin, list) and vin:
+                        prev = vin[0].get("prevout") if isinstance(vin[0], dict) else None
+                        if isinstance(prev, dict):
+                            from_addr = _btc_addr_from_scriptpubkey(prev)
+
+                    tags = {"fromLabel": "", "toLabel": "", "exchange": ""}
+                    direction = "wallet"
+                    try:
+                        f0 = (from_addr or "").strip().lower()
+                        t0 = (to_addr or "").strip().lower()
+                        ex_from = ex_map.get(f0) if f0 else ""
+                        ex_to = ex_map.get(t0) if t0 else ""
+                        if ex_from:
+                            tags["fromLabel"] = ex_from
+                            tags["exchange"] = ex_from
+                        if ex_to:
+                            tags["toLabel"] = ex_to
+                            tags["exchange"] = ex_to or tags.get("exchange") or ""
+                        if ex_to and not ex_from:
+                            direction = "to_exchange"
+                        elif ex_from and not ex_to:
+                            direction = "from_exchange"
+                    except Exception:
+                        pass
+
+                    items.append(
+                        {
+                            "id": f"BTC:{txid}",
+                            "ts": ts if ts > 0 else int(time.time()),
+                            "chain": "BTC",
+                            "asset": "BTC",
+                            "amount": round(btc, 8),
+                            "amount_usd": round(float(usd), 2),
+                            "from": from_addr,
+                            "to": to_addr,
+                            "direction": direction,
+                            "tags": tags,
+                            "tx_hash": txid,
+                            "explorer_url": f"https://mempool.space/tx/{txid}",
+                            "source": "mempool",
+                        }
+                    )
+                    if len(items) >= want:
+                        break
+                if len(items) >= want:
+                    break
+            if len(items) >= want:
+                break
+
+        items.sort(key=lambda x: int(x.get("ts") or 0), reverse=True)
+        return items[:want], "ok"
+    except Exception as e:
+        return [], str(e)
+
+
+def _whales_settings() -> dict:
+    s = _settings_get("whales_settings", default={})
+    return s if isinstance(s, dict) else {}
+
+
+def _whale_watchlist_get(chain: Optional[str] = None) -> List[dict]:
+    conn = _db_connect()
+    try:
+        if chain:
+            cu = _whale_chain_norm(chain)
+            rows = conn.execute(
+                "SELECT id, created_at, chain, address, label, tags FROM whale_watchlist WHERE chain=? ORDER BY id DESC",
+                (cu,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, created_at, chain, address, label, tags FROM whale_watchlist ORDER BY id DESC"
+            ).fetchall()
+        items: List[dict] = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["tags"] = json.loads(d.get("tags") or "{}")
+            except Exception:
+                d["tags"] = {}
+            items.append(d)
+        return items
+    finally:
+        conn.close()
+
+
+def _whale_exchange_addr_map(chain: str) -> Dict[str, str]:
+    """从 Watchlist 推导交易所地址标签映射：addr_lower -> exchange_name。
+
+    说明：不依赖外部付费标签库；仅对 Watchlist 中你手动标注的交易所地址生效。
+    - 优先使用 tags.exchange (string)
+    - 否则从 label 中做简单关键字识别
+    """
+    cu = _whale_chain_norm(chain)
+    ck = f"whales:ex_addr_map:{cu}"
+    cached = _cache_get(ck, ttl=20)
+    if isinstance(cached, dict):
+        try:
+            return {str(k): str(v) for k, v in cached.items() if k and v}
+        except Exception:
+            pass
+
+    kw_map = {
+        "binance": "Binance",
+        "okx": "OKX",
+        "coinbase": "Coinbase",
+        "kraken": "Kraken",
+        "huobi": "Huobi",
+        "bybit": "Bybit",
+        "gate": "Gate",
+        "kucoin": "KuCoin",
+        "bitfinex": "Bitfinex",
+        "bitstamp": "Bitstamp",
+    }
+
+    out: Dict[str, str] = {}
+    try:
+        items = _whale_watchlist_get(cu)
+    except Exception:
+        items = []
+
+    for it in items:
+        try:
+            addr = _whale_addr_norm(str(it.get("address") or ""))
+        except Exception:
+            addr = ""
+        if not addr:
+            continue
+        tg = it.get("tags") if isinstance(it, dict) else None
+        exchange = ""
+        if isinstance(tg, dict):
+            exv = tg.get("exchange")
+            exchange = (str(exv).strip() if exv is not None else "")
+
+        if not exchange:
+            lb = (str(it.get("label") or "")).strip().lower()
+            for k, name in kw_map.items():
+                if k in lb:
+                    exchange = name
+                    break
+
+        if exchange:
+            out[addr.lower()] = exchange
+
+    _cache_set(ck, out)
+    return out
+
+
+def _whale_watchlist_upsert(chain: str, address: str, label: str = "", tags: Optional[dict] = None) -> dict:
+    cu = _whale_chain_norm(chain)
+    addr = _whale_addr_norm(address)
+    if not addr:
+        raise ValueError("missing address")
+    tg = tags if isinstance(tags, dict) else {}
+    conn = _db_connect()
+    try:
+        now = int(time.time())
+        conn.execute(
+            """
+            INSERT INTO whale_watchlist(created_at, chain, address, label, tags)
+            VALUES(?,?,?,?,?)
+            ON CONFLICT(chain, address) DO UPDATE SET
+              label=excluded.label,
+              tags=excluded.tags
+            """,
+            (now, cu, addr, (label or "").strip(), json.dumps(tg, ensure_ascii=False)),
+        )
+        conn.commit()
+        r = conn.execute(
+            "SELECT id, created_at, chain, address, label, tags FROM whale_watchlist WHERE chain=? AND address=? LIMIT 1",
+            (cu, addr),
+        ).fetchone()
+        out = dict(r) if r else {"chain": cu, "address": addr, "label": label, "tags": tg}
+        try:
+            out["tags"] = json.loads(out.get("tags") or "{}")
+        except Exception:
+            out["tags"] = {}
+        return out
+    finally:
+        conn.close()
+
+
+def _whale_watchlist_delete(item_id: int) -> bool:
+    conn = _db_connect()
+    try:
+        conn.execute("DELETE FROM whale_watchlist WHERE id=?", (int(item_id),))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def _whale_rules_list() -> List[dict]:
+    conn = _db_connect()
+    try:
+        rows = conn.execute(
+            "SELECT id, created_at, enabled, name, chain, min_usd, direction, watchlist_only FROM whale_alert_rules ORDER BY id DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def _whale_rule_create(payload: dict) -> dict:
+    name = (payload.get("name") or "").strip() if isinstance(payload, dict) else ""
+    chain = _whale_chain_norm(payload.get("chain") if isinstance(payload, dict) else "ETH")
+    direction = _whale_direction_norm(payload.get("direction") if isinstance(payload, dict) else "all")
+    try:
+        min_usd = float(payload.get("min_usd") if isinstance(payload, dict) else 1_000_000)
+    except Exception:
+        min_usd = 1_000_000.0
+    min_usd = max(10_000.0, min(1_000_000_000.0, float(min_usd)))
+    enabled = 1 if bool(payload.get("enabled", True)) else 0
+    watchlist_only = 1 if bool(payload.get("watchlist_only", False)) else 0
+    now = int(time.time())
+
+    conn = _db_connect()
+    try:
+        conn.execute(
+            """
+            INSERT INTO whale_alert_rules(created_at, enabled, name, chain, min_usd, direction, watchlist_only)
+            VALUES(?,?,?,?,?,?,?)
+            """,
+            (now, enabled, name, chain, float(min_usd), direction, watchlist_only),
+        )
+        conn.commit()
+        r = conn.execute(
+            "SELECT id, created_at, enabled, name, chain, min_usd, direction, watchlist_only FROM whale_alert_rules ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return dict(r) if r else {}
+    finally:
+        conn.close()
+
+
+def _whale_rule_delete(rule_id: int) -> bool:
+    conn = _db_connect()
+    try:
+        conn.execute("DELETE FROM whale_alert_rules WHERE id=?", (int(rule_id),))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def _whale_alert_history(limit: int = 200) -> List[dict]:
+    limit = max(1, min(1000, int(limit)))
+    conn = _db_connect()
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, created_at, uniq, rule_id, chain, direction, amount_usd, asset, from_addr, to_addr, tx_hash, explorer_url, message, ok, error
+            FROM whale_alert_history
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def _whale_alert_history_add(
+    uniq: str,
+    rule_id: int,
+    chain: str,
+    direction: str,
+    amount_usd: float,
+    asset: str,
+    from_addr: str,
+    to_addr: str,
+    tx_hash: str,
+    explorer_url: str,
+    message: str,
+    ok: bool,
+    error: str,
+) -> None:
+    conn = _db_connect()
+    try:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO whale_alert_history(
+              created_at, uniq, rule_id, chain, direction, amount_usd, asset, from_addr, to_addr, tx_hash, explorer_url, message, ok, error
+            )
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                int(time.time()),
+                uniq,
+                int(rule_id),
+                _whale_chain_norm(chain),
+                (direction or "").strip(),
+                float(amount_usd or 0),
+                (asset or "").strip(),
+                _whale_addr_norm(from_addr),
+                _whale_addr_norm(to_addr),
+                (tx_hash or "").strip(),
+                (explorer_url or "").strip(),
+                (message or ""),
+                1 if ok else 0,
+                (error or ""),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _whale_alert_has_uniq(uniq: str) -> bool:
+    conn = _db_connect()
+    try:
+        r = conn.execute("SELECT 1 FROM whale_alert_history WHERE uniq=? LIMIT 1", (uniq,)).fetchone()
+        return bool(r)
+    finally:
+        conn.close()
+
+
+def _whale_make_msg(rule: dict, tx: dict) -> str:
+    now_ts = int(time.time())
+    ts_txt = datetime.datetime.fromtimestamp(now_ts).strftime("%Y-%m-%d %H:%M")
+    name = (rule.get("name") if isinstance(rule, dict) else "") or "鲸鱼告警"
+    chain = tx.get("chain") or "—"
+    asset = tx.get("asset") or "—"
+    direction = tx.get("direction") or "unknown"
+    usd = tx.get("amount_usd")
+    try:
+        usd_f = float(usd) if usd is not None else 0.0
+    except Exception:
+        usd_f = 0.0
+    usd_txt = f"${usd_f:,.0f}"
+    from_addr = (tx.get("from") or "—")
+    to_addr = (tx.get("to") or "—")
+    link = (tx.get("explorer_url") or "").strip()
+
+    dir_cn = {
+        "to_exchange": "转入交易所",
+        "from_exchange": "转出交易所",
+        "wallet": "钱包间",
+        "unknown": "未知",
+    }.get(str(direction), str(direction))
+
+    header = f"<b>【鲸鱼动向】{name}</b>\n时间：{ts_txt}"
+    lines = [
+        header,
+        f"链：{chain}｜资产：{asset}｜方向：{dir_cn}",
+        f"金额：{usd_txt}",
+        f"From：{from_addr}",
+        f"To：{to_addr}",
+    ]
+    if link:
+        lines.append(f"Tx：{link}")
+    return "\n".join(lines)
+
+
+def _fetch_whale_alert_transfers(chain: str, min_usd: float, limit: int) -> Tuple[List[dict], str]:
+    if not WHALE_ALERT_ENABLED or not WHALE_ALERT_API_KEY:
+        return [], "disabled"
+
+    chain_u = _whale_chain_norm(chain)
+    currency = {"ETH": "eth", "BTC": "btc", "SOL": "sol"}.get(chain_u, "eth")
+    url = "https://api.whale-alert.io/v1/transactions"
+    try:
+        params = {
+            "api_key": WHALE_ALERT_API_KEY,
+            "currency": currency,
+            "min_value": max(1.0, float(min_usd) / 1_000_000.0),
+            "limit": max(1, min(100, int(limit))),
+        }
+        r = HTTP.get(url, params=params, timeout=(10, 20))
+        if r.status_code != 200:
+            return [], f"http {r.status_code}"
+        data = {}
+        try:
+            data = r.json()
+        except Exception:
+            data = {}
+        txs = data.get("transactions") if isinstance(data, dict) else None
+        if not isinstance(txs, list):
+            return [], "invalid response"
+
+        items: List[dict] = []
+        for t in txs:
+            if not isinstance(t, dict):
+                continue
+            ts = t.get("timestamp") or t.get("time") or t.get("created_at")
+            try:
+                ts_i = int(ts)
+            except Exception:
+                ts_i = int(time.time())
+            amount_usd = t.get("amount_usd")
+            if amount_usd is None:
+                amount_usd = t.get("amount_usd_value")
+            try:
+                usd_f = float(amount_usd) if amount_usd is not None else None
+            except Exception:
+                usd_f = None
+            if usd_f is None or usd_f < float(min_usd):
+                continue
+
+            sym = (t.get("symbol") or t.get("transaction_type") or "").strip()
+            asset = (t.get("symbol") or t.get("currency") or chain_u).upper()
+
+            from_addr = ""
+            to_addr = ""
+            tags = {"fromLabel": "", "toLabel": "", "exchange": ""}
+            try:
+                f = t.get("from") if isinstance(t.get("from"), dict) else {}
+                to = t.get("to") if isinstance(t.get("to"), dict) else {}
+                from_addr = (f.get("address") or "")
+                to_addr = (to.get("address") or "")
+                if f.get("owner"):
+                    tags["fromLabel"] = str(f.get("owner"))
+                if to.get("owner"):
+                    tags["toLabel"] = str(to.get("owner"))
+                if f.get("owner_type") == "exchange":
+                    tags["exchange"] = tags["fromLabel"] or "exchange"
+                if to.get("owner_type") == "exchange":
+                    tags["exchange"] = tags["toLabel"] or "exchange"
+            except Exception:
+                pass
+
+            direction = "unknown"
+            if tags.get("exchange"):
+                if tags.get("toLabel") and (tags.get("toLabel") == tags.get("exchange")):
+                    direction = "to_exchange"
+                elif tags.get("fromLabel") and (tags.get("fromLabel") == tags.get("exchange")):
+                    direction = "from_exchange"
+
+            tx_hash = (t.get("hash") or t.get("tx_hash") or "").strip()
+            explorer = ""
+            if tx_hash:
+                if chain_u == "ETH":
+                    explorer = f"https://etherscan.io/tx/{tx_hash}"
+                elif chain_u == "SOL":
+                    explorer = f"https://solscan.io/tx/{tx_hash}"
+                else:
+                    explorer = f"https://mempool.space/tx/{tx_hash}"
+
+            items.append(
+                {
+                    "id": f"{chain_u}:{tx_hash or (str(ts_i)+':'+str(len(items)))}",
+                    "ts": ts_i,
+                    "chain": chain_u,
+                    "asset": asset,
+                    "amount": t.get("amount") if t.get("amount") is not None else None,
+                    "amount_usd": round(float(usd_f), 2),
+                    "from": from_addr,
+                    "to": to_addr,
+                    "direction": direction,
+                    "tags": tags,
+                    "tx_hash": tx_hash,
+                    "explorer_url": explorer,
+                    "source": "whale_alert",
+                    "raw_type": sym,
+                }
+            )
+
+        items.sort(key=lambda x: int(x.get("ts") or 0), reverse=True)
+        return items[:limit], "ok"
+    except Exception as e:
+        return [], str(e)
+
+
+def _get_whale_transfers_auto(chain: str, min_usd: float, limit: int, offset: int) -> Tuple[List[dict], str, str]:
+    chain_u = _whale_chain_norm(chain)
+    if WHALE_ALERT_ENABLED and WHALE_ALERT_API_KEY:
+        items, st = _fetch_whale_alert_transfers(chain_u, min_usd=min_usd, limit=limit + offset)
+        if items:
+            return items[offset : offset + limit], "whale_alert", st
+        raise RuntimeError(f"whale_alert_failed:{st}")
+    if chain_u == "ETH":
+        items, st = _fetch_eth_rpc_transfers(min_usd=min_usd, limit=limit + offset)
+        if items:
+            return items[offset : offset + limit], "eth_rpc", st
+        # 降级：Blockscout 最近交易
+        items2, st2 = _fetch_eth_blockscout_transfers(min_usd=min_usd, limit=limit + offset)
+        if not items2:
+            raise RuntimeError(f"eth_rpc_failed:{st};blockscout_failed:{st2}")
+        return items2[offset : offset + limit], "blockscout_recent", st2
+    if chain_u == "BTC":
+        items, st = _fetch_btc_mempool_transfers(min_usd=min_usd, limit=limit + offset)
+        if not items:
+            raise RuntimeError(f"mempool_failed:{st}")
+        return items[offset : offset + limit], "mempool", st
+    raise RuntimeError(f"unsupported_chain:{chain_u}")
+
+
+def _whales_alert_loop() -> None:
+    interval = max(10, min(3600, int(WHALES_ALERT_INTERVAL_SEC)))
+    first = True
+    while True:
+        if first:
+            time.sleep(interval)
+            first = False
+        try:
+            s = _news_settings()
+            bot_token = (s.get("tg_bot_token") or "").strip()
+            chat_id = (s.get("tg_chat_id") or "").strip()
+            enabled_all = _setting_bool(s, "push_enabled", True)
+            enabled_mod = _setting_bool(s, "push_whales_enabled", True)
+            if not (WHALES_ALERT_LOOP_ENABLED and enabled_all and enabled_mod and bot_token and chat_id):
+                time.sleep(interval)
+                continue
+
+            rules = [r for r in _whale_rules_list() if int(r.get("enabled") or 0) == 1]
+            if not rules:
+                time.sleep(interval)
+                continue
+
+            watch = _whale_watchlist_get()
+            watch_set = set((str(x.get("chain") or "").upper(), _whale_addr_norm(str(x.get("address") or ""))) for x in watch)
+
+            for rule in rules:
+                try:
+                    chain = _whale_chain_norm(rule.get("chain") or "ETH")
+                    direction = _whale_direction_norm(rule.get("direction") or "all")
+                    min_usd = float(rule.get("min_usd") or 1_000_000.0)
+                    watch_only = bool(int(rule.get("watchlist_only") or 0))
+                    items, src, src_status = _get_whale_transfers_auto(chain, min_usd=min_usd, limit=100, offset=0)
+                    for tx in items:
+                        try:
+                            tx_dir = str(tx.get("direction") or "unknown")
+                            if direction != "all" and tx_dir != direction:
+                                continue
+                            from_a = _whale_addr_norm(str(tx.get("from") or ""))
+                            to_a = _whale_addr_norm(str(tx.get("to") or ""))
+                            if watch_only:
+                                if (chain, from_a) not in watch_set and (chain, to_a) not in watch_set:
+                                    continue
+
+                            tx_hash = str(tx.get("tx_hash") or "").strip()
+                            ts = int(tx.get("ts") or 0)
+                            uniq = f"whale:{int(rule.get('id') or 0)}:{chain}:{tx_dir}:{tx_hash or ''}:{ts}:{int(float(tx.get('amount_usd') or 0))}"
+                            if _whale_alert_has_uniq(uniq):
+                                continue
+
+                            msg = _whale_make_msg(rule, tx)
+                            ok, err = _tg_send(bot_token=bot_token, chat_id=chat_id, text=msg, parse_mode="HTML")
+                            if not ok:
+                                err = (err or "send failed") + f" | src={src}:{src_status}"
+                            _whale_alert_history_add(
+                                uniq=uniq,
+                                rule_id=int(rule.get("id") or 0),
+                                chain=chain,
+                                direction=tx_dir,
+                                amount_usd=float(tx.get("amount_usd") or 0),
+                                asset=str(tx.get("asset") or ""),
+                                from_addr=str(tx.get("from") or ""),
+                                to_addr=str(tx.get("to") or ""),
+                                tx_hash=tx_hash,
+                                explorer_url=str(tx.get("explorer_url") or ""),
+                                message=msg,
+                                ok=ok,
+                                error=err,
+                            )
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        time.sleep(interval)
 
 
 def _master_b_push_history_add(
@@ -3216,6 +5112,11 @@ def classify(price_pct: Optional[float], oi_pct: Optional[float]) -> Optional[st
 
 app = FastAPI(title=APP_TITLE)
 
+app.get("/api/whales/address/detail")(api_whales_address_detail)
+app.get("/api/exchange/spot/large_trades")(api_exchange_spot_large_trades)
+app.get("/api/exchange/spot/top_usdt_symbols")(api_exchange_spot_top_usdt_symbols)
+app.post("/api/move3m/push")(api_move3m_push)
+
 
 def _rsi14(closes: List[float]) -> Optional[float]:
     try:
@@ -5126,6 +7027,30 @@ def api_telegram_push_history(limit: int = 100) -> JSONResponse:
             d["module"] = "tri_signal"
             items.append(d)
 
+        # whales alert
+        try:
+            rows4 = conn.execute(
+                """
+                SELECT created_at, uniq,
+                       ('whales_' || UPPER(direction)) AS level,
+                       (chain || ' ' || asset || ' $' || printf('%.0f', COALESCE(amount_usd,0))) AS title,
+                       explorer_url AS link,
+                       message,
+                       ok,
+                       error
+                FROM whale_alert_history
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            for r in rows4:
+                d = dict(r)
+                d["module"] = "whales"
+                items.append(d)
+        except Exception:
+            pass
+
         items.sort(key=lambda x: int(x.get("created_at") or 0), reverse=True)
         items = items[:limit]
         return JSONResponse({"items": items})
@@ -5522,6 +7447,16 @@ def _startup() -> None:
                 _MASTER_B_PUSH_THREAD = t7
                 t7.start()
 
+    try:
+        global _WHALES_ALERT_THREAD
+        if "_WHALES_ALERT_THREAD" not in globals():
+            _WHALES_ALERT_THREAD = None
+        if WHALES_ALERT_LOOP_ENABLED and (_WHALES_ALERT_THREAD is None or not _WHALES_ALERT_THREAD.is_alive()):
+            _WHALES_ALERT_THREAD = threading.Thread(target=_whales_alert_loop, name="whales_alert_loop", daemon=True)
+            _WHALES_ALERT_THREAD.start()
+    except Exception:
+        pass
+
 static_dir = os.path.join(os.path.dirname(__file__), "web")
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
@@ -5537,6 +7472,346 @@ def health() -> dict:
     return {
         "ok": True,
     }
+
+
+@app.get("/api/whales/transfers")
+def whales_transfers(
+    chain: str = "ETH",
+    min_usd: float = 1_000_000,
+    limit: int = 50,
+    offset: int = 0,
+) -> JSONResponse:
+    try:
+        limit = max(10, min(500, int(limit)))
+    except Exception:
+        limit = 50
+    try:
+        offset = max(0, int(offset))
+    except Exception:
+        offset = 0
+    try:
+        min_usd = float(min_usd)
+    except Exception:
+        min_usd = 1_000_000.0
+    min_usd = max(10_000.0, min(50_000_000.0, min_usd))
+
+    chain_u = (chain or "ETH").upper()
+    ck = f"whales:transfers:{chain_u}:{int(min_usd)}:{limit}:{offset}"
+    cached = _cache_get(ck, ttl=10)
+    if cached is not None:
+        return JSONResponse(cached)
+
+    try:
+        # 过滤 from==to 后仍尽量返回足够条数：一次多取一些（最多 500），过滤后再按 offset/limit 切片
+        try:
+            fetch_limit = max(10, min(500, int(limit) + int(offset) + 100))
+        except Exception:
+            fetch_limit = 500
+        items0, src, src_status = _get_whale_transfers_auto(chain_u, min_usd=min_usd, limit=fetch_limit, offset=0)
+
+        def _na(v: Any) -> str:
+            return str(v or "").strip().lower()
+
+        filtered: List[dict] = []
+        for it in (items0 or []):
+            try:
+                f = _na(it.get("from")) if isinstance(it, dict) else ""
+                t = _na(it.get("to")) if isinstance(it, dict) else ""
+                if f and t and f == t:
+                    continue
+            except Exception:
+                pass
+            if isinstance(it, dict):
+                filtered.append(it)
+
+        items = filtered[offset : offset + limit]
+        payload = {
+            "ok": True,
+            "items": items,
+            "chain": chain_u,
+            "min_usd": min_usd,
+            "limit": limit,
+            "offset": offset,
+            "source": src,
+            "source_status": src_status,
+            "generated_at": int(time.time()),
+        }
+        _cache_set(ck, payload)
+        return JSONResponse(payload)
+    except Exception as e:
+        payload = {
+            "ok": False,
+            "items": [],
+            "chain": chain_u,
+            "min_usd": min_usd,
+            "limit": limit,
+            "offset": offset,
+            "source": "real",
+            "source_status": str(e),
+            "generated_at": int(time.time()),
+        }
+        return JSONResponse(payload, status_code=502)
+
+
+@app.get("/api/whales/watchlist")
+def api_whales_watchlist(chain: str = "") -> JSONResponse:
+    try:
+        chain_u = _whale_chain_norm(chain) if chain else ""
+        items = _whale_watchlist_get(chain_u or None)
+        return JSONResponse({"ok": True, "items": items})
+    except Exception as e:
+        return JSONResponse({"ok": False, "items": [], "error": str(e)}, status_code=200)
+
+
+@app.post("/api/whales/watchlist")
+async def api_whales_watchlist_upsert(req: Request) -> JSONResponse:
+    try:
+        payload = await req.json()
+    except Exception:
+        payload = {}
+    try:
+        chain = payload.get("chain") if isinstance(payload, dict) else "ETH"
+        address = payload.get("address") if isinstance(payload, dict) else ""
+        label = payload.get("label") if isinstance(payload, dict) else ""
+        tags = payload.get("tags") if isinstance(payload, dict) else {}
+        out = _whale_watchlist_upsert(chain=str(chain or "ETH"), address=str(address or ""), label=str(label or ""), tags=tags if isinstance(tags, dict) else {})
+        return JSONResponse({"ok": True, "item": out})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
+
+
+@app.delete("/api/whales/watchlist/{item_id}")
+def api_whales_watchlist_delete(item_id: int) -> JSONResponse:
+    try:
+        _whale_watchlist_delete(int(item_id))
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
+
+
+@app.get("/api/whales/rules")
+def api_whales_rules() -> JSONResponse:
+    try:
+        return JSONResponse({"ok": True, "items": _whale_rules_list()})
+    except Exception as e:
+        return JSONResponse({"ok": False, "items": [], "error": str(e)}, status_code=200)
+
+
+@app.post("/api/whales/rules")
+async def api_whales_rules_create(req: Request) -> JSONResponse:
+    try:
+        payload = await req.json()
+    except Exception:
+        payload = {}
+    try:
+        it = _whale_rule_create(payload if isinstance(payload, dict) else {})
+        return JSONResponse({"ok": True, "item": it})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
+
+
+@app.delete("/api/whales/rules/{rule_id}")
+def api_whales_rules_delete(rule_id: int) -> JSONResponse:
+    try:
+        _whale_rule_delete(int(rule_id))
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
+
+
+@app.get("/api/whales/alerts")
+def api_whales_alerts(limit: int = 200) -> JSONResponse:
+    try:
+        return JSONResponse({"ok": True, "items": _whale_alert_history(limit=int(limit))})
+    except Exception as e:
+        return JSONResponse({"ok": False, "items": [], "error": str(e)}, status_code=200)
+
+
+@app.get("/api/whales/push_now")
+def api_whales_push_now(force: int = 0) -> JSONResponse:
+    """手动触发一次鲸鱼告警检测并推送（不会启动新线程）。"""
+    try:
+        s = _news_settings()
+        bot_token = (s.get("tg_bot_token") or "").strip()
+        chat_id = (s.get("tg_chat_id") or "").strip()
+        enabled_all = _setting_bool(s, "push_enabled", True)
+        enabled_mod = _setting_bool(s, "push_whales_enabled", True)
+        if not (enabled_all and enabled_mod):
+            return JSONResponse({"ok": True, "pushed": 0, "skipped": 0, "errors": ["disabled_by_settings"]})
+        if not bot_token or not chat_id:
+            return JSONResponse({"ok": False, "pushed": 0, "skipped": 0, "errors": ["未配置 Telegram Bot Token 或 Chat ID"]})
+
+        rules = [r for r in _whale_rules_list() if int(r.get("enabled") or 0) == 1]
+        if not rules:
+            return JSONResponse({"ok": True, "pushed": 0, "skipped": 0, "errors": ["no_rules"]})
+
+        watch = _whale_watchlist_get()
+        watch_set = set((str(x.get("chain") or "").upper(), _whale_addr_norm(str(x.get("address") or ""))) for x in watch)
+
+        pushed = 0
+        skipped = 0
+        errors: List[str] = []
+
+        for rule in rules:
+            try:
+                chain = _whale_chain_norm(rule.get("chain") or "ETH")
+                direction = _whale_direction_norm(rule.get("direction") or "all")
+                min_usd = float(rule.get("min_usd") or 1_000_000.0)
+                watch_only = bool(int(rule.get("watchlist_only") or 0))
+                items, src, src_status = _get_whale_transfers_auto(chain, min_usd=min_usd, limit=100, offset=0)
+                for tx in items:
+                    try:
+                        tx_dir = str(tx.get("direction") or "unknown")
+                        if direction != "all" and tx_dir != direction:
+                            skipped += 1
+                            continue
+                        from_a = _whale_addr_norm(str(tx.get("from") or ""))
+                        to_a = _whale_addr_norm(str(tx.get("to") or ""))
+                        if watch_only:
+                            if (chain, from_a) not in watch_set and (chain, to_a) not in watch_set:
+                                skipped += 1
+                                continue
+
+                        tx_hash = str(tx.get("tx_hash") or "").strip()
+                        ts = int(tx.get("ts") or 0)
+                        uniq = f"whale:{int(rule.get('id') or 0)}:{chain}:{tx_dir}:{tx_hash or ''}:{ts}:{int(float(tx.get('amount_usd') or 0))}"
+                        if (not int(force)) and _whale_alert_has_uniq(uniq):
+                            skipped += 1
+                            continue
+
+                        msg = _whale_make_msg(rule, tx)
+                        ok, err = _tg_send(bot_token=bot_token, chat_id=chat_id, text=msg, parse_mode="HTML")
+                        if not ok:
+                            err = (err or "send failed") + f" | src={src}:{src_status}"
+                            errors.append(err)
+                        _whale_alert_history_add(
+                            uniq=uniq,
+                            rule_id=int(rule.get("id") or 0),
+                            chain=chain,
+                            direction=tx_dir,
+                            amount_usd=float(tx.get("amount_usd") or 0),
+                            asset=str(tx.get("asset") or ""),
+                            from_addr=str(tx.get("from") or ""),
+                            to_addr=str(tx.get("to") or ""),
+                            tx_hash=tx_hash,
+                            explorer_url=str(tx.get("explorer_url") or ""),
+                            message=msg,
+                            ok=ok,
+                            error=err,
+                        )
+                        if ok:
+                            pushed += 1
+                    except Exception:
+                        skipped += 1
+                        continue
+            except Exception as e:
+                errors.append(str(e))
+                continue
+
+        return JSONResponse({"ok": True, "pushed": pushed, "skipped": skipped, "errors": errors[:20]})
+    except Exception as e:
+        return JSONResponse({"ok": False, "pushed": 0, "skipped": 0, "errors": [str(e)]}, status_code=200)
+
+
+@app.get("/api/whales/summary")
+def whales_summary(chain: str = "ETH", min_usd: float = 1_000_000) -> JSONResponse:
+    try:
+        min_usd = float(min_usd)
+    except Exception:
+        min_usd = 1_000_000.0
+    min_usd = max(10_000.0, min(50_000_000.0, min_usd))
+
+    chain_u = (chain or "ETH").upper()
+    ck = f"whales:summary:{chain_u}:{int(min_usd)}"
+    cached = _cache_get(ck, ttl=15)
+    if cached is not None:
+        return JSONResponse(cached)
+
+    now = int(time.time())
+    try:
+        items, src, src_status = _get_whale_transfers_auto(chain_u, min_usd=min_usd, limit=400, offset=0)
+    except Exception as e:
+        payload = {
+            "ok": False,
+            "chain": chain_u,
+            "min_usd": min_usd,
+            "generated_at": int(time.time()),
+            "source": "real",
+            "source_status": str(e),
+            "kpi": {"inflow_usd_m": 0.0, "outflow_usd_m": 0.0, "netflow_usd_m": 0.0, "tx_count": 0},
+            "series_24h": [],
+        }
+        return JSONResponse(payload, status_code=502)
+
+    buckets: Dict[int, dict] = {}
+    for k in range(24):
+        ts0 = now - (23 - k) * 3600
+        hour = int(ts0 // 3600) * 3600
+        buckets[hour] = {"ts": hour, "in": 0.0, "out": 0.0, "count": 0}
+
+    for tx in items:
+        try:
+            ts = int(tx.get("ts") or 0)
+        except Exception:
+            ts = 0
+        if ts <= 0:
+            continue
+        hour = int(ts // 3600) * 3600
+        if hour not in buckets:
+            continue
+        try:
+            usd = float(tx.get("amount_usd") or 0.0)
+        except Exception:
+            usd = 0.0
+        if usd <= 0:
+            continue
+        d = str(tx.get("direction") or "wallet")
+        if d == "to_exchange":
+            buckets[hour]["in"] += usd
+        elif d == "from_exchange":
+            buckets[hour]["out"] += usd
+        buckets[hour]["count"] += 1
+
+    series: List[dict] = []
+    inflow = 0.0
+    outflow = 0.0
+    net = 0.0
+    count = 0
+    for hour in sorted(buckets.keys()):
+        b = buckets[hour]
+        v_in_m = float(b.get("in") or 0.0) / 1e6
+        v_out_m = float(b.get("out") or 0.0) / 1e6
+        v_net_m = v_out_m - v_in_m
+        series.append(
+            {
+                "ts": int(hour),
+                "inflow_usd_m": round(v_in_m, 3),
+                "outflow_usd_m": round(v_out_m, 3),
+                "netflow_usd_m": round(v_net_m, 3),
+            }
+        )
+        inflow += v_in_m
+        outflow += v_out_m
+        net += v_net_m
+        count += int(b.get("count") or 0)
+
+    payload = {
+        "ok": True,
+        "chain": chain_u,
+        "min_usd": min_usd,
+        "generated_at": int(time.time()),
+        "source": src,
+        "source_status": src_status,
+        "kpi": {
+            "inflow_usd_m": round(inflow, 3),
+            "outflow_usd_m": round(outflow, 3),
+            "netflow_usd_m": round(net, 3),
+            "tx_count": int(count),
+        },
+        "series_24h": series,
+    }
+    _cache_set(ck, payload)
+    return JSONResponse(payload)
 
 
 @app.get("/api/summary")
