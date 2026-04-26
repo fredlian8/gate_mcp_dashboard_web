@@ -237,6 +237,29 @@ def _db_init() -> None:
         cur = conn.cursor()
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS move3m_alert_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at INTEGER,
+                exchange TEXT,
+                symbol TEXT,
+                pct_3m REAL,
+                pct_24h REAL,
+                quote_24h REAL,
+                price REAL
+            )
+            """
+        )
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_move3m_alert_log_created ON move3m_alert_log(created_at)")
+        except Exception:
+            pass
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_move3m_alert_log_symbol ON move3m_alert_log(symbol, created_at)")
+        except Exception:
+            pass
+
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS whale_watchlist (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at INTEGER,
@@ -1049,6 +1072,103 @@ def api_move3m_push(payload: Dict[str, Any]) -> JSONResponse:
     if not ok:
         return JSONResponse({"ok": False, "error": err or "send failed"}, status_code=502)
     return JSONResponse({"ok": True})
+
+
+def api_move3m_log_list(limit: int = 100) -> JSONResponse:
+    try:
+        lim = int(limit)
+    except Exception:
+        lim = 100
+    lim = max(1, min(100, lim))
+    conn = _db_connect()
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, created_at, exchange, symbol, pct_3m, pct_24h, quote_24h, price
+            FROM move3m_alert_log
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (lim,),
+        ).fetchall()
+        items: List[Dict[str, Any]] = []
+        for r in rows:
+            try:
+                items.append(
+                    {
+                        "id": int(r["id"]),
+                        "ts": int(r["created_at"] or 0),
+                        "exchange": str(r["exchange"] or ""),
+                        "sym": str(r["symbol"] or ""),
+                        "pct3m": float(r["pct_3m"] or 0.0),
+                        "pct24h": float(r["pct_24h"] or 0.0),
+                        "quote24h": float(r["quote_24h"] or 0.0),
+                        "price": float(r["price"] or 0.0),
+                    }
+                )
+            except Exception:
+                continue
+        return JSONResponse({"ok": True, "items": items, "limit": lim})
+    finally:
+        conn.close()
+
+
+def api_move3m_log_add(payload: Dict[str, Any]) -> JSONResponse:
+    try:
+        ts = int((payload or {}).get("ts") or 0)
+    except Exception:
+        ts = 0
+    if ts <= 0:
+        ts = int(time.time())
+    sym = str((payload or {}).get("sym") or (payload or {}).get("symbol") or "").strip().upper()
+    if not sym:
+        return JSONResponse({"ok": False, "error": "missing sym"}, status_code=400)
+    ex_name = str((payload or {}).get("exchange") or "gate").strip().lower() or "gate"
+    try:
+        pct3m = float((payload or {}).get("pct3m") or (payload or {}).get("pct_3m") or 0.0)
+    except Exception:
+        pct3m = 0.0
+    try:
+        pct24h = float((payload or {}).get("pct24h") or (payload or {}).get("pct_24h") or 0.0)
+    except Exception:
+        pct24h = 0.0
+    try:
+        quote24h = float((payload or {}).get("quote24h") or (payload or {}).get("quote_24h") or 0.0)
+    except Exception:
+        quote24h = 0.0
+    try:
+        price = float((payload or {}).get("price") or 0.0)
+    except Exception:
+        price = 0.0
+
+    conn = _db_connect()
+    try:
+        conn.execute(
+            """
+            INSERT INTO move3m_alert_log(created_at, exchange, symbol, pct_3m, pct_24h, quote_24h, price)
+            VALUES(?, ?, ?, ?, ?, ?, ?)
+            """,
+            (ts, ex_name, sym, pct3m, pct24h, quote24h, price),
+        )
+        conn.commit()
+
+        # 轻量清理：只保留最新 2000 条，避免无限增长
+        try:
+            conn.execute(
+                """
+                DELETE FROM move3m_alert_log
+                WHERE id NOT IN (
+                    SELECT id FROM move3m_alert_log ORDER BY created_at DESC, id DESC LIMIT 2000
+                )
+                """
+            )
+            conn.commit()
+        except Exception:
+            pass
+
+        return JSONResponse({"ok": True})
+    finally:
+        conn.close()
 
 
 def _eth_rpc_call(method: str, params: list) -> dict:
@@ -5116,6 +5236,8 @@ app.get("/api/whales/address/detail")(api_whales_address_detail)
 app.get("/api/exchange/spot/large_trades")(api_exchange_spot_large_trades)
 app.get("/api/exchange/spot/top_usdt_symbols")(api_exchange_spot_top_usdt_symbols)
 app.post("/api/move3m/push")(api_move3m_push)
+app.get("/api/move3m/log")(api_move3m_log_list)
+app.post("/api/move3m/log")(api_move3m_log_add)
 
 
 def _rsi14(closes: List[float]) -> Optional[float]:

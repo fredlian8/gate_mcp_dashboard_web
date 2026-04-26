@@ -229,7 +229,7 @@
             <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
               <div>
                 <h1 class="text-3xl font-extrabold text-blue-300">3分钟异动币种监控器（>10%）</h1>
-                <p class="muted mt-2">数据源：Binance 现货 WebSocket（USDT 交易对）。当最近3分钟涨跌幅超过阈值时触发警报，可选声音/浏览器通知/TG 推送。</p>
+                <p class="muted mt-2">数据源：Gate 现货 WebSocket（USDT 交易对）。当最近3分钟涨跌幅超过阈值时触发警报，可选声音/浏览器通知/TG 推送。</p>
               </div>
               <div class="flex flex-wrap items-end gap-3">
                 <div>
@@ -367,8 +367,8 @@
           <header class="mb-8">
             <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
               <div>
-                <h1 class="text-3xl font-extrabold text-blue-300">虚拟币鲸鱼动向监控（Mock）</h1>
-                <p class="muted mt-2">实时/近实时监控大额转账：转入交易所（潜在卖压）/转出交易所（潜在积累）。当前为 Mock 数据，后续可替换真实链上数据源。</p>
+                <h1 class="text-3xl font-extrabold text-blue-300">虚拟币鲸鱼动向监控</h1>
+                <p class="muted mt-2">实时/近实时监控大额转账：转入交易所（潜在卖压）/转出交易所（潜在积累）。</p>
               </div>
               <div class="flex flex-wrap items-end gap-3">
                 <div>
@@ -441,8 +441,8 @@
                   <div>
                     <label class="muted text-sm">交易所来源</label>
                     <select id="spotLargeExchange" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 mt-2 w-[180px]">
-                      <option value="binance" selected>Binance</option>
-                      <option value="gate">Gate</option>
+                      <option value="binance">Binance</option>
+                      <option value="gate" selected>Gate</option>
                     </select>
                   </div>
                   <div>
@@ -2292,7 +2292,7 @@
     const st = document.getElementById('spotLargeStatus');
     if (st) st.textContent = '更新中…';
     const exSel = document.getElementById('spotLargeExchange');
-    const exchange = exSel ? String(exSel.value || 'binance') : 'binance';
+    const exchange = exSel ? String(exSel.value || 'gate') : 'gate';
     const minUsd = Number(document.getElementById('spotLargeMinUsd').value || 100000);
     const minUsdSafe = isFinite(minUsd) ? Math.max(1000, minUsd) : 100000;
     const topN = Number(document.getElementById('spotLargeTopN').value || 20);
@@ -3612,7 +3612,7 @@
   });
 
   // ==========================
-  // 3分钟异动监控（Binance WS）
+  // 3分钟异动监控（Gate WS）
   // ==========================
   let move3mWS = null;
   let move3mReconnectTimer = null;
@@ -3628,6 +3628,7 @@
   let move3mLogPage = 1;
   let move3mBeepTimer = null;
   let move3mBeepUntilSec = 0;
+  let move3mLogLastSyncMs = 0;
 
   function _beep() {
     try {
@@ -3688,7 +3689,7 @@
       if (infoA) infoA.textContent = `共 ${totalA} 条｜第 ${move3mAlertPage}/${totalPagesA} 页｜每页 ${move3mPageSize} 条`;
       if (!pageAlerts.length) tbA.innerHTML = `<tr><td colspan="6" class="muted py-3">暂无异动</td></tr>`;
       else tbA.innerHTML = pageAlerts.map(x => {
-        const url = `https://www.binance.com/en/trade/${x.sym}?type=spot`;
+        const url = `https://www.gate.io/trade/${x.sym}`;
         return `
           <tr class="${Number(x.pct3m||0) >= 0 ? 'bg-green-900/20' : 'bg-red-900/20'}">
             <td class="py-2 font-semibold"><a class="hover:underline text-blue-200" href="${url}" target="_blank" rel="noreferrer">${x.sym}</a></td>
@@ -3714,7 +3715,7 @@
       if (info) info.textContent = `共 ${total} 条｜第 ${move3mPage}/${totalPages} 页｜每页 ${move3mPageSize} 条`;
       if (!pageItems.length) tb.innerHTML = `<tr><td colspan="6" class="muted py-3">暂无数据</td></tr>`;
       else tb.innerHTML = pageItems.map(x => {
-        const url = `https://www.binance.com/en/trade/${x.sym}?type=spot`;
+        const url = `https://www.gate.io/trade/${x.sym}`;
         return `
           <tr>
             <td class="py-2 font-semibold"><a class="hover:underline text-blue-200" href="${url}" target="_blank" rel="noreferrer">${x.sym}</a></td>
@@ -3741,7 +3742,7 @@
       if (infoL) infoL.textContent = `共 ${totalL} 条｜第 ${move3mLogPage}/${totalPagesL} 页｜每页 ${move3mPageSize} 条`;
       if (!pageLogs.length) tbL.innerHTML = `<tr><td colspan="6" class="muted py-3">暂无记录</td></tr>`;
       else tbL.innerHTML = pageLogs.map(x => {
-        const url = `https://www.binance.com/en/trade/${x.sym}?type=spot`;
+        const url = `https://www.gate.io/trade/${x.sym}`;
         const dt = new Date(Number(x.ts||0) * 1000);
         const tstr = dt.toLocaleString();
         return `
@@ -3767,14 +3768,43 @@
     try {
       const topN = Number(document.getElementById('move3mTopN').value || 400);
       const topNSafe = isFinite(topN) ? Math.max(5, Math.min(1000, topN)) : 400;
-      const payload = await fetchJson(`/api/exchange/spot/top_usdt_symbols?exchange=binance&topn=${encodeURIComponent(topNSafe)}`);
+      const payload = await fetchJson(`/api/exchange/spot/top_usdt_symbols?exchange=gate&topn=${encodeURIComponent(topNSafe)}`);
       const syms = (payload && payload.symbols) ? payload.symbols : [];
-      const arr = Array.isArray(syms) ? syms.map(x => String(x || '').toUpperCase()).filter(Boolean) : [];
+      const arrRaw = Array.isArray(syms) ? syms.map(x => String(x || '').toUpperCase()).filter(Boolean) : [];
+      // 后端返回如 BTCUSDT，这里转成 Gate 的 currency_pair：BTC_USDT
+      const arr = arrRaw.map(s => (s.endsWith('USDT') && !s.includes('_')) ? `${s.slice(0, -4)}_USDT` : s).filter(Boolean);
+      const stt = String((payload && payload.source_status) || '').trim();
       move3mMonitored = new Set(arr);
-      if (st) st.textContent = `已加载 Top${topNSafe}（${arr.length}）`;
+      if (st) st.textContent = `已加载 Top${topNSafe}（${arr.length}）｜gate${stt ? `:${stt}` : ''}`;
     } catch (e) {
       if (st) st.textContent = `加载失败：${String(e)}`;
     }
+  }
+
+  async function refreshMove3mLog() {
+    try {
+      const payload = await fetchJson('/api/move3m/log?limit=100');
+      const items = (payload && payload.items) ? payload.items : [];
+      if (Array.isArray(items)) {
+        // 后端按时间倒序返回，这里转成旧->新，复用现有渲染的 reverse() 逻辑
+        move3mLog = items.slice().reverse();
+      } else {
+        move3mLog = [];
+      }
+      move3mLogLastSyncMs = Date.now();
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  function _appendMove3mLogLocal(entry) {
+    try {
+      move3mLog.push(entry);
+      // 仅保留最新 100 条（按旧->新存储）
+      if (move3mLog.length > 100) {
+        move3mLog = move3mLog.slice(move3mLog.length - 100);
+      }
+    } catch (e) {}
   }
 
   function _move3mSetStatus(msg) {
@@ -3808,7 +3838,25 @@
     const last = move3mAlerts.get(sym) || 0;
     if ((nowSec - last) < 120) return;
     move3mAlerts.set(sym, nowSec);
-    move3mLog.push({ ts: nowSec, sym, pct3m, pct24h, quote24h, price });
+    const entry = { ts: nowSec, sym, pct3m, pct24h, quote24h, price };
+    _appendMove3mLogLocal(entry);
+
+    // 持久化到后端数据库（失败不影响前端显示）
+    try {
+      fetch('/api/move3m/log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ts: nowSec,
+          exchange: 'gate',
+          sym,
+          pct3m,
+          pct24h,
+          quote24h,
+          price,
+        }),
+      }).then(() => {}).catch(() => {});
+    } catch (e) {}
 
     // 声音策略：任一币种触发预警后持续响铃3分钟；期间继续触发则延长
     if (document.getElementById('move3mSound').checked) {
@@ -3841,7 +3889,7 @@
       fetch('/api/move3m/push', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ exchange: 'binance', symbol: sym, pct_3m: pct3m, pct_24h: pct24h, quote_24h: quote24h, price: price }),
+        body: JSON.stringify({ exchange: 'gate', symbol: sym, pct_3m: pct3m, pct_24h: pct24h, quote_24h: quote24h, price: price }),
       }).then(r => r.json()).then(() => {}).catch(() => {});
     }
   }
@@ -3849,45 +3897,46 @@
   function _move3mConnectWS() {
     if (!move3mStarted) return;
     try { if (move3mWS) { move3mWS.close(); move3mWS = null; } } catch(e) {}
-    const url = 'wss://stream.binance.com:9443/ws';
+    const url = 'wss://api.gateio.ws/ws/v4/';
     const ws = new WebSocket(url);
     move3mWS = ws;
     ws.onopen = () => {
       move3mReconnectTry = 0;
       _move3mSetStatus('WS 已连接，订阅中…');
       try {
-        ws.send(JSON.stringify({ method: 'SUBSCRIBE', params: ['!miniTicker@arr'], id: 1 }));
+        const pairs = Array.from(move3mMonitored);
+        // Gate 每次订阅 payload 不宜太大，做分批订阅
+        const chunkSize = 80;
+        for (let i = 0; i < pairs.length; i += chunkSize) {
+          const chunk = pairs.slice(i, i + chunkSize);
+          ws.send(JSON.stringify({
+            time: Math.floor(Date.now() / 1000),
+            channel: 'spot.tickers',
+            event: 'subscribe',
+            payload: chunk,
+          }));
+        }
       } catch(e) {}
     };
     ws.onmessage = (ev) => {
       let msg;
       try { msg = JSON.parse(ev.data); } catch(e) { return; }
 
-      // SUBSCRIBE ACK: {result:null,id:1}
-      if (msg && Object.prototype.hasOwnProperty.call(msg, 'result') && Object.prototype.hasOwnProperty.call(msg, 'id')) {
-        return;
-      }
+      // Gate spot.tickers: {time, channel:'spot.tickers', event:'update', result:{currency_pair,last,quote_volume,change_percentage,...}}
+      if (!msg || msg.channel !== 'spot.tickers') return;
+      if (msg.event !== 'update') return;
+      const r = msg.result;
+      if (!r || typeof r !== 'object') return;
+      const sym = String(r.currency_pair || '').toUpperCase();
+      if (!sym || !sym.endsWith('_USDT')) return;
+      if (!move3mMonitored.has(sym)) return;
 
-      // /ws SUBSCRIBE(!miniTicker@arr) 返回通常是直接数组；combined stream 则是 {stream,data:[...]}
-      let data = null;
-      if (Array.isArray(msg)) data = msg;
-      else if (msg && Array.isArray(msg.data)) data = msg.data;
-      if (!Array.isArray(data)) return;
-
+      const last = Number(r.last || 0);
+      if (!isFinite(last) || last <= 0) return;
+      const qv = Number(r.quote_volume || 0);
+      const pct24h = Number(r.change_percentage || 0);
       const nowSec = Math.floor(Date.now() / 1000);
-      for (const t of data) {
-        if (!t || typeof t !== 'object') continue;
-        const sym = String(t.s || '').toUpperCase();
-        if (!sym.endsWith('USDT')) continue;
-        if (!move3mMonitored.has(sym)) continue;
-
-        const c = Number(t.c || 0);
-        if (!isFinite(c) || c <= 0) continue;
-        const q = Number(t.q || 0);
-        const open = Number(t.o || 0);
-        const pct24h = (isFinite(open) && open > 0) ? ((c - open) / open) * 100 : 0;
-        _move3mOnTick(sym, c, pct24h, q, nowSec);
-      }
+      _move3mOnTick(sym, last, pct24h, qv, nowSec);
 
       // 限制渲染频率
       if (!window.__move3m_last_render || (Date.now() - window.__move3m_last_render) > 800) {
@@ -3920,7 +3969,7 @@
     move3mBeepUntilSec = 0;
     try { if (move3mBeepTimer) { clearInterval(move3mBeepTimer); move3mBeepTimer = null; } } catch(e) {}
     _move3mSetStatus('启动中…');
-    _renderMove3m();
+    refreshMove3mLog().then(() => { _renderMove3m(); }).catch(() => { _renderMove3m(); });
     loadMove3mTopList().then(() => {
       if (!move3mStarted) return;
       if (!move3mMonitored.size) {
