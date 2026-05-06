@@ -21,8 +21,10 @@ try:
     import feedparser  # type: ignore
 except Exception:
     feedparser = None
+import xml.etree.ElementTree as ET
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import Query
 from fastapi.staticfiles import StaticFiles
 
 
@@ -70,6 +72,889 @@ def _load_dotenv_if_present() -> None:
 
 
 _load_dotenv_if_present()
+
+SEC_EDGAR_CACHE_TTL_SEC = int(float(os.getenv("SEC_EDGAR_CACHE_TTL_SEC", "21600") or "21600"))
+SEC_EDGAR_USER_AGENT = (
+    os.getenv(
+        "SEC_EDGAR_USER_AGENT",
+        "gate-mcp-dashboard-web/1.0 (contact: you@example.com)",
+    )
+    or "gate-mcp-dashboard-web/1.0 (contact: you@example.com)"
+).strip()
+
+SMARTMONEY_REFRESH_TOKEN = (os.getenv("SMARTMONEY_REFRESH_TOKEN") or "").strip()
+
+UPSTASH_REDIS_REST_URL = (os.getenv("UPSTASH_REDIS_REST_URL") or "").strip().rstrip("/")
+UPSTASH_REDIS_REST_TOKEN = (os.getenv("UPSTASH_REDIS_REST_TOKEN") or "").strip()
+SMARTMONEY_SNAPSHOT_KEY = (os.getenv("SMARTMONEY_SNAPSHOT_KEY") or "smartmoney:institutions:snapshot:v1").strip()
+SEC_EDGAR_PER_INST_DELAY_SEC = float(os.getenv("SEC_EDGAR_PER_INST_DELAY_SEC", "0.15") or "0.15")
+
+# 真实 13F（SEC EDGAR）机构配置（方案A：只依赖 CIK）
+_SMARTMONEY_INSTITUTIONS_META: Dict[str, Dict[str, Any]] = {
+    "brk": {"id": "brk", "name": "Berkshire Hathaway", "cik": "0001067983"},
+    "blk": {"id": "blk", "name": "BlackRock", "cik": "0002012383"},
+    "vgi": {"id": "vgi", "name": "Vanguard", "cik": "0000102909"},
+}
+
+_SMARTMONEY_SNAPSHOT_LOCK = threading.Lock()
+_SMARTMONEY_SNAPSHOT: Dict[str, Any] = {"ts": 0.0, "items": [], "last_error": ""}
+
+
+def _upstash_cmd(args: List[Any]) -> Any:
+    if not UPSTASH_REDIS_REST_URL or not UPSTASH_REDIS_REST_TOKEN:
+        raise RuntimeError("upstash_not_configured")
+    url = f"{UPSTASH_REDIS_REST_URL}/pipeline"
+    headers = {
+        "Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    # Upstash Redis REST 推荐使用 pipeline：POST /pipeline 发送命令数组，避免 URL 编码与长度限制
+    payload = [[str(x) for x in (args or [])]]
+    r = HTTP.post(url, headers=headers, json=payload, timeout=(10, 30))
+    r.raise_for_status()
+    data = r.json()
+    if isinstance(data, list) and data:
+        return data[0]
+    return data
+
+
+def _upstash_get_snapshot() -> Optional[Dict[str, Any]]:
+    try:
+        resp = _upstash_cmd(["GET", SMARTMONEY_SNAPSHOT_KEY])
+        res = resp.get("result") if isinstance(resp, dict) else None
+        if not res:
+            return None
+        if isinstance(res, str):
+            try:
+                obj = json.loads(res)
+                return obj if isinstance(obj, dict) else None
+            except Exception:
+                return None
+        return None
+    except Exception:
+        return None
+
+
+def _upstash_set_snapshot(obj: Dict[str, Any], ttl_sec: int = 0) -> bool:
+    try:
+        raw = json.dumps(obj, ensure_ascii=False)
+        if ttl_sec and ttl_sec > 0:
+            _upstash_cmd(["SET", SMARTMONEY_SNAPSHOT_KEY, raw, "EX", str(int(ttl_sec))])
+        else:
+            _upstash_cmd(["SET", SMARTMONEY_SNAPSHOT_KEY, raw])
+        return True
+    except Exception:
+        return False
+
+
+def _smartmoney_build_items() -> List[Dict[str, Any]]:
+    items2: List[Dict[str, Any]] = []
+    for inst in _SMARTMONEY_INSTITUTIONS_META.values():
+        name = str(inst.get("name") or "")
+        iid = str(inst.get("id") or "")
+        cik = str(inst.get("cik") or "")
+        aum: Optional[float] = None
+        prev_aum: Optional[float] = None
+        aum_change: Optional[float] = None
+        ch_up = 0
+        ch_dn = 0
+        err = ""
+        cur_acc = ""
+        prev_acc = ""
+        cur_form = ""
+        prev_form = ""
+        cur_report = ""
+        prev_report = ""
+        cur_filing = ""
+        prev_filing = ""
+        try:
+            cur = _sec_get_13f_holdings_by_cik(cik, filing_index=0)
+            prev = _sec_get_13f_holdings_by_cik(cik, filing_index=1)
+            if not (isinstance(cur, dict) and cur.get("ok")):
+                err = str(cur.get("error") or "sec_fetch_failed")
+                cur_q = ""
+                prev_q = ""
+            else:
+                aum = float(cur.get("total_value_usd") or 0.0)
+                cur_q = str(cur.get("period_quarter") or "")
+                prev_q = str(prev.get("period_quarter") or "") if isinstance(prev, dict) and prev.get("ok") else ""
+                prev_aum = float(prev.get("total_value_usd") or 0.0) if isinstance(prev, dict) and prev.get("ok") else None
+
+                cur_acc = str(cur.get("accession") or "")
+                cur_form = str((cur.get("filing") or {}).get("form") or "") if isinstance(cur.get("filing"), dict) else ""
+                cur_report = str(cur.get("report_date") or "")
+                cur_filing = str(cur.get("filing_date") or "")
+                if isinstance(prev, dict) and prev.get("ok"):
+                    prev_acc = str(prev.get("accession") or "")
+                    prev_form = str((prev.get("filing") or {}).get("form") or "") if isinstance(prev.get("filing"), dict) else ""
+                    prev_report = str(prev.get("report_date") or "")
+                    prev_filing = str(prev.get("filing_date") or "")
+
+                if aum is not None and prev_aum is not None:
+                    try:
+                        aum_change = float(aum) - float(prev_aum)
+                    except Exception:
+                        aum_change = None
+
+                hs = cur.get("holdings")
+                hs_prev = prev.get("holdings") if isinstance(prev, dict) and prev.get("ok") else None
+                cur_map: Dict[str, float] = {}
+                prev_map: Dict[str, float] = {}
+                if isinstance(hs, list):
+                    for r in hs:
+                        if isinstance(r, dict) and str(r.get("cusip") or "").strip():
+                            cur_map[str(r.get("cusip") or "").strip()] = float(r.get("value_usd") or 0.0)
+                if isinstance(hs_prev, list):
+                    for r in hs_prev:
+                        if isinstance(r, dict) and str(r.get("cusip") or "").strip():
+                            prev_map[str(r.get("cusip") or "").strip()] = float(r.get("value_usd") or 0.0)
+                for cusip2 in set(cur_map.keys()) | set(prev_map.keys()):
+                    cur_val = float(cur_map.get(cusip2) or 0.0)
+                    prev_val = float(prev_map.get(cusip2) or 0.0)
+                    d = cur_val - prev_val
+                    if d > 0:
+                        ch_up += 1
+                    elif d < 0:
+                        ch_dn += 1
+        except Exception as e:
+            err = _sec_err_str(e)
+            cur_q = ""
+            prev_q = ""
+
+        items2.append({
+            "id": iid,
+            "name": name,
+            "aum_usd": float(aum) if aum is not None else None,
+            "prev_aum_usd": float(prev_aum) if prev_aum is not None else None,
+            "aum_change_usd": float(aum_change) if aum_change is not None else None,
+            "cur_quarter": cur_q,
+            "prev_quarter": prev_q,
+            "cur_accession": cur_acc,
+            "prev_accession": prev_acc,
+            "cur_form": cur_form,
+            "prev_form": prev_form,
+            "cur_report_date": cur_report,
+            "prev_report_date": prev_report,
+            "cur_filing_date": cur_filing,
+            "prev_filing_date": prev_filing,
+            "changes": {"inc": int(ch_up), "dec": int(ch_dn)},
+            "error": err,
+        })
+        try:
+            if SEC_EDGAR_PER_INST_DELAY_SEC > 0:
+                time.sleep(max(0.0, float(SEC_EDGAR_PER_INST_DELAY_SEC)))
+        except Exception:
+            pass
+    items2.sort(key=lambda x: float(x.get("aum_usd") or 0), reverse=True)
+    return items2
+
+
+def _sec_headers() -> Dict[str, str]:
+    return {
+        "User-Agent": SEC_EDGAR_USER_AGENT,
+        "Accept-Encoding": "gzip, deflate",
+        "Accept": "application/json, text/plain, */*",
+    }
+
+
+def _sec_get_json(url: str, cache_key: str, ttl: int) -> Any:
+    cached = _cache_get(cache_key, ttl)
+    if cached is not None:
+        return cached
+    r = HTTP.get(url, headers=_sec_headers(), timeout=(10, 30))
+    r.raise_for_status()
+    data = r.json()
+    _cache_set(cache_key, data)
+    return data
+
+
+def _sec_get_text(url: str, cache_key: str, ttl: int) -> str:
+    cached = _cache_get(cache_key, ttl)
+    if cached is not None:
+        return str(cached)
+    r = HTTP.get(url, headers=_sec_headers(), timeout=(10, 30))
+    r.raise_for_status()
+    txt = r.text
+    _cache_set(cache_key, txt)
+    return txt
+
+
+def _sec_http_status(e: Exception) -> Optional[int]:
+    try:
+        if isinstance(e, requests.HTTPError):
+            resp = e.response
+            if resp is not None:
+                sc = getattr(resp, "status_code", None)
+                return int(sc) if sc is not None else None
+    except Exception:
+        return None
+    return None
+
+
+def _sec_err_str(e: Exception) -> str:
+    try:
+        if isinstance(e, requests.HTTPError):
+            resp = e.response
+            if resp is not None:
+                code = getattr(resp, "status_code", "")
+                url = getattr(resp, "url", "")
+                body = ""
+                try:
+                    body = (resp.text or "")[:300]
+                except Exception:
+                    body = ""
+                body = re.sub(r"\s+", " ", body).strip()
+                return f"http_{code} {url} {body}".strip()
+        return f"{type(e).__name__}: {str(e)[:300]}".strip()
+    except Exception:
+        return "sec_exception"
+
+
+def _sec_norm_cik(cik: str) -> str:
+    s = re.sub(r"\D+", "", str(cik or "").strip())
+    return s.zfill(10) if s else ""
+
+
+def _sec_cik_no_leading(cik10: str) -> str:
+    s = _sec_norm_cik(cik10)
+    return str(int(s)) if s else ""
+
+
+def _sec_quarter_label(date_str: str) -> str:
+    s = str(date_str or "").strip()
+    if not s:
+        return ""
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", s)
+    if not m:
+        return ""
+    try:
+        y = int(m.group(1))
+        mon = int(m.group(2))
+        q = ((mon - 1) // 3) + 1
+        if q < 1 or q > 4:
+            return ""
+        return f"{y}Q{q}"
+    except Exception:
+        return ""
+
+
+def _sec_find_recent_13f(submissions: Dict[str, Any], limit: int = 5) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    filings = (submissions or {}).get("filings") or {}
+    recent = (filings.get("recent") if isinstance(filings, dict) else None) or {}
+    forms = recent.get("form") or []
+    accs = recent.get("accessionNumber") or []
+    prim = recent.get("primaryDocument") or []
+    rep_dates = recent.get("reportDate") or []
+    filing_dates = recent.get("filingDate") or []
+    if not isinstance(forms, list) or not isinstance(accs, list) or not isinstance(prim, list):
+        return out
+    n = min(len(forms), len(accs), len(prim))
+    for i in range(n):
+        f = str(forms[i] or "")
+        if f not in ("13F-HR", "13F-HR/A"):
+            continue
+        out.append({
+            "form": f,
+            "accession": str(accs[i] or ""),
+            "primary_doc": str(prim[i] or ""),
+            "report_date": str(rep_dates[i] or "") if isinstance(rep_dates, list) and i < len(rep_dates) else "",
+            "filing_date": str(filing_dates[i] or "") if isinstance(filing_dates, list) and i < len(filing_dates) else "",
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _sec_pick_infotable_file(index_json: Dict[str, Any]) -> Optional[str]:
+    item = (index_json or {}).get("directory")
+    if not isinstance(item, dict):
+        return None
+    files = item.get("item")
+    if not isinstance(files, list):
+        return None
+    candidates: List[str] = []
+    for it in files:
+        if not isinstance(it, dict):
+            continue
+        name = str(it.get("name") or "")
+        low = name.lower()
+        if not name:
+            continue
+        if low.endswith(".xml") and ("infotable" in low or "informationtable" in low or "form13f" in low):
+            candidates.append(name)
+    if candidates:
+        candidates.sort(key=lambda x: (0 if "infotable" in x.lower() else 1, len(x)))
+        return candidates[0]
+    for it in files:
+        if not isinstance(it, dict):
+            continue
+        name = str(it.get("name") or "")
+        low = name.lower()
+        if low.endswith(".xml"):
+            return name
+    return None
+
+
+def _sec_parse_13f_infotable_xml(xml_text: str) -> List[Dict[str, Any]]:
+    txt = xml_text or ""
+    if not txt.strip():
+        return []
+    try:
+        root = ET.fromstring(txt)
+    except Exception:
+        return []
+
+    def _strip_ns(tag: str) -> str:
+        if not isinstance(tag, str):
+            return ""
+        return tag.split("}")[-1] if "}" in tag else tag
+
+    out: List[Dict[str, Any]] = []
+    for node in root.iter():
+        if _strip_ns(node.tag) != "infoTable":
+            continue
+
+        def _get_text(child_name: str) -> str:
+            for c in list(node):
+                if _strip_ns(c.tag) == child_name:
+                    return (c.text or "").strip()
+            return ""
+
+        issuer = _get_text("nameOfIssuer")
+        title = _get_text("titleOfClass")
+        cusip = re.sub(r"\s+", "", _get_text("cusip"))
+        value_k = _get_text("value")
+
+        sh_amt = ""
+        sh_type = ""
+        voting_sole = ""
+        voting_shared = ""
+        voting_none = ""
+        for c in list(node):
+            tn = _strip_ns(c.tag)
+            if tn == "shrsOrPrnAmt":
+                for cc in list(c):
+                    nn = _strip_ns(cc.tag)
+                    if nn == "sshPrnamt":
+                        sh_amt = (cc.text or "").strip()
+                    elif nn == "sshPrnamtType":
+                        sh_type = (cc.text or "").strip()
+            if tn == "votingAuthority":
+                for cc in list(c):
+                    nn = _strip_ns(cc.tag)
+                    if nn == "Sole":
+                        voting_sole = (cc.text or "").strip()
+                    elif nn == "Shared":
+                        voting_shared = (cc.text or "").strip()
+                    elif nn == "None":
+                        voting_none = (cc.text or "").strip()
+
+        try:
+            value_usd = float(re.sub(r"[^0-9\.]", "", value_k or "0") or 0.0) * 1000.0
+        except Exception:
+            value_usd = 0.0
+        try:
+            shares = float(re.sub(r"[^0-9\.]", "", sh_amt or "0") or 0.0)
+        except Exception:
+            shares = 0.0
+
+        out.append({
+            "cusip": cusip,
+            "issuer": issuer,
+            "title": title,
+            "value_usd": value_usd,
+            "shares": shares,
+            "shares_type": sh_type,
+            "voting": {"sole": voting_sole, "shared": voting_shared, "none": voting_none},
+        })
+    return out
+
+
+def _sec_get_13f_holdings_by_cik(cik10: str, filing_index: int = 0) -> Dict[str, Any]:
+    cik10n = _sec_norm_cik(cik10)
+    if not cik10n:
+        return {"ok": False, "error": "invalid_cik"}
+    try:
+        sub_url = f"https://data.sec.gov/submissions/CIK{cik10n}.json"
+        subs = _sec_get_json(sub_url, f"sec:submissions:{cik10n}", SEC_EDGAR_CACHE_TTL_SEC)
+        rec = _sec_find_recent_13f(subs, limit=5)
+        if not rec:
+            return {"ok": False, "error": "no_13f_found"}
+        idx = max(0, min(int(filing_index or 0), len(rec) - 1))
+        sel = rec[idx]
+        accession = str(sel.get("accession") or "")
+        if not accession:
+            return {"ok": False, "error": "no_accession"}
+        report_date = str(sel.get("report_date") or "")
+        filing_date = str(sel.get("filing_date") or "")
+        period_q = _sec_quarter_label(report_date) or _sec_quarter_label(filing_date)
+        acc_nodash = accession.replace("-", "")
+        cik_nolead = _sec_cik_no_leading(cik10n)
+        index_url = f"https://data.sec.gov/Archives/edgar/data/{cik_nolead}/{acc_nodash}/index.json"
+        index_key = f"sec:index:{cik_nolead}:{acc_nodash}"
+        try:
+            index_json = _sec_get_json(index_url, index_key, SEC_EDGAR_CACHE_TTL_SEC)
+        except Exception as e:
+            if _sec_http_status(e) == 404:
+                index_url2 = f"https://www.sec.gov/Archives/edgar/data/{cik_nolead}/{acc_nodash}/index.json"
+                index_json = _sec_get_json(index_url2, index_key + ":www", SEC_EDGAR_CACHE_TTL_SEC)
+            else:
+                raise
+        info_file = _sec_pick_infotable_file(index_json)
+        if not info_file:
+            return {"ok": False, "error": "infotable_not_found", "accession": accession}
+        xml_url = f"https://data.sec.gov/Archives/edgar/data/{cik_nolead}/{acc_nodash}/{info_file}"
+        xml_key = f"sec:infotable:{cik_nolead}:{acc_nodash}:{info_file}"
+        try:
+            xml_txt = _sec_get_text(xml_url, xml_key, SEC_EDGAR_CACHE_TTL_SEC)
+        except Exception as e:
+            if _sec_http_status(e) == 404:
+                xml_url2 = f"https://www.sec.gov/Archives/edgar/data/{cik_nolead}/{acc_nodash}/{info_file}"
+                xml_txt = _sec_get_text(xml_url2, xml_key + ":www", SEC_EDGAR_CACHE_TTL_SEC)
+            else:
+                raise
+        rows0 = _sec_parse_13f_infotable_xml(xml_txt)
+        rows0 = [r for r in rows0 if isinstance(r, dict) and str(r.get("cusip") or "").strip()]
+
+        # 13F informationTable 可能对同一 CUSIP 拆成多行（不同 class/type/voting 等）。这里按 CUSIP 聚合，避免前端重复。
+        agg: Dict[str, Dict[str, Any]] = {}
+        for r in rows0:
+            cusip = str(r.get("cusip") or "").strip()
+            if not cusip:
+                continue
+            issuer = str(r.get("issuer") or "").strip()
+            title = str(r.get("title") or "").strip()
+            sh_type = str(r.get("shares_type") or "").strip()
+            value_usd = float(r.get("value_usd") or 0.0)
+            shares = float(r.get("shares") or 0.0)
+            voting = r.get("voting") if isinstance(r.get("voting"), dict) else {}
+            v_sole = float(voting.get("sole") or 0.0) if isinstance(voting, dict) else 0.0
+            v_shared = float(voting.get("shared") or 0.0) if isinstance(voting, dict) else 0.0
+            v_none = float(voting.get("none") or 0.0) if isinstance(voting, dict) else 0.0
+
+            a = agg.get(cusip)
+            if not a:
+                agg[cusip] = {
+                    "cusip": cusip,
+                    "issuer": issuer,
+                    "title": title,
+                    "shares_type": sh_type,
+                    "value_usd": float(value_usd),
+                    "shares": float(shares),
+                    "voting": {"sole": float(v_sole), "shared": float(v_shared), "none": float(v_none)},
+                }
+                continue
+
+            # 保留最先出现的 issuer/title/type（如果为空则补齐）
+            if (not str(a.get("issuer") or "").strip()) and issuer:
+                a["issuer"] = issuer
+            if (not str(a.get("title") or "").strip()) and title:
+                a["title"] = title
+            if (not str(a.get("shares_type") or "").strip()) and sh_type:
+                a["shares_type"] = sh_type
+
+            a["value_usd"] = float(a.get("value_usd") or 0.0) + float(value_usd)
+            a["shares"] = float(a.get("shares") or 0.0) + float(shares)
+            av = a.get("voting") if isinstance(a.get("voting"), dict) else {"sole": 0.0, "shared": 0.0, "none": 0.0}
+            a["voting"] = {
+                "sole": float(av.get("sole") or 0.0) + float(v_sole),
+                "shared": float(av.get("shared") or 0.0) + float(v_shared),
+                "none": float(av.get("none") or 0.0) + float(v_none),
+            }
+
+        rows = list(agg.values())
+        total = sum(float(r.get("value_usd") or 0.0) for r in rows)
+        for r in rows:
+            try:
+                r["weight"] = (float(r.get("value_usd") or 0.0) / total) if total > 0 else 0.0
+            except Exception:
+                r["weight"] = 0.0
+        rows.sort(key=lambda x: float(x.get("value_usd") or 0.0), reverse=True)
+        return {
+            "ok": True,
+            "cik": cik10n,
+            "accession": accession,
+            "filing": {"form": sel.get("form"), "primary_doc": sel.get("primary_doc")},
+            "report_date": report_date,
+            "filing_date": filing_date,
+            "period_quarter": period_q,
+            "total_value_usd": float(total),
+            "holdings": rows,
+        }
+    except Exception as e:
+        return {"ok": False, "error": _sec_err_str(e)}
+
+
+def _smartmoney_all_holdings_flat() -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for inst in _SMARTMONEY_INSTITUTIONS_META.values():
+        iid = str(inst.get("id") or "")
+        iname = str(inst.get("name") or "")
+        cik = str(inst.get("cik") or "")
+        try:
+            cur = _sec_get_13f_holdings_by_cik(cik, filing_index=0)
+            hs = cur.get("holdings") if isinstance(cur, dict) else None
+        except Exception:
+            hs = None
+        if not isinstance(hs, list):
+            continue
+        for h in hs:
+            if not isinstance(h, dict):
+                continue
+            r = dict(h)
+            r["inst_id"] = iid
+            r["inst_name"] = iname
+            out.append(r)
+    return out
+
+
+def api_smartmoney_institutions(q: str = "") -> JSONResponse:
+    qq = (q or "").strip().lower()
+
+    # 优先读取 Upstash 持久化快照，其次内存快照（由 /api/smartmoney/refresh 写入）
+    snap_from_upstash: Optional[Dict[str, Any]] = _upstash_get_snapshot() if (UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN) else None
+    if isinstance(snap_from_upstash, dict) and isinstance(snap_from_upstash.get("items"), list):
+        try:
+            with _SMARTMONEY_SNAPSHOT_LOCK:
+                _SMARTMONEY_SNAPSHOT["ts"] = float(snap_from_upstash.get("ts") or 0.0)
+                _SMARTMONEY_SNAPSHOT["items"] = list(snap_from_upstash.get("items") or [])
+                _SMARTMONEY_SNAPSHOT["last_error"] = str(snap_from_upstash.get("last_error") or "")
+        except Exception:
+            pass
+
+    with _SMARTMONEY_SNAPSHOT_LOCK:
+        snap_items = _SMARTMONEY_SNAPSHOT.get("items")
+        snap_ts = float(_SMARTMONEY_SNAPSHOT.get("ts") or 0.0)
+
+    if isinstance(snap_items, list) and snap_items and (time.time() - snap_ts) < SEC_EDGAR_CACHE_TTL_SEC:
+        items = list(snap_items)
+    else:
+        items = _smartmoney_build_items()
+
+    if qq:
+        items = [
+            it
+            for it in items
+            if qq in str(it.get("name") or "").lower()
+            or qq in str(it.get("id") or "").lower()
+            or qq in str(_SMARTMONEY_INSTITUTIONS_META.get(str(it.get("id") or "").lower(), {}).get("cik") or "").lower()
+        ]
+    return JSONResponse({"ok": True, "items": items})
+
+
+def api_smartmoney_refresh(request: Request) -> JSONResponse:
+    if not SMARTMONEY_REFRESH_TOKEN:
+        return JSONResponse({"ok": False, "error": "refresh_token_not_configured"}, status_code=500)
+    tok = (request.headers.get("x-refresh-token") or request.headers.get("authorization") or "").strip()
+    tok = tok.replace("Bearer ", "") if tok.lower().startswith("bearer ") else tok
+    if tok != SMARTMONEY_REFRESH_TOKEN:
+        return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
+
+    started = time.time()
+    last_err = ""
+    items: List[Dict[str, Any]] = []
+    try:
+        items = _smartmoney_build_items()
+    except Exception as e:
+        last_err = _sec_err_str(e)
+        items = []
+
+    with _SMARTMONEY_SNAPSHOT_LOCK:
+        _SMARTMONEY_SNAPSHOT["ts"] = time.time()
+        _SMARTMONEY_SNAPSHOT["items"] = items if isinstance(items, list) else []
+        _SMARTMONEY_SNAPSHOT["last_error"] = str(last_err or "")
+
+    upstash_ok = False
+    if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
+        snap_obj = {"ts": float(_SMARTMONEY_SNAPSHOT.get("ts") or 0.0), "items": items if isinstance(items, list) else [], "last_error": str(last_err or "")}
+        # TTL 建议略长于本地缓存（默认 6h），这里给 36h，防止某天刷新失败导致无快照
+        upstash_ok = _upstash_set_snapshot(snap_obj, ttl_sec=max(0, int(SEC_EDGAR_CACHE_TTL_SEC) * 6))
+
+    return JSONResponse({
+        "ok": True,
+        "refreshed_at": int(time.time()),
+        "took_sec": round(time.time() - started, 3),
+        "count": len(items) if isinstance(items, list) else 0,
+        "last_error": str(last_err or ""),
+        "upstash_ok": bool(upstash_ok),
+    })
+
+
+def api_smartmoney_refresh_status() -> JSONResponse:
+    with _SMARTMONEY_SNAPSHOT_LOCK:
+        ts = float(_SMARTMONEY_SNAPSHOT.get("ts") or 0.0)
+        n = len(_SMARTMONEY_SNAPSHOT.get("items") or []) if isinstance(_SMARTMONEY_SNAPSHOT.get("items"), list) else 0
+        last_error = str(_SMARTMONEY_SNAPSHOT.get("last_error") or "")
+    upstash_cfg = bool(UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN)
+    return JSONResponse({"ok": True, "snapshot_ts": ts, "snapshot_age_sec": round(time.time() - ts, 3) if ts else None, "count": n, "last_error": last_error, "upstash_configured": upstash_cfg})
+
+
+def api_smartmoney_institution_detail(inst_id: str = Query("", alias="id")) -> JSONResponse:
+    iid = (inst_id or "").strip().lower()
+    inst = _SMARTMONEY_INSTITUTIONS_META.get(iid)
+    if not inst:
+        return JSONResponse({"ok": False, "error": "institution_not_found"}, status_code=404)
+    cik = str(inst.get("cik") or "")
+    cur = _sec_get_13f_holdings_by_cik(cik, filing_index=0)
+    prev = _sec_get_13f_holdings_by_cik(cik, filing_index=1)
+    if not (isinstance(cur, dict) and cur.get("ok")):
+        return JSONResponse({"ok": False, "error": "sec_fetch_failed"}, status_code=502)
+    hs = cur.get("holdings") or []
+    hs_prev = prev.get("holdings") if isinstance(prev, dict) and prev.get("ok") else []
+    prev_map: Dict[str, Dict[str, Any]] = {}
+    if isinstance(hs_prev, list):
+        for r in hs_prev:
+            if isinstance(r, dict) and str(r.get("cusip") or "").strip():
+                prev_map[str(r.get("cusip") or "").strip()] = r
+
+    holdings2: List[Dict[str, Any]] = []
+    for h in hs:
+        if not isinstance(h, dict):
+            continue
+        cusip = str(h.get("cusip") or "").strip()
+        issuer = str(h.get("issuer") or "").strip()
+        value_usd = float(h.get("value_usd") or 0.0)
+        weight = float(h.get("weight") or 0.0)
+        shares = float(h.get("shares") or 0.0)
+        prev_r = prev_map.get(cusip)
+        prev_val = float(prev_r.get("value_usd") or 0.0) if isinstance(prev_r, dict) else 0.0
+        qoq_value_change = value_usd - prev_val
+        holdings2.append({
+            "cusip": cusip,
+            "issuer": issuer,
+            "title": str(h.get("title") or ""),
+            "weight": weight,
+            "value_usd": value_usd,
+            "shares": shares,
+            "shares_type": str(h.get("shares_type") or ""),
+            "qoq_value_change": qoq_value_change,
+        })
+    holdings2.sort(key=lambda x: float(x.get("value_usd") or 0.0), reverse=True)
+    top10 = holdings2[:10]
+    changes = sorted(holdings2, key=lambda x: abs(float(x.get("qoq_value_change") or 0.0)), reverse=True)[:10]
+    return JSONResponse({
+        "ok": True,
+        "institution": {
+            "id": inst.get("id"),
+            "name": inst.get("name"),
+            "cik": _sec_norm_cik(cik),
+            "aum_usd": float(cur.get("total_value_usd") or 0.0),
+            "accession": cur.get("accession"),
+        },
+        "holdings": holdings2,
+        "top_holdings": top10,
+        "recent_changes": changes,
+    })
+
+
+def api_smartmoney_stock_detail(ticker: str = "") -> JSONResponse:
+    # 兼容旧参数名 ticker：方案A中实际应传 cusip；ticker 映射不做
+    cusip = re.sub(r"\s+", "", (ticker or "").strip().upper())
+    if not cusip:
+        return JSONResponse({"ok": False, "error": "missing_cusip"}, status_code=400)
+    holders: List[Dict[str, Any]] = []
+    best_issuer = ""
+    for inst in _SMARTMONEY_INSTITUTIONS_META.values():
+        iid = str(inst.get("id") or "")
+        iname = str(inst.get("name") or "")
+        cik = str(inst.get("cik") or "")
+        try:
+            cur = _sec_get_13f_holdings_by_cik(cik, filing_index=0)
+            prev = _sec_get_13f_holdings_by_cik(cik, filing_index=1)
+        except Exception:
+            continue
+        hs = cur.get("holdings") if isinstance(cur, dict) and cur.get("ok") else None
+        hs_prev = prev.get("holdings") if isinstance(prev, dict) and prev.get("ok") else None
+        if not isinstance(hs, list):
+            continue
+        prev_map: Dict[str, Dict[str, Any]] = {}
+        if isinstance(hs_prev, list):
+            for r in hs_prev:
+                if isinstance(r, dict) and str(r.get("cusip") or "").strip():
+                    prev_map[str(r.get("cusip") or "").strip()] = r
+        for h in hs:
+            if not isinstance(h, dict):
+                continue
+            if str(h.get("cusip") or "").strip().upper() != cusip:
+                continue
+            if not best_issuer:
+                best_issuer = str(h.get("issuer") or "").strip()
+            val = float(h.get("value_usd") or 0.0)
+            wt = float(h.get("weight") or 0.0)
+            prev_val = float((prev_map.get(cusip) or {}).get("value_usd") or 0.0)
+            holders.append({
+                "inst_id": iid,
+                "inst_name": iname,
+                "weight": wt,
+                "value_usd": val,
+                "qoq_value_change": val - prev_val,
+            })
+    holders.sort(key=lambda x: float(x.get("value_usd") or 0.0), reverse=True)
+    stock = {
+        "cusip": cusip,
+        "issuer": best_issuer,
+        "sector": "",
+        "price": None,
+        "desc": "",
+    }
+    return JSONResponse({"ok": True, "stock": stock, "holders": holders})
+
+
+def api_smartmoney_flows(sector: str = "all", period: str = "quarter") -> JSONResponse:
+    sec = (sector or "all").strip()
+    # 方案A：无行业信息，sector 仅支持 all；period 仅用于展示
+    if sec and sec != "all":
+        return JSONResponse({"ok": True, "sector": sec, "period": period, "top_buys": [], "top_sells": []})
+
+    buys: Dict[str, Dict[str, Any]] = {}
+    sells: Dict[str, Dict[str, Any]] = {}
+
+    for inst in _SMARTMONEY_INSTITUTIONS_META.values():
+        cik = str(inst.get("cik") or "")
+        try:
+            cur = _sec_get_13f_holdings_by_cik(cik, filing_index=0)
+            prev = _sec_get_13f_holdings_by_cik(cik, filing_index=1)
+        except Exception:
+            continue
+        hs = cur.get("holdings") if isinstance(cur, dict) and cur.get("ok") else None
+        hs_prev = prev.get("holdings") if isinstance(prev, dict) and prev.get("ok") else None
+        if not isinstance(hs, list):
+            continue
+        prev_map: Dict[str, float] = {}
+        if isinstance(hs_prev, list):
+            for r in hs_prev:
+                if isinstance(r, dict) and str(r.get("cusip") or "").strip():
+                    prev_map[str(r.get("cusip") or "").strip()] = float(r.get("value_usd") or 0.0)
+        for h in hs:
+            if not isinstance(h, dict):
+                continue
+            cusip = str(h.get("cusip") or "").strip()
+            if not cusip:
+                continue
+            issuer = str(h.get("issuer") or "").strip()
+            cur_val = float(h.get("value_usd") or 0.0)
+            prev_val = float(prev_map.get(cusip) or 0.0)
+            delta = cur_val - prev_val
+            if delta == 0:
+                continue
+            if delta > 0:
+                ref = buys.get(cusip) or {"cusip": cusip, "issuer": issuer, "flow_usd": 0.0}
+                ref["flow_usd"] = float(ref.get("flow_usd") or 0.0) + float(delta)
+                buys[cusip] = ref
+            else:
+                ref = sells.get(cusip) or {"cusip": cusip, "issuer": issuer, "flow_usd": 0.0}
+                ref["flow_usd"] = float(ref.get("flow_usd") or 0.0) + float(abs(delta))
+                sells[cusip] = ref
+
+    top_buys = sorted(buys.values(), key=lambda x: float(x.get("flow_usd") or 0.0), reverse=True)[:20]
+    top_sells = sorted(sells.values(), key=lambda x: float(x.get("flow_usd") or 0.0), reverse=True)[:20]
+
+    def _row(r: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "cusip": r.get("cusip") or "",
+            "issuer": r.get("issuer") or "",
+            "sector": "",
+            "flow_usd": float(r.get("flow_usd") or 0.0),
+        }
+
+    return JSONResponse({
+        "ok": True,
+        "sector": sec,
+        "period": period,
+        "top_buys": [_row(r) for r in top_buys],
+        "top_sells": [_row(r) for r in top_sells],
+    })
+
+
+def _ai_structured_answer(query: str, context: Dict[str, Any]) -> Dict[str, Any]:
+    q = (query or "").strip()
+    ql = q.lower()
+    bullets: List[str] = []
+    risks: List[str] = []
+    trend: str = ""
+    title = "AI 分析"
+
+    if "聪明钱" in q or "smart" in ql or "买" in q:
+        title = "聪明钱流向总结"
+        flows = context.get("flows") if isinstance(context, dict) else None
+        if isinstance(flows, dict):
+            tb = flows.get("top_buys") or []
+            ts = flows.get("top_sells") or []
+            if tb:
+                top3 = ", ".join([str(x.get("ticker") or "") for x in tb[:3] if isinstance(x, dict)])
+                bullets.append(f"资金流入靠前：{top3}")
+            if ts:
+                top3s = ", ".join([str(x.get("ticker") or "") for x in ts[:3] if isinstance(x, dict)])
+                bullets.append(f"资金流出靠前：{top3s}")
+        trend = "资金更偏向于增持权重较高、且本季度变动为正的标的。"
+        risks.append("13F 数据存在滞后性（通常延迟披露），不代表实时交易。")
+        risks.append("单季度变动可能包含再平衡与被动资金流，不等同于主动判断。")
+    elif "机构" in q or "策略" in q or "风格" in q:
+        title = "机构投资风格分析"
+        inst = context.get("institution") if isinstance(context, dict) else None
+        hs = context.get("holdings") if isinstance(context, dict) else None
+        if isinstance(inst, dict):
+            bullets.append(f"机构：{inst.get('name')}")
+        if isinstance(hs, list) and hs:
+            sectors: Dict[str, float] = {}
+            for h in hs:
+                if not isinstance(h, dict):
+                    continue
+                sectors[str(h.get("sector") or "")] = sectors.get(str(h.get("sector") or ""), 0.0) + float(h.get("weight") or 0)
+            top_sec = sorted(sectors.items(), key=lambda x: x[1], reverse=True)[:3]
+            if top_sec:
+                bullets.append("风格偏好：" + ", ".join([f"{s or '其他'}({w*100:.1f}%)" for s, w in top_sec]))
+            w = [float(h.get("weight") or 0) for h in hs if isinstance(h, dict)]
+            w.sort(reverse=True)
+            top1 = w[0] if w else 0.0
+            top5 = sum(w[:5]) if w else 0.0
+            bullets.append(f"集中度：Top1={top1*100:.1f}% | Top5={top5*100:.1f}%")
+            if top1 >= 0.35:
+                risks.append("持仓对单一股票依赖较高，回撤风险更集中。")
+        trend = "整体风格可用行业权重与 Top1/Top5 集中度进行快速判断。"
+    else:
+        bullets.append("请给出更具体的对象（机构 id / 股票 ticker / 行业 / 时间范围）。")
+        risks.append("输出为模板化结构化总结，后续可接入真实 LLM。")
+
+    return {
+        "title": title,
+        "query": q,
+        "bullets": bullets,
+        "risks": risks,
+        "trend": trend,
+    }
+
+
+def api_smartmoney_ai(query: str = "", inst_id: str = "", ticker: str = "", sector: str = "all", period: str = "quarter") -> JSONResponse:
+    ctx: Dict[str, Any] = {}
+    if inst_id:
+        iid = inst_id.strip().lower()
+        inst = _SMARTMONEY_INSTITUTIONS_META.get(iid)
+        if inst:
+            cik = str(inst.get("cik") or "")
+            try:
+                cur = _sec_get_13f_holdings_by_cik(cik, filing_index=0)
+                ctx["institution"] = {
+                    "id": inst.get("id"),
+                    "name": inst.get("name"),
+                    "cik": _sec_norm_cik(cik),
+                    "aum_usd": float(cur.get("total_value_usd") or 0.0) if isinstance(cur, dict) else 0.0,
+                }
+                ctx["holdings"] = (cur.get("holdings") or []) if isinstance(cur, dict) else []
+            except Exception:
+                pass
+    if ticker:
+        t = re.sub(r"\s+", "", ticker.strip().upper())
+        ctx["stock"] = {"cusip": t}
+    try:
+        flows = json.loads(api_smartmoney_flows(sector=sector, period=period).body.decode("utf-8"))
+        if isinstance(flows, dict):
+            ctx["flows"] = flows
+    except Exception:
+        pass
+    out = _ai_structured_answer(query=query, context=ctx)
+    return JSONResponse({"ok": True, "result": out})
 
 
 APP_TITLE = "Gate 永续合约仪表板"
@@ -188,6 +1073,10 @@ MASTER_B_PUSH_ENABLED = os.getenv("MASTER_B_PUSH_ENABLED", "0").strip() in ("1",
 MASTER_B_PUSH_INTERVAL_SEC = int(float(os.getenv("MASTER_B_PUSH_INTERVAL_SEC", "300") or "300"))
 MASTER_B_PUSH_COOLDOWN_SEC = int(float(os.getenv("MASTER_B_PUSH_COOLDOWN_SEC", "1800") or "1800"))
 
+MA10MACD_PUSH_ENABLED = os.getenv("MA10MACD_PUSH_ENABLED", "0").strip() in ("1", "true", "True", "yes", "YES")
+MA10MACD_PUSH_INTERVAL_SEC = int(float(os.getenv("MA10MACD_PUSH_INTERVAL_SEC", "900") or "900"))
+MA10MACD_PUSH_COOLDOWN_SEC = int(float(os.getenv("MA10MACD_PUSH_COOLDOWN_SEC", "43200") or "43200"))
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
@@ -255,6 +1144,21 @@ def _db_init() -> None:
             pass
         try:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_move3m_alert_log_symbol ON move3m_alert_log(symbol, created_at)")
+        except Exception:
+            pass
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ma10macd_state (
+                contract TEXT PRIMARY KEY,
+                updated_at INTEGER,
+                golden_ts INTEGER,
+                fired INTEGER
+            )
+            """
+        )
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_ma10macd_state_updated ON ma10macd_state(updated_at)")
         except Exception:
             pass
 
@@ -530,6 +1434,577 @@ def _db_init() -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _ma10macd_state_get(contract: str) -> Dict[str, Any]:
+    c = (contract or "").strip().upper()
+    if not c:
+        return {"golden_ts": 0, "fired": 0}
+    conn = _db_connect()
+    try:
+        r = conn.execute(
+            "SELECT golden_ts, fired FROM ma10macd_state WHERE contract=?",
+            (c,),
+        ).fetchone()
+        if not r:
+            return {"golden_ts": 0, "fired": 0}
+        try:
+            return {"golden_ts": int(r["golden_ts"] or 0), "fired": int(r["fired"] or 0)}
+        except Exception:
+            return {"golden_ts": 0, "fired": 0}
+    finally:
+        conn.close()
+
+
+def _ma10macd_state_set(contract: str, golden_ts: int, fired: int) -> None:
+    c = (contract or "").strip().upper()
+    if not c:
+        return
+    now_ts = int(time.time())
+    conn = _db_connect()
+    try:
+        conn.execute(
+            """
+            INSERT INTO ma10macd_state(contract, updated_at, golden_ts, fired)
+            VALUES(?, ?, ?, ?)
+            ON CONFLICT(contract) DO UPDATE SET updated_at=excluded.updated_at, golden_ts=excluded.golden_ts, fired=excluded.fired
+            """,
+            (c, now_ts, int(golden_ts or 0), int(fired or 0)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _sma(vals: List[float], n: int) -> List[float]:
+    if not vals or n <= 0:
+        return []
+    out: List[float] = []
+    buf: List[float] = []
+    s = 0.0
+    for v in vals:
+        try:
+            x = float(v)
+        except Exception:
+            x = float("nan")
+        if not math.isfinite(x):
+            out.append(float("nan"))
+            continue
+        buf.append(x)
+        s += x
+        if len(buf) > n:
+            s -= buf.pop(0)
+        if len(buf) < n:
+            out.append(float("nan"))
+        else:
+            out.append(s / float(n))
+    return out
+
+
+def _trade_levels_percent(entry: float, sl_pct: float = 3.0, tp_pct: float = 6.0) -> Dict[str, float]:
+    try:
+        e = float(entry)
+    except Exception:
+        e = 0.0
+    if not math.isfinite(e) or e <= 0:
+        return {}
+    sl = e * (1.0 - float(sl_pct) / 100.0)
+    tp1 = e * (1.0 + float(tp_pct) / 100.0)
+    return {"entry": e, "sl": sl, "tp1": tp1, "delta_ma10": None}
+
+
+def _trade_levels_ma10_risk(entry: float, ma10: float) -> Dict[str, float]:
+    try:
+        e = float(entry)
+        m = float(ma10)
+    except Exception:
+        return {}
+    if not math.isfinite(e) or e <= 0:
+        return {}
+    if not math.isfinite(m) or m <= 0:
+        return {}
+    sl = m * 0.95
+    if not math.isfinite(sl) or sl <= 0:
+        return {}
+    risk = e - sl
+    if not math.isfinite(risk) or risk <= 0:
+        return {"entry": e, "sl": sl, "tp1": None, "delta_ma10": None}
+    tp1 = e + risk * 1.5
+    return {"entry": e, "sl": sl, "tp1": tp1, "delta_ma10": None}
+
+
+def _trade_levels_fixed_pct(entry: float, sl_pct: float = 10.0, tp_pct: float = 20.0) -> Dict[str, float]:
+    try:
+        e = float(entry)
+    except Exception:
+        return {}
+    if not math.isfinite(e) or e <= 0:
+        return {}
+    sl = e * (1.0 - float(sl_pct) / 100.0)
+    tp1 = e * (1.0 + float(tp_pct) / 100.0)
+    return {"entry": e, "sl": sl, "tp1": tp1, "delta_ma10": None}
+
+
+def _ma10macd_analyze_one(contract: str, last_price_map: Dict[str, float]) -> Dict[str, Any]:
+    c = (contract or "").strip().upper()
+    if not c:
+        return {"contract": contract, "error": "missing contract"}
+
+    st = _ma10macd_state_get(c)
+    golden_ts_prev = int(st.get("golden_ts") or 0)
+    fired_prev = int(st.get("fired") or 0)
+
+    # 日线数据
+    candles = get_macd_candles(c, "1d", limit=220)
+    seq = [x for x in candles if isinstance(x, dict)]
+    seq.sort(key=lambda x: int(x.get("t") or 0))
+    closes = [float(x.get("c")) for x in seq if _safe_float(x.get("c")) is not None]
+    if len(closes) < 60:
+        return {"contract": c, "error": "insufficient_candles"}
+
+    dif, dea, hist = _macd(closes, 12, 26, 9)
+    if not dif or not dea:
+        return {"contract": c, "error": "macd_failed"}
+    n = min(len(closes), len(dif), len(dea), len(hist), len(seq))
+    closes = closes[len(closes) - n :]
+    dif = dif[len(dif) - n :]
+    dea = dea[len(dea) - n :]
+    hist = hist[len(hist) - n :]
+    seq = seq[len(seq) - n :]
+
+    ma10 = _sma(closes, 10)
+    last_ma10 = ma10[-1] if ma10 else float("nan")
+    last_dif = dif[-1]
+    last_dea = dea[-1]
+
+    # 交叉识别（只看最近一次）
+    golden_ts = golden_ts_prev
+    fired = fired_prev
+    cross = detect_recent_cross(dif, dea, lookback=8)
+    if cross:
+        tp, idx = cross
+        cross_ts = 0
+        try:
+            cross_ts = int(seq[idx].get("t") or 0)
+        except Exception:
+            cross_ts = 0
+        if tp == "golden" and cross_ts > 0:
+            # 新一轮金叉：更新本轮起点
+            if cross_ts != golden_ts_prev:
+                golden_ts = cross_ts
+        if tp == "death":
+            # 死叉：本轮失效
+            golden_ts = 0
+            fired = 0
+
+    last_px = last_price_map.get(c)
+    if last_px is None or not isinstance(last_px, (int, float)) or not math.isfinite(float(last_px)):
+        last_px = _safe_float(closes[-1])
+    try:
+        last_px_f = float(last_px) if last_px is not None else None
+    except Exception:
+        last_px_f = None
+
+    # 触发条件：金叉后 + 回踩MA10 + 未死叉(dif>=dea)
+    # 说明：同一轮金叉期间允许多次触发；重复推送由 12h 冷却控制
+    ready = False
+    reason = ""
+    if golden_ts <= 0:
+        reason = "no_golden"
+    elif not (last_dif >= last_dea):
+        reason = "dead_cross_filter"
+    else:
+        if last_px_f is not None and math.isfinite(last_px_f) and math.isfinite(last_ma10) and last_px_f <= float(last_ma10):
+            ready = True
+            reason = "retest_ma10"
+        else:
+            reason = "waiting_retest"
+
+    # 写回状态（避免重复读）
+    # fired 不再用于“一轮只触发一次”的硬限制；保留字段兼容旧表结构
+    _ma10macd_state_set(c, int(golden_ts or 0), 0)
+
+    sym = c.replace("_USDT", "")
+    levels = None
+    try:
+        if last_px_f is not None and math.isfinite(float(last_px_f)):
+            levels = _trade_levels_fixed_pct(float(last_px_f), 10.0, 20.0)
+    except Exception:
+        levels = None
+
+    delta_ma10 = None
+    try:
+        if last_px_f is not None and ma10 and math.isfinite(float(last_ma10)):
+            delta_ma10 = float(last_px_f) - float(last_ma10)
+    except Exception:
+        delta_ma10 = None
+
+    return {
+        "contract": c,
+        "symbol": sym,
+        "timeframe": "1d",
+        "last_price": last_px_f,
+        "ma10": float(last_ma10) if math.isfinite(last_ma10) else None,
+        "delta_ma10": delta_ma10,
+        "entry": (levels or {}).get("entry") if isinstance(levels, dict) else None,
+        "sl": (levels or {}).get("sl") if isinstance(levels, dict) else None,
+        "tp1": (levels or {}).get("tp1") if isinstance(levels, dict) else None,
+        "dif": float(last_dif),
+        "dea": float(last_dea),
+        "hist": float(hist[-1]) if hist else None,
+        "golden_ts": int(golden_ts or 0),
+        "fired": 0,
+        "ready": bool(ready),
+        "reason": reason,
+        "updated_at": int(time.time()),
+    }
+
+
+def api_ma10macd_list(page: int = 1, page_size: int = 20, topn: int = 100) -> JSONResponse:
+    tri_contracts = _parse_contracts_csv(TRI_SIGNAL_CONTRACTS)
+    tri_set = set([str(x or "").strip().upper() for x in tri_contracts if x])
+
+    futures_set: set
+    try:
+        futures_set = set([str(x or "").strip().upper() for x in get_all_futures_contract_names() if x])
+    except Exception:
+        futures_set = set()
+
+    # Gate TopN（永续 USDT 合约，按 futures tickers 的 24h quote_volume）补充合约池：
+    # - 只做“扫描范围扩展”，重复币种以 TRI_SIGNAL_CONTRACTS 优先
+    topn_i: int
+    try:
+        topn_i = int(topn)
+    except Exception:
+        topn_i = 100
+    topn_i = max(0, min(1000, topn_i))
+    topn_contracts: List[str] = []
+    if topn_i > 0:
+        try:
+            topn_contracts = [str(x or "").strip().upper() for x in (top_contracts_by_quote_volume(topn_i) or []) if x]
+        except Exception:
+            topn_contracts = []
+    topn_set = set([x for x in topn_contracts if x])
+
+    contracts: List[str] = []
+    for c in tri_contracts:
+        cc = str(c or "").strip().upper()
+        if not cc:
+            continue
+        if futures_set and cc not in futures_set:
+            continue
+        if cc not in contracts:
+            contracts.append(cc)
+    for c in topn_contracts:
+        if not c:
+            continue
+        if c in tri_set:
+            continue
+        if futures_set and c not in futures_set:
+            continue
+        if c not in contracts:
+            contracts.append(c)
+
+    last_price_map = _ticker_last_price_map()
+    items: List[Dict[str, Any]] = []
+    errors: List[str] = []
+    try:
+        if futures_set:
+            missing = []
+            for cc in [str(x or "").strip().upper() for x in (tri_contracts or []) if x]:
+                if cc and cc not in futures_set:
+                    missing.append(cc)
+            for cc in [str(x or "").strip().upper() for x in (topn_contracts or []) if x]:
+                if cc and cc not in futures_set and cc not in tri_set:
+                    missing.append(cc)
+            if missing:
+                for z in missing[:20]:
+                    errors.append(f"{z}: skipped (not a USDT perpetual futures contract)")
+    except Exception:
+        pass
+    for c in contracts:
+        try:
+            row = _ma10macd_analyze_one(c, last_price_map)
+
+            # 过滤：未金叉（或无法计算 MA10）的代币不展示
+            try:
+                if int(row.get("golden_ts") or 0) <= 0:
+                    continue
+                if row.get("ma10") is None:
+                    continue
+            except Exception:
+                continue
+
+            # 12h 冷却：同币 12h 内认为“已推送/冷却中”，列表不再显示 ready=true
+            try:
+                if bool(row.get("ready")):
+                    contract = str(row.get("contract") or "").strip().upper()
+                    last_ts = _ma10macd_last_push_ts(contract)
+                    row["last_push_ts"] = int(last_ts) if last_ts is not None else None
+                    row["pushed_recent"] = False
+                    if last_ts is not None:
+                        now_ts = int(time.time())
+                        if (now_ts - int(last_ts)) < int(MA10MACD_PUSH_COOLDOWN_SEC):
+                            row["ready"] = False
+                            row["reason"] = "cooldown_12h"
+                            row["pushed_recent"] = True
+            except Exception:
+                pass
+
+            # 只在触发买入或冷却中时返回交易位（否则前端显示 —）
+            try:
+                if (not bool(row.get("ready"))) and (str(row.get("reason") or "") != "cooldown_12h"):
+                    row["entry"] = None
+                    row["sl"] = None
+                    row["tp1"] = None
+            except Exception:
+                pass
+
+            # 列表只返回需要字段（前端展示用）
+            items.append({
+                "contract": row.get("contract"),
+                "symbol": row.get("symbol"),
+                "last_price": row.get("last_price"),
+                "ma10": row.get("ma10"),
+                "delta_ma10": row.get("delta_ma10"),
+                "entry": row.get("entry"),
+                "sl": row.get("sl"),
+                "tp1": row.get("tp1"),
+                "golden_ts": row.get("golden_ts"),
+                "ready": row.get("ready"),
+                "reason": row.get("reason"),
+                "last_push_ts": row.get("last_push_ts"),
+                "pushed_recent": bool(row.get("pushed_recent")),
+                "in_tri": bool(str(row.get("contract") or "").strip().upper() in tri_set),
+                "in_topn": bool(str(row.get("contract") or "").strip().upper() in topn_set),
+                "updated_at": row.get("updated_at"),
+            })
+        except Exception as e:
+            errors.append(_short_err(c, e))
+    # 排序：先 ready，再按 golden_ts 新近
+    try:
+        items.sort(key=lambda x: (
+            0 if x.get("ready") else 1,
+            -int(x.get("golden_ts") or 0),
+            str(x.get("contract") or ""),
+        ))
+    except Exception:
+        pass
+    total = len(items)
+    try:
+        page_size = max(1, min(200, int(page_size)))
+    except Exception:
+        page_size = 20
+    try:
+        page = max(1, int(page))
+    except Exception:
+        page = 1
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_items = items[start:end]
+    return JSONResponse({"ok": True, "items": page_items, "errors": errors, "count": len(page_items), "total": total, "page": page, "page_size": page_size})
+
+
+def api_ma10macd_detail(contract: str, limit: int = 220) -> JSONResponse:
+    c = (contract or "").strip().upper()
+    limit = max(120, min(320, int(limit)))
+    candles = get_macd_candles(c, "1d", limit=limit)
+    seq = [x for x in candles if isinstance(x, dict)]
+    seq.sort(key=lambda x: int(x.get("t") or 0))
+    if not seq:
+        return JSONResponse({
+            "contract": c,
+            "timeframe": "1d",
+            "t": [],
+            "open": [],
+            "high": [],
+            "low": [],
+            "close": [],
+            "dif": [],
+            "dea": [],
+            "hist": [],
+            "ma10": [],
+            "vol": [],
+        })
+
+    opens: List[float] = []
+    highs: List[float] = []
+    lows: List[float] = []
+    closes: List[float] = []
+    vols: List[float] = []
+    valid: List[dict] = []
+    for it in seq:
+        oo = _safe_float(it.get("o"))
+        hh = _safe_float(it.get("h"))
+        ll = _safe_float(it.get("l"))
+        cc = _safe_float(it.get("c"))
+        vv = _safe_float(it.get("v"))
+        if cc is None or oo is None or hh is None or ll is None:
+            continue
+        valid.append(it)
+        opens.append(float(oo))
+        highs.append(float(hh))
+        lows.append(float(ll))
+        closes.append(float(cc))
+        vols.append(float(vv or 0.0))
+
+    dif, dea, hist = _macd(closes, 12, 26, 9)
+    ma10 = _sma(closes, 10)
+    n = min(len(closes), len(dif), len(dea), len(hist), len(valid), len(ma10))
+    out = {
+        "contract": c,
+        "timeframe": "1d",
+        "t": [int(valid[i].get("t") or 0) for i in range(len(valid) - n, len(valid))],
+        "open": opens[len(opens) - n :],
+        "high": highs[len(highs) - n :],
+        "low": lows[len(lows) - n :],
+        "close": closes[len(closes) - n :],
+        "dif": dif[len(dif) - n :],
+        "dea": dea[len(dea) - n :],
+        "hist": hist[len(hist) - n :],
+        "ma10": ma10[len(ma10) - n :],
+        "vol": vols[len(vols) - n :],
+    }
+
+    # trade levels：出现“触发买入”时给前端画线（冷却期内也返回，便于复盘）
+    try:
+        last_price_map = _ticker_last_price_map()
+        st_row = _ma10macd_analyze_one(c, last_price_map)
+        ready = bool(st_row.get("ready"))
+        now_ts = int(time.time())
+        last_ts = _ma10macd_last_push_ts(c)
+        cooldown = False
+        if last_ts is not None and (now_ts - int(last_ts)) < int(MA10MACD_PUSH_COOLDOWN_SEC):
+            cooldown = True
+        out["ready"] = bool(ready)
+        out["cooldown"] = bool(cooldown)
+
+        if ready:
+            last_px = last_price_map.get(c)
+            if last_px is None or not math.isfinite(float(last_px or 0)):
+                last_px = closes[-1]
+            levels = _trade_levels_fixed_pct(float(last_px), 10.0, 20.0)
+            if levels:
+                out["trade_levels"] = levels
+    except Exception:
+        pass
+
+    return JSONResponse(out)
+
+
+def _ma10macd_last_push_ts(contract: str) -> Optional[int]:
+    c = (contract or "").strip().upper()
+    if not c:
+        return None
+    conn = _db_connect()
+    try:
+        # uniq 形如 ma10macd:{CONTRACT}:{bucket}
+        pref = f"ma10macd:{c}:"
+        row = conn.execute(
+            """
+            SELECT created_at FROM news_push_history
+            WHERE level='ma10macd' AND uniq LIKE ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (pref + "%",),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            if isinstance(row, dict):
+                return int(row.get("created_at") or 0) or None
+            return int(row[0])
+        except Exception:
+            return None
+    finally:
+        conn.close()
+
+
+def push_tg_ma10macd(force: int = 0) -> dict:
+    s = _news_settings()
+    bot_token = (s.get("tg_bot_token") or "").strip()
+    chat_id = (s.get("tg_chat_id") or "").strip()
+    enabled_global = _setting_bool(s, "push_enabled", True)
+    if not enabled_global:
+        return {"ok": True, "skipped": True, "error": "push_disabled"}
+    if not bot_token or not chat_id:
+        return {"ok": False, "pushed": 0, "skipped": 0, "errors": ["未配置 Telegram Bot Token 或 Chat ID"]}
+
+    contracts = _parse_contracts_csv(TRI_SIGNAL_CONTRACTS)
+    last_price_map = _ticker_last_price_map()
+
+    pushed = 0
+    skipped = 0
+    errors: List[str] = []
+    now_ts = int(time.time())
+    cooldown_sec = int(MA10MACD_PUSH_COOLDOWN_SEC)
+    bucket = int(now_ts / max(60, cooldown_sec))
+    for c in contracts:
+        try:
+            row = _ma10macd_analyze_one(c, last_price_map)
+            if not row.get("ready"):
+                skipped += 1
+                continue
+            contract = str(row.get("contract") or "").strip().upper()
+            golden_ts = int(row.get("golden_ts") or 0)
+            if not force:
+                # 冷却：同币 12h 内只推一次
+                last_ts = _ma10macd_last_push_ts(contract)
+                if last_ts is not None and (now_ts - int(last_ts)) < cooldown_sec:
+                    skipped += 1
+                    continue
+
+            px = row.get("last_price")
+            ma10 = row.get("ma10")
+            dif = row.get("dif")
+            dea = row.get("dea")
+            sign = "+" if (dif is not None and dea is not None and float(dif) >= float(dea)) else ""
+            ts_txt = datetime.datetime.fromtimestamp(now_ts).strftime("%Y-%m-%d %H:%M:%S")
+            msg = (
+                f"【MA10回踩买入】{contract}\n"
+                f"时间：{ts_txt}\n"
+                f"金叉起点：{datetime.datetime.fromtimestamp(golden_ts).strftime('%Y-%m-%d') if golden_ts else '—'}\n"
+                f"价格：{(float(px) if px is not None else 0):.10g}\n"
+                f"MA10：{(float(ma10) if ma10 is not None else 0):.10g}\n"
+                f"DIF/DEA：{sign}{(float(dif) if dif is not None else 0):.6g} / {(float(dea) if dea is not None else 0):.6g}\n"
+                f"条件：金叉后回踩MA10且未死叉（同币 12h 冷却，冷却后若仍满足可再次推送）"
+            )
+            ok, err = _tg_send(bot_token=bot_token, chat_id=chat_id, text=msg)
+
+            uniq = f"ma10macd:{contract}:{bucket}"
+            try:
+                _push_history_add(
+                    uniq=uniq,
+                    level="ma10macd",
+                    title=f"{contract} MA10回踩买入",
+                    link="",
+                    message=msg,
+                    ok=ok,
+                    error=err,
+                )
+            except Exception:
+                pass
+
+            if ok:
+                pushed += 1
+            else:
+                errors.append(f"{contract}: {err or 'send failed'}")
+        except Exception as e:
+            errors.append(f"{c}: {e}")
+
+    return {"ok": True, "pushed": pushed, "skipped": skipped, "errors": errors}
+
+
+def api_ma10macd_push_now(force: int = 0) -> JSONResponse:
+    try:
+        out = push_tg_ma10macd(force=force)
+        # 兼容：未配置 token/chat 时返回 400
+        if not bool(out.get("ok")) and out.get("errors") == ["未配置 Telegram Bot Token 或 Chat ID"]:
+            return JSONResponse({"ok": False, "error": "未配置 Telegram Bot Token 或 Chat ID"}, status_code=400)
+        return JSONResponse(out)
+    except Exception as e:
+        return JSONResponse({"ok": False, "pushed": 0, "skipped": 0, "errors": [str(e)]}, status_code=200)
 
 
 def _whale_addr_norm(addr: str) -> str:
@@ -2663,14 +4138,62 @@ def push_telegram_batch_recent(window_sec: int = 300, limit: int = 50, max_items
                 errors.append(str(e))
 
         return {"ok": ok, "pushed": pushed, "skipped": skipped, "errors": errors}
-    except Exception as e:
-        errors.append(str(e))
-        return {"ok": False, "pushed": pushed, "skipped": skipped, "errors": errors}
     finally:
         try:
             conn.close()
         except Exception:
             pass
+
+
+_MA10MACD_PUSH_THREAD: Optional[threading.Thread] = None
+_MA10MACD_PUSH_THREAD_LOCK = threading.Lock()
+_MA10MACD_PUSH_LAST_RUN_TS: Optional[int] = None
+_MA10MACD_PUSH_LAST_PUSH: Optional[dict] = None
+_MA10MACD_PUSH_LAST_ERROR: str = ""
+
+
+def _ma10macd_push_loop() -> None:
+    interval = max(60, min(24 * 3600, int(MA10MACD_PUSH_INTERVAL_SEC)))
+    while True:
+        try:
+            s = _news_settings()
+            enabled_mod = _setting_bool(s, "push_ma10macd_enabled", True)
+            if MA10MACD_PUSH_ENABLED and enabled_mod:
+                global _MA10MACD_PUSH_LAST_RUN_TS, _MA10MACD_PUSH_LAST_PUSH, _MA10MACD_PUSH_LAST_ERROR
+                _MA10MACD_PUSH_LAST_RUN_TS = int(time.time())
+                _MA10MACD_PUSH_LAST_ERROR = ""
+                _MA10MACD_PUSH_LAST_PUSH = push_tg_ma10macd(force=0)
+        except Exception as e:
+            try:
+                _MA10MACD_PUSH_LAST_ERROR = str(e)
+            except Exception:
+                pass
+        time.sleep(interval)
+
+
+def api_ma10macd_auto_status() -> JSONResponse:
+    alive = False
+    name = None
+    try:
+        alive = bool(_MA10MACD_PUSH_THREAD is not None and _MA10MACD_PUSH_THREAD.is_alive())
+        name = _MA10MACD_PUSH_THREAD.name if _MA10MACD_PUSH_THREAD is not None else None
+    except Exception:
+        alive = False
+        name = None
+    s = _news_settings()
+    payload = {
+        "enabled_env": bool(MA10MACD_PUSH_ENABLED),
+        "interval_sec": int(MA10MACD_PUSH_INTERVAL_SEC),
+        "thread_alive": alive,
+        "thread_name": name,
+        "enabled_mod": _setting_bool(s, "push_ma10macd_enabled", True),
+        "has_bot_token": bool((s.get("tg_bot_token") or "").strip()),
+        "has_chat_id": bool((s.get("tg_chat_id") or "").strip()),
+        "last_run_ts": _MA10MACD_PUSH_LAST_RUN_TS,
+        "last_error": _MA10MACD_PUSH_LAST_ERROR,
+        "last_push": _MA10MACD_PUSH_LAST_PUSH,
+    }
+    return JSONResponse(payload)
 
 
 def _master_a_push_loop() -> None:
@@ -4806,6 +6329,48 @@ def _rest_get_full_url(url: str, params: Optional[dict] = None, timeout: int = 1
     return _rest_get_json(url, params=params, timeout=timeout)
 
 
+def _short_err(contract: str, e: Exception) -> str:
+    c = (contract or "").strip().upper()
+    msg = ""
+    try:
+        msg = str(e)
+    except Exception:
+        msg = repr(e)
+
+    m = msg
+    # REST GET failed: status=400 body=... url=... err=HTTP 400: {"label":"CONTRACT_NOT_FOUND"}
+    try:
+        if "REST GET failed" in m:
+            status = None
+            label = None
+            try:
+                import re
+                ms = re.search(r"status=(\d+)", m)
+                if ms:
+                    status = ms.group(1)
+                ml = re.search(r"\"label\"\s*:\s*\"([^\"]+)\"", m)
+                if ml:
+                    label = ml.group(1)
+            except Exception:
+                status = None
+                label = None
+            if label:
+                return f"{c}: {label}" if c else f"{label}"
+            if status:
+                return f"{c}: REST status={status}" if c else f"REST status={status}"
+            return f"{c}: REST failed" if c else "REST failed"
+    except Exception:
+        pass
+
+    # 默认：截断过长错误，避免页面堆满
+    try:
+        if len(m) > 140:
+            m = m[:140] + "…"
+    except Exception:
+        pass
+    return f"{c}: {m}" if c else m
+
+
 def get_tri_candles(contract: str, tf: str, limit: int) -> List[dict]:
     """获取三周期信号/策略模块用的K线数据（REST）。
 
@@ -5132,7 +6697,7 @@ def top_contracts_by_quote_volume(limit: int = 50) -> List[str]:
         )
         pairs.append((c, float(vol)))
     pairs.sort(key=lambda x: x[1], reverse=True)
-    out = [c for c, _ in pairs[: max(1, min(200, limit))]]
+    out = [c for c, _ in pairs[: max(1, min(1000, limit))]]
     _cache_set(ck, out)
     return out
 
@@ -5238,6 +6803,17 @@ app.get("/api/exchange/spot/top_usdt_symbols")(api_exchange_spot_top_usdt_symbol
 app.post("/api/move3m/push")(api_move3m_push)
 app.get("/api/move3m/log")(api_move3m_log_list)
 app.post("/api/move3m/log")(api_move3m_log_add)
+app.get("/api/ma10macd/list")(api_ma10macd_list)
+app.get("/api/ma10macd/detail")(api_ma10macd_detail)
+app.get("/api/ma10macd/push_now")(api_ma10macd_push_now)
+app.get("/api/ma10macd/auto_status")(api_ma10macd_auto_status)
+app.get("/api/smartmoney/institutions")(api_smartmoney_institutions)
+app.get("/api/smartmoney/institution")(api_smartmoney_institution_detail)
+app.get("/api/smartmoney/stock")(api_smartmoney_stock_detail)
+app.get("/api/smartmoney/flows")(api_smartmoney_flows)
+app.post("/api/smartmoney/refresh")(api_smartmoney_refresh)
+app.get("/api/smartmoney/refresh/status")(api_smartmoney_refresh_status)
+app.get("/api/smartmoney/ai")(api_smartmoney_ai)
 
 
 def _rsi14(closes: List[float]) -> Optional[float]:
@@ -7502,6 +9078,15 @@ def _startup() -> None:
                     pass
 
         threading.Thread(target=_macd_prealert_startup_push_once, name="macd_prealert_startup_push_once", daemon=True).start()
+
+    # MA10 回踩买入：后台定时推送（仅推“触发买入”，每轮金叉只触发一次）
+    if MA10MACD_PUSH_ENABLED:
+        global _MA10MACD_PUSH_THREAD
+        with _MA10MACD_PUSH_THREAD_LOCK:
+            if _MA10MACD_PUSH_THREAD is None or not _MA10MACD_PUSH_THREAD.is_alive():
+                t_ma10 = threading.Thread(target=_ma10macd_push_loop, name="ma10macd_push", daemon=True)
+                _MA10MACD_PUSH_THREAD = t_ma10
+                t_ma10.start()
 
     # MACD 监控：后台定时推送（与 MACD 监控页一致）
     if MACD_MONITOR_PUSH_ENABLED:

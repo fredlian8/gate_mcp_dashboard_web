@@ -1,0 +1,45 @@
+name: SmartMoney Daily Refresh
+
+on:
+  schedule:
+    # 每天 17:00 UTC（北京时间 01:00）
+    - cron: '0 17 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Call Render refresh endpoint
+        env:
+          REFRESH_URL: ${{ secrets.SMARTMONEY_REFRESH_URL }}
+          REFRESH_TOKEN: ${{ secrets.SMARTMONEY_REFRESH_TOKEN }}
+        run: |
+          if [ -z "$REFRESH_URL" ]; then
+            echo "Missing secrets.SMARTMONEY_REFRESH_URL" >&2
+            exit 1
+          fi
+          if [ -z "$REFRESH_TOKEN" ]; then
+            echo "Missing secrets.SMARTMONEY_REFRESH_TOKEN" >&2
+            exit 1
+          fi
+
+          echo "Calling: $REFRESH_URL"
+          curl -sS -X POST "$REFRESH_URL" \
+            -H "x-refresh-token: $REFRESH_TOKEN" \
+            -H "content-type: application/json" \
+            --data '{}' \
+            --max-time 840
+
+      - name: Check refresh status (optional)
+        if: always()
+        env:
+          STATUS_URL: ${{ secrets.SMARTMONEY_REFRESH_STATUS_URL }}
+        run: |
+          if [ -z "$STATUS_URL" ]; then
+            echo "SMARTMONEY_REFRESH_STATUS_URL not set; skipping status check"
+            exit 0
+          fi
+          echo "Status: $STATUS_URL"
+          curl -sS "$STATUS_URL" --max-time 60

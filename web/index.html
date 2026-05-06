@@ -93,11 +93,13 @@
             <button class="nav-item" data-target="page-macd" id="nav-macd">MACD 监控</button>
             <button class="nav-item" data-target="page-prealert" id="nav-prealert">MACD 预警</button>
             <button class="nav-item" data-target="page-macd-entry" id="nav-macd-entry">MACD 入场</button>
+            <button class="nav-item" data-target="page-ma10macd" id="nav-ma10macd">MA10 回踩买入（1D）</button>
             <button class="nav-item" data-target="page-signal" id="nav-signal">多空综合雷达</button>
             <button class="nav-item" data-target="page-news" id="nav-news">新闻多空哨兵</button>
             <button class="nav-item" data-target="page-tri-signal" id="nav-tri-signal">三周期信号矩阵</button>
             <button class="nav-item" data-target="page-master-a" id="nav-master-a">量化策略</button>
             <button class="nav-item" data-target="page-whales" id="nav-whales">鲸鱼动向</button>
+            <button class="nav-item" data-target="page-smartmoney" id="nav-smartmoney">机构持仓追踪</button>
             <button class="nav-item" data-target="page-move3m" id="nav-move3m">3分钟异动监控</button>
             <button class="nav-item" data-target="page-telegram" id="nav-telegram">Telegram 推送</button>
           </div>
@@ -222,6 +224,316 @@
               </table>
             </div>
           </section>
+        </section>
+
+        <section id="page-smartmoney" class="hidden">
+          <header class="mb-6">
+            <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+              <div>
+                <h1 class="text-3xl font-extrabold text-blue-300">机构持仓追踪</h1>
+                <div class="muted text-sm mt-2">真实数据：SEC EDGAR 13F（Berkshire、BlackRock、Vanguard）。说明：13F 按 CUSIP 披露，未做 CUSIP→Ticker 映射，因此页面按 CUSIP/Issuer 展示。</div>
+              </div>
+              <div class="flex flex-wrap items-center gap-2">
+                <button class="btn active" id="smTabDash">首页</button>
+                <button class="btn" id="smTabInst">机构</button>
+                <button class="btn" id="smTabStock">股票</button>
+                <button class="btn" id="smTabFlows">聪明钱</button>
+              </div>
+            </div>
+          </header>
+
+          <div id="smViewDash" class="space-y-4">
+            <div class="card rounded-2xl p-4">
+              <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                <div>
+                  <div class="font-extrabold">热门机构</div>
+                  <div class="muted text-sm mt-1">点击机构进入详情；也可以直接搜索机构或股票代码。</div>
+                </div>
+                <div class="flex items-center gap-2">
+                  <input id="smSearch" class="input px-3 py-2" placeholder="搜索机构（如 BlackRock）" style="min-width: 280px" />
+                  <button class="btn" id="smSearchBtn">搜索</button>
+                </div>
+              </div>
+
+              <details class="mt-3">
+                <summary class="muted text-sm cursor-pointer select-none">说明（取值口径 / 单位 / 周期）</summary>
+                <div class="mt-2 muted text-xs leading-relaxed">
+                  <div class="font-semibold">管理资产规模（AUM）</div>
+                  <div>来自 SEC EDGAR 13F 披露的持仓表（Information Table）中每条记录的 value 字段汇总。</div>
+                  <div>单位：13F 的 value 字段口径为“千美元（$1000）”，本页已换算为“美元（USD）”后展示。</div>
+
+                  <div class="mt-2 font-semibold">最近持仓变化</div>
+                  <div>周期：默认对比“最新一期 13F”与“上一份 13F”（通常为上一季度），属于季度级（QoQ）对比。</div>
+                  <div>统计：按 CUSIP 对比两期披露的持仓市值（value_usd）变化：</div>
+                  <div>- 若本期 value_usd - 上期 value_usd &gt; 0：记为 1 条“增持”</div>
+                  <div>- 若本期 value_usd - 上期 value_usd &lt; 0：记为 1 条“减持”</div>
+                  <div>展示：仅显示“净增持 / 净减持 / 持平”，净值 = |增持条数 - 减持条数|。</div>
+
+                  <div class="mt-2">限制说明：</div>
+                  <div>- 13F 本身是季度披露，非实时；披露存在延迟。</div>
+                  <div>- 目前统计以“本期持仓列表”为基准；若某 CUSIP 上期有而本期完全消失（清仓/未披露），不会计入“减持条数”。</div>
+                </div>
+              </details>
+
+              <div class="mt-4 overflow-x-auto">
+                <table class="min-w-full text-sm" id="smInstTable">
+                  <thead>
+                    <tr class="text-left muted">
+                      <th class="py-2">机构</th>
+                      <th class="py-2">管理资产规模</th>
+                      <th class="py-2">本季持仓资产（USD）</th>
+                      <th class="py-2">上季持仓资产（USD）</th>
+                      <th class="py-2">AUM变化（USD）</th>
+                      <th class="py-2">持仓数变化</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div id="smViewInst" class="space-y-4 hidden">
+            <div class="card rounded-2xl p-4">
+              <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+                <div>
+                  <div class="font-extrabold" id="smInstTitle">机构详情</div>
+                  <div class="muted text-sm mt-1" id="smInstMeta">—</div>
+                </div>
+                <div class="flex flex-wrap items-center gap-2">
+                  <input id="smInstId" class="input px-3 py-2" placeholder="机构 id：brk / blk / vgi" style="min-width: 220px" />
+                  <button class="btn" id="smInstLoad">加载</button>
+                  <button class="btn" id="smInstAi">AI 分析</button>
+                </div>
+              </div>
+              <div class="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div class="card rounded-2xl p-4">
+                  <div class="font-extrabold">持仓占比（TOP10百分比）</div>
+                  <div id="smInstPie" class="mt-3" style="height: 380px;"></div>
+                </div>
+                <div class="card rounded-2xl p-4">
+                  <div class="font-extrabold">Top Holdings</div>
+                  <div class="mt-3 overflow-x-auto">
+                    <table class="min-w-full text-sm" id="smTopHoldingsTable">
+                      <thead>
+                        <tr class="text-left muted">
+                          <th class="py-2">标的（Issuer / CUSIP）</th>
+                          <th class="py-2">占比</th>
+                          <th class="py-2">市值</th>
+                          <th class="py-2">较上期变化（$）</th>
+                        </tr>
+                      </thead>
+                      <tbody></tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+              <div class="mt-4 card rounded-2xl p-4">
+                <div class="font-extrabold">全部持仓</div>
+                <div class="mt-3 overflow-x-auto">
+                  <table class="min-w-full text-sm" id="smHoldingsTable">
+                    <thead>
+                      <tr class="text-left muted">
+                        <th class="py-2">标的（Issuer / CUSIP）</th>
+                        <th class="py-2">类别</th>
+                        <th class="py-2">占比</th>
+                        <th class="py-2">市值</th>
+                        <th class="py-2">较上期变化（$）</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </div>
+              <div class="mt-4 card rounded-2xl p-4 hidden" id="smInstAiBox">
+                <div class="font-extrabold" id="smInstAiTitle">AI 分析</div>
+                <pre class="mt-2 text-xs muted whitespace-pre-wrap" id="smInstAiText">—</pre>
+              </div>
+            </div>
+          </div>
+
+          <div id="smViewStock" class="space-y-4 hidden">
+            <div class="card rounded-2xl p-4">
+              <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+                <div>
+                  <div class="font-extrabold" id="smStockTitle">股票详情</div>
+                  <div class="muted text-sm mt-1" id="smStockMeta">—</div>
+                </div>
+                <div class="flex flex-wrap items-center gap-2">
+                  <input id="smStockTicker" class="input px-3 py-2" placeholder="CUSIP：如 037833100" style="min-width: 220px" />
+                  <button class="btn" id="smStockLoad">加载</button>
+                  <button class="btn" id="smStockAi">AI 分析</button>
+                </div>
+              </div>
+              <div class="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-4">
+                <div class="card rounded-2xl p-4">
+                  <div class="font-extrabold">当前价格</div>
+                  <div class="text-2xl font-extrabold mt-2" id="smStockPrice">—</div>
+                  <div class="muted text-sm mt-1" id="smStockDesc">说明：13F 不提供 ticker，且当前未做 CUSIP→ticker 映射，因此不展示价格。</div>
+                </div>
+                <div class="card rounded-2xl p-4 lg:col-span-2">
+                  <div class="font-extrabold">机构持有（按占比）</div>
+                  <div class="mt-3 overflow-x-auto">
+                    <table class="min-w-full text-sm" id="smHoldersTable">
+                      <thead>
+                        <tr class="text-left muted">
+                          <th class="py-2">机构</th>
+                          <th class="py-2">占比</th>
+                          <th class="py-2">市值</th>
+                          <th class="py-2">较上期变化（$）</th>
+                        </tr>
+                      </thead>
+                      <tbody></tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+              <div class="mt-4 card rounded-2xl p-4 hidden" id="smStockAiBox">
+                <div class="font-extrabold" id="smStockAiTitle">AI 分析</div>
+                <pre class="mt-2 text-xs muted whitespace-pre-wrap" id="smStockAiText">—</pre>
+              </div>
+            </div>
+          </div>
+
+          <div id="smViewFlows" class="space-y-4 hidden">
+            <div class="card rounded-2xl p-4">
+              <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+                <div>
+                  <div class="font-extrabold">聪明钱追踪</div>
+                  <div class="muted text-sm mt-1">按机构组合的季度变化（qoq_change × 持仓市值）做资金流入/流出估算。</div>
+                </div>
+                <div class="flex flex-wrap items-center gap-2">
+                  <label class="muted text-sm">行业</label>
+                  <select id="smSector" class="input px-3 py-2">
+                    <option value="all">全部</option>
+                    <option value="科技">科技</option>
+                    <option value="金融">金融</option>
+                    <option value="消费">消费</option>
+                    <option value="医药">医药</option>
+                    <option value="能源">能源</option>
+                    <option value="汽车">汽车</option>
+                  </select>
+                  <label class="muted text-sm">时间</label>
+                  <select id="smPeriod" class="input px-3 py-2">
+                    <option value="quarter">本季度</option>
+                    <option value="30d">最近30天</option>
+                  </select>
+                  <button class="btn" id="smFlowsLoad">刷新</button>
+                  <button class="btn" id="smFlowsAi">AI 总结</button>
+                </div>
+              </div>
+
+              <div class="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div class="card rounded-2xl p-4">
+                  <div class="font-extrabold">Top Buys</div>
+                  <div class="mt-3 overflow-x-auto">
+                    <table class="min-w-full text-sm" id="smBuysTable">
+                      <thead>
+                        <tr class="text-left muted">
+                          <th class="py-2">标的（Issuer / CUSIP）</th>
+                          <th class="py-2">行业</th>
+                          <th class="py-2">资金流入</th>
+                        </tr>
+                      </thead>
+                      <tbody></tbody>
+                    </table>
+                  </div>
+                </div>
+                <div class="card rounded-2xl p-4">
+                  <div class="font-extrabold">Top Sells</div>
+                  <div class="mt-3 overflow-x-auto">
+                    <table class="min-w-full text-sm" id="smSellsTable">
+                      <thead>
+                        <tr class="text-left muted">
+                          <th class="py-2">标的（Issuer / CUSIP）</th>
+                          <th class="py-2">行业</th>
+                          <th class="py-2">资金流出</th>
+                        </tr>
+                      </thead>
+                      <tbody></tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+
+              <div class="mt-4 card rounded-2xl p-4 hidden" id="smFlowsAiBox">
+                <div class="font-extrabold" id="smFlowsAiTitle">AI 总结</div>
+                <pre class="mt-2 text-xs muted whitespace-pre-wrap" id="smFlowsAiText">—</pre>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="page-ma10macd" class="hidden">
+          <header class="mb-6">
+            <div class="flex items-start justify-between gap-4">
+              <div>
+                <h1 class="text-3xl font-extrabold text-blue-300">MA10 回踩买入（1D）</h1>
+                <p class="muted mt-2">功能：扫描日线行情，筛选“金叉后等待回踩 MA10”的机会。当代币出现日线 MACD 金叉后，价格回踩到 MA10 且未死叉时标记“触发买入”。扫描范围由两部分构成：① env 的 TRI_SIGNAL_CONTRACTS（优先、去重）；② Gate 永续 USDT 合约 TopN（按 24h 成交额）。Telegram 推送遵循同币 12h 冷却：满足条件即推送，但同一币 12 小时内只推一次；12h 后若仍满足条件可再次推送。</p>
+                <div class="mt-2 flex flex-wrap items-center gap-2 muted text-xs">
+                  <span>来源标识：</span>
+                  <span class="pill" style="color:#93c5fd">TRI_SIGNAL_CONTRACTS</span>
+                  <span class="pill" style="color:#cbd5e1">Gate TopN</span>
+                  <span class="muted">（若重复，优先显示 TRI）</span>
+                </div>
+              </div>
+              <div class="flex flex-wrap items-center gap-2">
+                <label class="muted text-sm">TopN</label>
+                <select id="ma10macdTopN" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2">
+                  <option value="0">仅 TRI</option>
+                  <option value="100" selected>Top100+TRI</option>
+                  <option value="200">Top200+TRI</option>
+                  <option value="400">Top400+TRI</option>
+                </select>
+                <button id="ma10macdRefresh" class="btn">刷新</button>
+              </div>
+            </div>
+            <div class="muted text-sm mt-3" id="ma10macdStatus">—</div>
+            <details class="mt-2 hidden" id="ma10macdErrorsBox">
+              <summary class="muted text-xs cursor-pointer" id="ma10macdErrorsSummary">错误信息（0）</summary>
+              <div class="mt-2">
+                <pre class="text-xs whitespace-pre-wrap break-words muted" id="ma10macdErrorsText">—</pre>
+              </div>
+            </details>
+          </header>
+
+          <div class="card rounded-2xl p-4">
+            <div class="flex items-center justify-between gap-3 mb-3">
+              <div class="muted text-xs" id="ma10macdPageStatus">—</div>
+              <div class="flex items-center gap-2">
+                <button id="ma10macdPrev" class="btn">上一页</button>
+                <button id="ma10macdNext" class="btn">下一页</button>
+              </div>
+            </div>
+            <div class="overflow-auto">
+              <table class="w-full text-sm" id="ma10macdTable">
+                <thead>
+                  <tr class="text-left muted">
+                    <th class="py-2">代币</th>
+                    <th class="py-2">最新价</th>
+                    <th class="py-2">MA10</th>
+                    <th class="py-2">差值</th>
+                    <th class="py-2">买入价</th>
+                    <th class="py-2">止损</th>
+                    <th class="py-2">止盈</th>
+                    <th class="py-2">金叉起点</th>
+                    <th class="py-2">状态</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr><td colspan="9" class="muted py-3">加载中…</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card rounded-2xl p-4 mt-6 hidden" id="ma10macdDetails">
+            <div class="flex items-center justify-between gap-4 mb-3">
+              <div class="text-lg font-extrabold" id="ma10macdDetailsTitle">信号详情</div>
+              <button class="btn" id="ma10macdDetailsClose">关闭</button>
+            </div>
+            <div id="ma10macdChart1d" class="w-full" style="height: 520px;"></div>
+          </div>
         </section>
 
         <section id="page-move3m" class="hidden">
@@ -1535,6 +1847,10 @@
                       量化策略A（触发）
                     </label>
                     <label class="muted text-sm flex items-center gap-2">
+                      <input id="pushMa10macdEnabled" type="checkbox" class="accent-blue-500" />
+                      MA10 回踩买入（1D）
+                    </label>
+                    <label class="muted text-sm flex items-center gap-2">
                       <input id="pushMasterBEnabled" type="checkbox" class="accent-blue-500" />
                       量化策略B（触发）
                     </label>
@@ -2819,6 +3135,312 @@
   }
 
   // ==========================
+  // MA10 回踩买入（1D）
+  // ==========================
+  let ma10macdPage = 1;
+  let ma10macdPageSize = 20;
+  let ma10macdAutoTimer = null;
+  function _startMa10macdAutoStatusTimer() {
+    if (ma10macdAutoTimer) return;
+    const tick = async () => {
+      const page = document.getElementById('page-ma10macd');
+      if (!page || page.classList.contains('hidden')) return;
+      const st = document.getElementById('ma10macdStatus');
+      try {
+        const s = await fetchJson('/api/ma10macd/auto_status');
+        const alive = !!(s && s.thread_alive);
+        const enabledEnv = !!(s && s.enabled_env);
+        const enabledMod = !!(s && s.enabled_mod);
+        const interval = (s && s.interval_sec !== undefined) ? Number(s.interval_sec) : null;
+        const lastRunTs = (s && s.last_run_ts) ? Number(s.last_run_ts) : 0;
+        const lastErr = (s && s.last_error) ? String(s.last_error || '') : '';
+        const lp = (s && s.last_push && typeof s.last_push === 'object') ? s.last_push : null;
+        const pushed = lp && lp.pushed !== undefined ? lp.pushed : null;
+        const skipped = lp && lp.skipped !== undefined ? lp.skipped : null;
+        const ok = lp && lp.ok !== undefined ? lp.ok : null;
+        const lastRunTxt = lastRunTs > 0 ? new Date(lastRunTs * 1000).toLocaleString() : '—';
+        const errTxt = lastErr ? ` | error: ${lastErr}` : '';
+        const pushTxt = (pushed === null && skipped === null) ? '' : ` | last_push: ok=${ok} pushed=${pushed} skipped=${skipped}`;
+        const head = `自动推送：env=${enabledEnv ? 'ON' : 'OFF'} mod=${enabledMod ? 'ON' : 'OFF'} thread=${alive ? 'alive' : 'dead'} interval=${isFinite(interval) ? interval : '—'}s last_run=${lastRunTxt}`;
+        if (st) st.textContent = head + pushTxt + errTxt;
+      } catch (e) {
+        if (st) st.textContent = `自动推送状态获取失败：${String(e)}`;
+      }
+    };
+    ma10macdAutoTimer = setInterval(() => tick().catch(() => {}), 10 * 60 * 1000);
+    tick().catch(() => {});
+  }
+  function _stopMa10macdAutoStatusTimer() {
+    try { if (ma10macdAutoTimer) { clearInterval(ma10macdAutoTimer); ma10macdAutoTimer = null; } } catch (e) {}
+  }
+
+  async function loadMa10macd() {
+    const st = document.getElementById('ma10macdStatus');
+    if (st) st.textContent = '更新中…';
+    let payload;
+    try {
+      const topnEl = document.getElementById('ma10macdTopN');
+      const topn = topnEl ? Number(topnEl.value || 100) : 100;
+      payload = await fetchJson(`/api/ma10macd/list?page=${encodeURIComponent(ma10macdPage)}&page_size=${encodeURIComponent(ma10macdPageSize)}&topn=${encodeURIComponent(isFinite(topn) ? topn : 100)}`);
+    } catch (e) {
+      if (st) st.textContent = `加载失败：${String(e)}`;
+      return;
+    }
+    const items = (payload && payload.items) ? payload.items : [];
+    const errs = (payload && Array.isArray(payload.errors)) ? payload.errors : [];
+    const errBox = document.getElementById('ma10macdErrorsBox');
+    const errSum = document.getElementById('ma10macdErrorsSummary');
+    const errText = document.getElementById('ma10macdErrorsText');
+    try {
+      if (errBox) {
+        if (errs && errs.length) {
+          errBox.classList.remove('hidden');
+          if (errSum) errSum.textContent = `错误信息（${errs.length}）`;
+          if (errText) errText.textContent = errs.slice(0, 50).map(x => String(x)).join('\n');
+        } else {
+          errBox.classList.add('hidden');
+          if (errSum) errSum.textContent = '错误信息（0）';
+          if (errText) errText.textContent = '—';
+        }
+      }
+    } catch (e) {}
+    const total = (payload && payload.total !== undefined) ? Number(payload.total || 0) : (Array.isArray(items) ? items.length : 0);
+    const ps = (payload && payload.page_size !== undefined) ? Number(payload.page_size || ma10macdPageSize) : ma10macdPageSize;
+    const pg = (payload && payload.page !== undefined) ? Number(payload.page || ma10macdPage) : ma10macdPage;
+    ma10macdPage = (isFinite(pg) && pg > 0) ? pg : ma10macdPage;
+    ma10macdPageSize = (isFinite(ps) && ps > 0) ? ps : ma10macdPageSize;
+    const pageEl = document.getElementById('ma10macdPageStatus');
+    if (pageEl) {
+      const start = (ma10macdPage - 1) * ma10macdPageSize + 1;
+      const end = Math.min(ma10macdPage * ma10macdPageSize, total);
+      pageEl.textContent = `分页：第 ${ma10macdPage} 页｜每页 ${ma10macdPageSize} 条｜显示 ${total ? `${start}-${end}` : '0'} / ${total}`;
+    }
+
+    const fmt6 = (v) => {
+      if (v === null || v === undefined) return '—';
+      const n = Number(v);
+      if (!isFinite(n)) return String(v);
+      const s = n.toString();
+      if (s.includes('e') || s.includes('E')) return n.toFixed(6);
+      const parts = s.split('.');
+      if (parts.length === 2 && parts[1].length > 6) return n.toFixed(6);
+      return s;
+    };
+
+    const tb = document.querySelector('#ma10macdTable tbody');
+    if (tb) {
+      if (!Array.isArray(items) || !items.length) {
+        tb.innerHTML = `<tr><td colspan="9" class="muted py-3">暂无数据</td></tr>`;
+      } else {
+        tb.innerHTML = items.map(x => {
+          const contract = String(x.contract || '');
+          const symbol = String(x.symbol || contract || '—');
+          const lp = x.last_price;
+          const ma10 = x.ma10;
+          const dm = x.delta_ma10;
+          const gts = Number(x.golden_ts || 0) || 0;
+          const ready = !!x.ready;
+          const isCooldown = String(x.reason || '') === 'cooldown_12h';
+          const entry = (ready || isCooldown) ? x.entry : null;
+          const sl = (ready || isCooldown) ? x.sl : null;
+          const tp1 = (ready || isCooldown) ? x.tp1 : null;
+          const inTri = !!x.in_tri;
+          const inTop = !!x.in_topn;
+          const gtxt = gts > 0 ? new Date(gts * 1000).toLocaleDateString() : '—';
+
+          const dmNum = Number(dm);
+          const dmCls = (isFinite(dmNum) && dmNum > 0) ? 'text-red-300' : ((isFinite(dmNum) && dmNum < 0) ? 'text-green-300' : 'muted');
+
+          let statusHtml = '';
+          if (x.ready) {
+            statusHtml = `<span class="pill pos">触发买入</span>`;
+          } else {
+            const r = String(x.reason || '');
+            if (r === 'waiting_retest') statusHtml = `<span class="pill">等待回踩</span>`;
+            else if (r === 'no_golden') statusHtml = `<span class="pill neu">未金叉</span>`;
+            else if (r === 'dead_cross_filter') statusHtml = `<span class="pill neg">死叉过滤</span>`;
+            else if (r === 'cooldown_12h') {
+              const pushedRecent = !!x.pushed_recent;
+              statusHtml = pushedRecent
+                ? `<span class="pill neu">已推送（冷却中）</span>`
+                : `<span class="pill neu">冷却中（12h）</span>`;
+            } else statusHtml = `<span class="pill neu">—</span>`;
+          }
+
+          const symCls = inTri ? 'text-blue-200 font-semibold' : (inTop ? 'text-slate-300' : 'text-gray-300');
+          const a = `<a href="#" class="ma10-sym hover:underline ${symCls}" data-contract="${contract}">${symbol}</a>`;
+          return `
+            <tr class="${ready ? 'bg-green-900/15' : ''}">
+              <td class="py-2 font-semibold">${a}</td>
+              <td class="py-2">${fmt6(lp)}</td>
+              <td class="py-2">${fmt6(ma10)}</td>
+              <td class="py-2 ${dmCls}">${fmt6(dm)}</td>
+              <td class="py-2">${fmt6(entry)}</td>
+              <td class="py-2">${fmt6(sl)}</td>
+              <td class="py-2">${fmt6(tp1)}</td>
+              <td class="py-2">${gtxt}</td>
+              <td class="py-2">${statusHtml}</td>
+            </tr>
+          `;
+        }).join('');
+      }
+    }
+    if (st) {
+      const now = new Date();
+      const n = Array.isArray(items) ? items.length : 0;
+      st.textContent = `更新时间：${now.toLocaleString()}（${n}）`;
+    }
+  }
+
+  async function _loadMa10macdChart(contract) {
+    const c = String(contract || '').trim();
+    if (!c) return;
+    const titleEl = document.getElementById('ma10macdDetailsTitle');
+    if (titleEl) titleEl.textContent = `信号详情：${c}（1D）`;
+    const root = document.getElementById('ma10macdDetails');
+    if (root) root.classList.remove('hidden');
+
+    const payload = await fetchJson(`/api/ma10macd/detail?contract=${encodeURIComponent(c)}&limit=220`);
+    _renderMa10macdDetailPlot('ma10macdChart1d', `MA10 回踩买入｜${c}（1D）`, payload);
+  }
+
+  function _renderMa10macdDetailPlot(mountId, title, payload) {
+    const t = (payload && payload.t) ? payload.t : [];
+    const open = (payload && payload.open) ? payload.open : [];
+    const high = (payload && payload.high) ? payload.high : [];
+    const low = (payload && payload.low) ? payload.low : [];
+    const close = (payload && payload.close) ? payload.close : [];
+    const dif = (payload && payload.dif) ? payload.dif : [];
+    const dea = (payload && payload.dea) ? payload.dea : [];
+    const hist = (payload && payload.hist) ? payload.hist : [];
+    const ma10 = (payload && payload.ma10) ? payload.ma10 : [];
+    const vol = (payload && payload.vol) ? payload.vol : [];
+    const x = (t || []).map(ts => new Date(Number(ts || 0) * 1000));
+
+    const histColors = (hist || []).map(v => {
+      const n = Number(v);
+      if (!isFinite(n)) return 'rgba(148,163,184,0.35)';
+      return (n >= 0) ? 'rgba(34,197,94,0.65)' : 'rgba(239,68,68,0.65)';
+    });
+    const volColors = (vol || []).map((vv, i) => {
+      const o = Number(open[i]);
+      const c = Number(close[i]);
+      if (isFinite(o) && isFinite(c)) return (c >= o) ? 'rgba(34,197,94,0.55)' : 'rgba(239,68,68,0.55)';
+      return 'rgba(148,163,184,0.30)';
+    });
+
+    const traces = [
+      {
+        type: 'candlestick',
+        x,
+        open,
+        high,
+        low,
+        close,
+        name: 'K线',
+        yaxis: 'y',
+        xaxis: 'x',
+        increasing: { line: { color: 'rgba(34,197,94,0.85)' } },
+        decreasing: { line: { color: 'rgba(239,68,68,0.85)' } },
+        hovertemplate:
+          '开:%{open}<br>高:%{high}<br>低:%{low}<br>收:%{close}<extra></extra>',
+      },
+      {
+        type: 'scatter',
+        mode: 'lines',
+        x,
+        y: ma10,
+        name: 'MA10',
+        yaxis: 'y',
+        xaxis: 'x',
+        line: { color: 'rgba(245,158,11,0.95)', width: 1 },
+        hovertemplate: 'MA10:%{y}<extra></extra>',
+      },
+      {
+        type: 'bar',
+        x,
+        y: hist,
+        name: 'HIST',
+        yaxis: 'y2',
+        xaxis: 'x2',
+        marker: { color: histColors },
+        hovertemplate: 'HIST:%{y}<extra></extra>',
+      },
+      {
+        type: 'scatter',
+        mode: 'lines',
+        x,
+        y: dif,
+        name: 'DIF',
+        yaxis: 'y2',
+        xaxis: 'x2',
+        line: { color: 'rgba(239,68,68,0.90)', width: 1 },
+        hovertemplate: 'DIF:%{y}<extra></extra>',
+      },
+      {
+        type: 'scatter',
+        mode: 'lines',
+        x,
+        y: dea,
+        name: 'DEA',
+        yaxis: 'y2',
+        xaxis: 'x2',
+        line: { color: 'rgba(59,130,246,0.95)', width: 1 },
+        hovertemplate: 'DEA:%{y}<extra></extra>',
+      },
+      {
+        type: 'bar',
+        x,
+        y: vol,
+        name: 'VOL',
+        yaxis: 'y3',
+        xaxis: 'x3',
+        marker: { color: volColors },
+        hovertemplate: 'VOL:%{y}<extra></extra>',
+      },
+    ];
+
+    const levels = (payload && payload.trade_levels) ? payload.trade_levels : null;
+    const shapes = [];
+    try {
+      if (levels && isFinite(Number(levels.entry))) {
+        shapes.push({ type: 'line', xref: 'paper', yref: 'y', x0: 0, x1: 1, y0: Number(levels.entry), y1: Number(levels.entry), line: { color: 'rgba(59,130,246,0.75)', width: 1, dash: 'dot' } });
+      }
+      if (levels && isFinite(Number(levels.sl))) {
+        shapes.push({ type: 'line', xref: 'paper', yref: 'y', x0: 0, x1: 1, y0: Number(levels.sl), y1: Number(levels.sl), line: { color: 'rgba(239,68,68,0.80)', width: 1, dash: 'dash' } });
+      }
+      if (levels && isFinite(Number(levels.tp1))) {
+        shapes.push({ type: 'line', xref: 'paper', yref: 'y', x0: 0, x1: 1, y0: Number(levels.tp1), y1: Number(levels.tp1), line: { color: 'rgba(34,197,94,0.80)', width: 1, dash: 'dash' } });
+      }
+    } catch (e) {}
+
+    const layout = {
+      title: { text: title, font: { color: 'rgba(255,255,255,0.85)', size: 14 } },
+      paper_bgcolor: 'rgba(0,0,0,0)',
+      plot_bgcolor: 'rgba(0,0,0,0)',
+      margin: { l: 20, r: 56, t: 46, b: 60 },
+      font: { color: 'rgba(255,255,255,0.75)' },
+      dragmode: 'pan',
+      hovermode: 'x unified',
+      hoverlabel: {
+        bgcolor: 'rgba(15,23,42,0.92)',
+        bordercolor: 'rgba(148,163,184,0.35)',
+        font: { color: 'rgba(255,255,255,0.92)' }
+      },
+      showlegend: true,
+      legend: { orientation: 'h', y: -0.26 },
+      xaxis: { gridcolor: 'rgba(255,255,255,0.06)', rangeslider: { visible: false }, automargin: true, tickfont: { size: 10 }, domain: [0, 0.8] },
+      yaxis: { domain: [0.56, 1.0], title: '', gridcolor: 'rgba(255,255,255,0.06)', automargin: true, tickfont: { size: 10 }, side: 'right' },
+      yaxis2: { domain: [0.24, 0.50], title: 'MACD', gridcolor: 'rgba(255,255,255,0.06)', zerolinecolor: 'rgba(255,255,255,0.10)', automargin: true, tickfont: { size: 10 }, side: 'right' },
+      xaxis2: { overlaying: 'x', anchor: 'y2', matches: 'x', showgrid: false, showticklabels: false, domain: [0, 0.8] },
+      yaxis3: { domain: [0.0, 0.18], title: 'VOL', gridcolor: 'rgba(255,255,255,0.06)', rangemode: 'tozero', automargin: true, tickfont: { size: 10 }, side: 'right' },
+      xaxis3: { overlaying: 'x', anchor: 'y3', matches: 'x', showgrid: false, automargin: true, tickfont: { size: 10 }, domain: [0, 0.8] },
+      shapes,
+    };
+    Plotly.newPlot(mountId, traces, layout, PLOTLY_CONFIG);
+  }
+
+  // ==========================
   // 页面切换（导航）
   // ==========================
   // showPage():
@@ -2826,7 +3448,7 @@
   // - 同步左侧导航 active 状态
   // - DataTables 在 hidden 状态下初始化会列宽异常，因此切页后做 columns.adjust()
   function showPage(pageId) {
-    const pages = ['page-dashboard', 'page-whales', 'page-move3m', 'page-macd', 'page-macd-entry', 'page-macd-preentry', 'page-prealert', 'page-signal', 'page-news', 'page-telegram', 'page-tri-signal', 'page-master-a'];
+    const pages = ['page-dashboard', 'page-smartmoney', 'page-whales', 'page-move3m', 'page-macd', 'page-macd-entry', 'page-macd-preentry', 'page-prealert', 'page-signal', 'page-news', 'page-telegram', 'page-tri-signal', 'page-master-a', 'page-ma10macd'];
     pages.forEach(pid => {
       const el = document.getElementById(pid);
       if (!el) return;
@@ -2912,7 +3534,483 @@
       setWhaleTimer();
     }
 
+    if (pageId === 'page-ma10macd') {
+      loadMa10macd().catch(() => {});
+      _startMa10macdAutoStatusTimer();
+    } else {
+      _stopMa10macdAutoStatusTimer();
+    }
+
+    if (pageId === 'page-smartmoney') {
+      smShowView('dash');
+      loadSmartMoneyDashboard().catch(() => {});
+    }
   }
+
+  let smView = 'dash';
+  let smLastInstId = '';
+  let smLastTicker = '';
+
+  function smSetTabActive(view) {
+    const map = {
+      dash: 'smTabDash',
+      inst: 'smTabInst',
+      stock: 'smTabStock',
+      flows: 'smTabFlows',
+    };
+    Object.keys(map).forEach(k => {
+      const el = document.getElementById(map[k]);
+      if (!el) return;
+      if (k === view) el.classList.add('active');
+      else el.classList.remove('active');
+    });
+  }
+
+  function smShowView(view) {
+    smView = view;
+    smSetTabActive(view);
+    const vDash = document.getElementById('smViewDash');
+    const vInst = document.getElementById('smViewInst');
+    const vStock = document.getElementById('smViewStock');
+    const vFlows = document.getElementById('smViewFlows');
+    if (vDash) (view === 'dash') ? vDash.classList.remove('hidden') : vDash.classList.add('hidden');
+    if (vInst) (view === 'inst') ? vInst.classList.remove('hidden') : vInst.classList.add('hidden');
+    if (vStock) (view === 'stock') ? vStock.classList.remove('hidden') : vStock.classList.add('hidden');
+    if (vFlows) (view === 'flows') ? vFlows.classList.remove('hidden') : vFlows.classList.add('hidden');
+  }
+
+  function fmtUsd(v) {
+    if (v === null || v === undefined) return '—';
+    const n = Number(v);
+    if (!isFinite(n)) return String(v);
+    const abs = Math.abs(n);
+    if (abs >= 1e12) return `$${(n/1e12).toFixed(2)}T`;
+    if (abs >= 1e9) return `$${(n/1e9).toFixed(2)}B`;
+    if (abs >= 1e6) return `$${(n/1e6).toFixed(2)}M`;
+    if (abs >= 1e3) return `$${(n/1e3).toFixed(1)}K`;
+    return `$${n.toFixed(2)}`;
+  }
+
+  function fmtPct2(v) {
+    if (v === null || v === undefined) return '—';
+    const n = Number(v);
+    if (!isFinite(n)) return String(v);
+    return `${(n*100).toFixed(2)}%`;
+  }
+
+  function clsSigned(v) {
+    const n = Number(v);
+    if (!isFinite(n) || n === 0) return 'neu';
+    return n > 0 ? 'pos' : 'neg';
+  }
+
+  async function loadSmartMoneyDashboard() {
+    const qEl = document.getElementById('smSearch');
+    const q = qEl ? String(qEl.value || '').trim() : '';
+    const data = await fetchJson(`/api/smartmoney/institutions?q=${encodeURIComponent(q)}`);
+    const items = (data && data.items) ? data.items : [];
+    const tb = document.querySelector('#smInstTable tbody');
+    if (!tb) return;
+    if (!items.length) {
+      tb.innerHTML = `<tr><td colspan="6" class="muted py-3">暂无数据</td></tr>`;
+      return;
+    }
+    tb.innerHTML = items.map(it => {
+      const iid = String(it.id || '');
+      const name = String(it.name || iid || '—');
+      const aum = (it.aum_usd === null || it.aum_usd === undefined) ? '—' : fmtUsd(it.aum_usd);
+      const curQ = String(it.cur_quarter || '').trim();
+      const prevQ = String(it.prev_quarter || '').trim();
+      const curAumTxt = (it.aum_usd === null || it.aum_usd === undefined)
+        ? '—'
+        : (curQ ? `${curQ}: ${fmtUsd(it.aum_usd)}` : fmtUsd(it.aum_usd));
+      const prevAumTxt = (it.prev_aum_usd === null || it.prev_aum_usd === undefined)
+        ? '—'
+        : (prevQ ? `${prevQ}: ${fmtUsd(it.prev_aum_usd)}` : fmtUsd(it.prev_aum_usd));
+      const ch = it.changes || {};
+      const inc = Number(ch.inc || 0);
+      const dec = Number(ch.dec || 0);
+      const err = String(it.error || '').trim();
+      let aumChgCell = '—';
+      let cntCell = '—';
+      if (err) {
+        aumChgCell = `<span class="neg">拉取失败</span><div class="muted text-xs">${err}</div>`;
+        cntCell = `<span class="neg">拉取失败</span>`;
+      } else {
+        if (it.aum_change_usd === null || it.aum_change_usd === undefined) {
+          aumChgCell = '—';
+        } else {
+          const aumChg = Number(it.aum_change_usd);
+          const aumTxt = fmtUsd(it.aum_change_usd);
+          if (aumChg > 0) aumChgCell = `<span class="pos">${aumTxt}</span>`;
+          else if (aumChg < 0) aumChgCell = `<span class="neg">${aumTxt}</span>`;
+          else aumChgCell = `<span class="muted">${aumTxt}</span>`;
+        }
+
+        const net = inc - dec;
+        const n = Math.abs(net);
+        let netTxt = '';
+        if (net > 0) netTxt = `<span class="pos">净增持 ${n}</span>`;
+        else if (net < 0) netTxt = `<span class="neg">净减持 ${n}</span>`;
+        else netTxt = `<span class="muted">持平</span>`;
+        cntCell = `<div class="muted text-xs">标的计数：增持 ${inc} / 减持 ${dec}</div><div class="mt-1">${netTxt}</div>`;
+      }
+      return `
+        <tr>
+          <td class="py-2 font-semibold"><a href="#" class="sm-inst-open hover:underline" data-id="${iid}">${name}</a><div class="muted text-xs">id: ${iid}</div></td>
+          <td class="py-2">${aum}</td>
+          <td class="py-2">${curAumTxt}</td>
+          <td class="py-2">${prevAumTxt}</td>
+          <td class="py-2">${aumChgCell}</td>
+          <td class="py-2">${cntCell}</td>
+        </tr>
+      `;
+    }).join('');
+
+    document.querySelectorAll('.sm-inst-open').forEach(a => {
+      a.addEventListener('click', (e) => {
+        try { e.preventDefault(); } catch (_) {}
+        const iid = a.getAttribute('data-id') || '';
+        if (!iid) return;
+        const instInput = document.getElementById('smInstId');
+        if (instInput) instInput.value = iid;
+        smShowView('inst');
+        loadSmartMoneyInstitution(iid).catch(() => {});
+      });
+    });
+  }
+
+  async function loadSmartMoneyInstitution(instId) {
+    const iid = String(instId || '').trim();
+    if (!iid) return;
+    smLastInstId = iid;
+    const aiBox = document.getElementById('smInstAiBox');
+    if (aiBox) aiBox.classList.add('hidden');
+    const data = await fetchJson(`/api/smartmoney/institution?id=${encodeURIComponent(iid)}`);
+    const inst = (data && data.institution) ? data.institution : null;
+    const holdings = (data && data.holdings) ? data.holdings : [];
+    const top = (data && data.top_holdings) ? data.top_holdings : [];
+    const titleEl = document.getElementById('smInstTitle');
+    const metaEl = document.getElementById('smInstMeta');
+    if (titleEl) titleEl.textContent = inst ? String(inst.name || iid) : '机构详情';
+    if (metaEl) metaEl.textContent = inst ? `AUM：${fmtUsd(inst.aum_usd)} | id：${iid}` : `id：${iid}`;
+
+    const tbTop = document.querySelector('#smTopHoldingsTable tbody');
+    if (tbTop) {
+      tbTop.innerHTML = (top && top.length) ? top.map(h => {
+        const cusip = String(h.cusip || '').trim();
+        const issuer = String(h.issuer || '').trim();
+        const nm = issuer || '—';
+        const w = fmtPct2(h.weight);
+        const val = fmtUsd(h.value_usd);
+        const ch = Number(h.qoq_value_change || 0);
+        const chHtml = `<span class="${clsSigned(ch)}">${ch>0?'+':''}${fmtUsd(ch)}</span>`;
+        return `
+          <tr>
+            <td class="py-2 font-semibold"><a href="#" class="sm-stock-open hover:underline" data-cusip="${cusip}">${nm}<div class="muted text-xs">CUSIP: ${cusip || '—'}</div></a></td>
+            <td class="py-2">${w}</td>
+            <td class="py-2">${val}</td>
+            <td class="py-2">${chHtml}</td>
+          </tr>
+        `;
+      }).join('') : `<tr><td colspan="4" class="muted py-3">暂无数据</td></tr>`;
+    }
+
+    const tbAll = document.querySelector('#smHoldingsTable tbody');
+    if (tbAll) {
+      tbAll.innerHTML = (holdings && holdings.length) ? holdings.map(h => {
+        const cusip = String(h.cusip || '').trim();
+        const issuer = String(h.issuer || '').trim();
+        const nm = issuer || '—';
+        const typ = String(h.shares_type || h.title || '—');
+        const w = fmtPct2(h.weight);
+        const val = fmtUsd(h.value_usd);
+        const ch = Number(h.qoq_value_change || 0);
+        const chHtml = `<span class="${clsSigned(ch)}">${ch>0?'+':''}${fmtUsd(ch)}</span>`;
+        return `
+          <tr>
+            <td class="py-2 font-semibold"><a href="#" class="sm-stock-open hover:underline" data-cusip="${cusip}">${nm}<div class="muted text-xs">CUSIP: ${cusip || '—'}</div></a></td>
+            <td class="py-2">${typ || '—'}</td>
+            <td class="py-2">${w}</td>
+            <td class="py-2">${val}</td>
+            <td class="py-2">${chHtml}</td>
+          </tr>
+        `;
+      }).join('') : `<tr><td colspan="5" class="muted py-3">暂无数据</td></tr>`;
+    }
+
+    try {
+      const _abbrIssuer = (s) => {
+        const raw = String(s || '').trim();
+        if (!raw) return '—';
+        let t = raw
+          .replace(/\s+/g, ' ')
+          .replace(/\b(inc\.?|incorporated|corp\.?|corporation|ltd\.?|limited|plc|co\.?|company|holdings?)\b/ig, '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (!t) t = raw;
+        const words = t.split(' ').filter(Boolean);
+        let ab = '';
+        if (words.length >= 2) {
+          ab = words.slice(0, 3).map(w => w[0]).join('').toUpperCase();
+          if (ab.length < 2) ab = words[0].slice(0, 10);
+        } else {
+          ab = words[0].slice(0, 10);
+        }
+        ab = String(ab || '').replace(/[^A-Z0-9]/g, '').slice(0, 6);
+        if (!ab) ab = raw.slice(0, 6);
+        return ab;
+      };
+
+      const labels = (top || []).map(h => _abbrIssuer(h.issuer || ''));
+      const values = (top || []).map(h => Number(h.weight || 0) * 100.0);
+      const hover = (top || []).map(h => {
+        const issuer = String(h.issuer || '').trim();
+        const cusip = String(h.cusip || '').trim();
+        const w = Number(h.weight || 0) * 100.0;
+        return `${issuer || '—'}<br>CUSIP: ${cusip || '—'}<br>${w.toFixed(2)}%`;
+      });
+      const pie = document.getElementById('smInstPie');
+      if (pie) {
+        Plotly.newPlot('smInstPie', [{
+          type: 'pie',
+          labels,
+          values,
+          customdata: hover,
+          textinfo: 'label+percent',
+          hovertemplate: '%{customdata}<extra></extra>',
+        }], {
+          paper_bgcolor: 'rgba(0,0,0,0)',
+          plot_bgcolor: 'rgba(0,0,0,0)',
+          margin: { l: 10, r: 10, t: 10, b: 10 },
+          font: { color: 'rgba(255,255,255,0.75)' },
+          showlegend: false,
+        }, PLOTLY_CONFIG);
+      }
+    } catch (e) {}
+
+    document.querySelectorAll('.sm-stock-open').forEach(a => {
+      a.addEventListener('click', (e) => {
+        try { e.preventDefault(); } catch (_) {}
+        const cusip = (a.getAttribute('data-cusip') || '').trim();
+        if (!cusip) return;
+        const stockInput = document.getElementById('smStockTicker');
+        if (stockInput) stockInput.value = cusip;
+        smShowView('stock');
+        loadSmartMoneyStock(cusip).catch(() => {});
+      });
+    });
+  }
+
+  async function loadSmartMoneyStock(ticker) {
+    const cusip = String(ticker || '').trim().toUpperCase();
+    if (!cusip) return;
+    smLastTicker = cusip;
+    const aiBox = document.getElementById('smStockAiBox');
+    if (aiBox) aiBox.classList.add('hidden');
+    const data = await fetchJson(`/api/smartmoney/stock?ticker=${encodeURIComponent(cusip)}`);
+    const st = (data && data.stock) ? data.stock : null;
+    const holders = (data && data.holders) ? data.holders : [];
+    const titleEl = document.getElementById('smStockTitle');
+    const metaEl = document.getElementById('smStockMeta');
+    const priceEl = document.getElementById('smStockPrice');
+    const descEl = document.getElementById('smStockDesc');
+    const issuer = st ? String(st.issuer || '') : '';
+    if (titleEl) titleEl.textContent = `${issuer || '标的'}（CUSIP: ${cusip}）`;
+    if (metaEl) metaEl.textContent = `CUSIP：${cusip}`;
+    if (priceEl) priceEl.textContent = '—';
+    if (descEl) descEl.textContent = '说明：13F 不提供 ticker，且当前未做 CUSIP→ticker 映射，因此不展示价格。';
+
+    const tb = document.querySelector('#smHoldersTable tbody');
+    if (tb) {
+      tb.innerHTML = (holders && holders.length) ? holders.map(h => {
+        const iid = String(h.inst_id || '');
+        const iname = String(h.inst_name || iid);
+        const w = fmtPct2(h.weight);
+        const val = fmtUsd(h.value_usd);
+        const ch = Number(h.qoq_value_change || 0);
+        const chHtml = `<span class="${clsSigned(ch)}">${ch>0?'+':''}${fmtUsd(ch)}</span>`;
+        return `
+          <tr>
+            <td class="py-2 font-semibold"><a href="#" class="sm-inst-open2 hover:underline" data-id="${iid}">${iname}</a><div class="muted text-xs">id: ${iid}</div></td>
+            <td class="py-2">${w}</td>
+            <td class="py-2">${val}</td>
+            <td class="py-2">${chHtml}</td>
+          </tr>
+        `;
+      }).join('') : `<tr><td colspan="4" class="muted py-3">暂无数据</td></tr>`;
+    }
+
+    document.querySelectorAll('.sm-inst-open2').forEach(a => {
+      a.addEventListener('click', (e) => {
+        try { e.preventDefault(); } catch (_) {}
+        const iid = a.getAttribute('data-id') || '';
+        if (!iid) return;
+        const instInput = document.getElementById('smInstId');
+        if (instInput) instInput.value = iid;
+        smShowView('inst');
+        loadSmartMoneyInstitution(iid).catch(() => {});
+      });
+    });
+  }
+
+  async function loadSmartMoneyFlows() {
+    const secEl = document.getElementById('smSector');
+    const perEl = document.getElementById('smPeriod');
+    const sec = secEl ? String(secEl.value || 'all') : 'all';
+    const per = perEl ? String(perEl.value || 'quarter') : 'quarter';
+    const aiBox = document.getElementById('smFlowsAiBox');
+    if (aiBox) aiBox.classList.add('hidden');
+    const data = await fetchJson(`/api/smartmoney/flows?sector=${encodeURIComponent(sec)}&period=${encodeURIComponent(per)}`);
+    const buys = (data && data.top_buys) ? data.top_buys : [];
+    const sells = (data && data.top_sells) ? data.top_sells : [];
+    const tbB = document.querySelector('#smBuysTable tbody');
+    const tbS = document.querySelector('#smSellsTable tbody');
+    if (tbB) {
+      tbB.innerHTML = (buys && buys.length) ? buys.map(x => {
+        const cusip = String(x.cusip || '').trim();
+        const issuer = String(x.issuer || '').trim();
+        const nm = issuer || '—';
+        const sec2 = String(x.sector || '—');
+        const amt = fmtUsd(x.flow_usd);
+        return `
+          <tr>
+            <td class="py-2 font-semibold"><a href="#" class="sm-flow-stock hover:underline" data-cusip="${cusip}">${nm}<div class="muted text-xs">CUSIP: ${cusip || '—'}</div></a></td>
+            <td class="py-2">${sec2}</td>
+            <td class="py-2 pos">${amt}</td>
+          </tr>
+        `;
+      }).join('') : `<tr><td colspan="3" class="muted py-3">暂无数据</td></tr>`;
+    }
+    if (tbS) {
+      tbS.innerHTML = (sells && sells.length) ? sells.map(x => {
+        const cusip = String(x.cusip || '').trim();
+        const issuer = String(x.issuer || '').trim();
+        const nm = issuer || '—';
+        const sec2 = String(x.sector || '—');
+        const amt = fmtUsd(x.flow_usd);
+        return `
+          <tr>
+            <td class="py-2 font-semibold"><a href="#" class="sm-flow-stock hover:underline" data-cusip="${cusip}">${nm}<div class="muted text-xs">CUSIP: ${cusip || '—'}</div></a></td>
+            <td class="py-2">${sec2}</td>
+            <td class="py-2 neg">${amt}</td>
+          </tr>
+        `;
+      }).join('') : `<tr><td colspan="3" class="muted py-3">暂无数据</td></tr>`;
+    }
+
+    document.querySelectorAll('.sm-flow-stock').forEach(a => {
+      a.addEventListener('click', (e) => {
+        try { e.preventDefault(); } catch (_) {}
+        const cusip = (a.getAttribute('data-cusip') || '').trim();
+        if (!cusip) return;
+        const stockInput = document.getElementById('smStockTicker');
+        if (stockInput) stockInput.value = cusip;
+        smShowView('stock');
+        loadSmartMoneyStock(cusip).catch(() => {});
+      });
+    });
+  }
+
+  async function smRunAi(query, extraParams, boxId, titleId, textId) {
+    const q = String(query || '').trim();
+    const params = new URLSearchParams();
+    params.set('query', q);
+    if (extraParams && typeof extraParams === 'object') {
+      Object.keys(extraParams).forEach(k => {
+        const v = extraParams[k];
+        if (v === null || v === undefined) return;
+        params.set(k, String(v));
+      });
+    }
+    const data = await fetchJson(`/api/smartmoney/ai?${params.toString()}`);
+    const res = data && data.result ? data.result : null;
+    const box = document.getElementById(boxId);
+    const titleEl = document.getElementById(titleId);
+    const textEl = document.getElementById(textId);
+    if (titleEl) titleEl.textContent = res ? String(res.title || 'AI 分析') : 'AI 分析';
+    if (textEl) {
+      if (!res) textEl.textContent = '—';
+      else {
+        const bullets = Array.isArray(res.bullets) ? res.bullets : [];
+        const risks = Array.isArray(res.risks) ? res.risks : [];
+        const trend = String(res.trend || '').trim();
+        textEl.textContent = [
+          `问题：${String(res.query || q)}`,
+          '',
+          '分析要点：',
+          ...(bullets.length ? bullets.map(x => `- ${x}`) : ['- —']),
+          '',
+          '风险提示：',
+          ...(risks.length ? risks.map(x => `- ${x}`) : ['- —']),
+          '',
+          `趋势判断：${trend || '—'}`,
+        ].join('\n');
+      }
+    }
+    if (box) box.classList.remove('hidden');
+  }
+
+  const _smTabDash = document.getElementById('smTabDash');
+  if (_smTabDash) _smTabDash.addEventListener('click', () => { smShowView('dash'); loadSmartMoneyDashboard().catch(() => {}); });
+  const _smTabInst = document.getElementById('smTabInst');
+  if (_smTabInst) _smTabInst.addEventListener('click', () => { smShowView('inst'); const iid = (document.getElementById('smInstId') || {}).value || smLastInstId || 'brk'; const instInput = document.getElementById('smInstId'); if (instInput && !instInput.value) instInput.value = String(iid); loadSmartMoneyInstitution(iid).catch(() => {}); });
+  const _smTabStock = document.getElementById('smTabStock');
+  if (_smTabStock) _smTabStock.addEventListener('click', () => { smShowView('stock'); const tk = (document.getElementById('smStockTicker') || {}).value || smLastTicker || '037833100'; const stockInput = document.getElementById('smStockTicker'); if (stockInput && !stockInput.value) stockInput.value = String(tk); loadSmartMoneyStock(tk).catch(() => {}); });
+  const _smTabFlows = document.getElementById('smTabFlows');
+  if (_smTabFlows) _smTabFlows.addEventListener('click', () => { smShowView('flows'); loadSmartMoneyFlows().catch(() => {}); });
+
+  const _smSearchBtn = document.getElementById('smSearchBtn');
+  if (_smSearchBtn) _smSearchBtn.addEventListener('click', () => {
+    const qEl = document.getElementById('smSearch');
+    const q = qEl ? String(qEl.value || '').trim() : '';
+    if (!q) { loadSmartMoneyDashboard().catch(() => {}); return; }
+    if (/^[0-9]{8,10}$/.test(q)) {
+      const stockInput = document.getElementById('smStockTicker');
+      if (stockInput) stockInput.value = q;
+      smShowView('stock');
+      loadSmartMoneyStock(q).catch(() => {});
+      return;
+    }
+    loadSmartMoneyDashboard().catch(() => {});
+  });
+  const _smSearch = document.getElementById('smSearch');
+  if (_smSearch) _smSearch.addEventListener('keydown', (e) => { if (e && e.key === 'Enter') { try { e.preventDefault(); } catch (_) {} const b = document.getElementById('smSearchBtn'); if (b) b.click(); } });
+
+  const _smInstLoad = document.getElementById('smInstLoad');
+  if (_smInstLoad) _smInstLoad.addEventListener('click', () => {
+    const iid = String((document.getElementById('smInstId') || {}).value || '').trim();
+    if (!iid) return;
+    loadSmartMoneyInstitution(iid).catch(() => {});
+  });
+  const _smInstAi = document.getElementById('smInstAi');
+  if (_smInstAi) _smInstAi.addEventListener('click', () => {
+    const iid = String((document.getElementById('smInstId') || {}).value || smLastInstId || '').trim();
+    if (!iid) return;
+    smRunAi('这个机构的投资策略是什么？', { inst_id: iid }, 'smInstAiBox', 'smInstAiTitle', 'smInstAiText').catch(() => {});
+  });
+
+  const _smStockLoad = document.getElementById('smStockLoad');
+  if (_smStockLoad) _smStockLoad.addEventListener('click', () => {
+    const tk = String((document.getElementById('smStockTicker') || {}).value || '').trim();
+    if (!tk) return;
+    loadSmartMoneyStock(tk).catch(() => {});
+  });
+  const _smStockAi = document.getElementById('smStockAi');
+  if (_smStockAi) _smStockAi.addEventListener('click', () => {
+    const tk = String((document.getElementById('smStockTicker') || {}).value || smLastTicker || '').trim();
+    if (!tk) return;
+    smRunAi('哪些聪明钱正在买入/卖出这只股票？', { ticker: tk.toUpperCase() }, 'smStockAiBox', 'smStockAiTitle', 'smStockAiText').catch(() => {});
+  });
+
+  const _smFlowsLoad = document.getElementById('smFlowsLoad');
+  if (_smFlowsLoad) _smFlowsLoad.addEventListener('click', () => loadSmartMoneyFlows().catch(() => {}));
+  const _smFlowsAi = document.getElementById('smFlowsAi');
+  if (_smFlowsAi) _smFlowsAi.addEventListener('click', () => {
+    const sec = String((document.getElementById('smSector') || {}).value || 'all');
+    const per = String((document.getElementById('smPeriod') || {}).value || 'quarter');
+    smRunAi('分析当前聪明钱在买什么', { sector: sec, period: per }, 'smFlowsAiBox', 'smFlowsAiTitle', 'smFlowsAiText').catch(() => {});
+  });
 
   // ==========================
   // 仪表板（Dashboard）：主入口流程
@@ -3996,7 +5094,7 @@
   const _mStop = document.getElementById('move3mStop');
   if (_mStop) _mStop.addEventListener('click', () => { stopMove3m(); _move3mSetStatus('已停止'); });
   const _mClear = document.getElementById('move3mClear');
-  if (_mClear) _mClear.addEventListener('click', () => { move3mLog = []; _renderMove3m(); });
+  if (_mClear) _mClear.addEventListener('click', () => { move3mLog = []; move3mLogPage = 1; _renderMove3m(); });
 
   const _mPageSize = document.getElementById('move3mPageSize');
   if (_mPageSize) {
@@ -4032,6 +5130,39 @@
       if (!move3mStarted) startMove3m();
     } catch (e) {}
   }, 400);
+
+  // ==========================
+  // MA10 回踩买入（1D）事件绑定
+  // ==========================
+  const _ma10Refresh = document.getElementById('ma10macdRefresh');
+  if (_ma10Refresh) _ma10Refresh.addEventListener('click', () => loadMa10macd().catch(() => {}));
+  const _ma10Prev = document.getElementById('ma10macdPrev');
+  if (_ma10Prev) _ma10Prev.addEventListener('click', () => {
+    ma10macdPage = Math.max(1, Number(ma10macdPage || 1) - 1);
+    loadMa10macd().catch(() => {});
+  });
+  const _ma10Next = document.getElementById('ma10macdNext');
+  if (_ma10Next) _ma10Next.addEventListener('click', () => {
+    ma10macdPage = Math.max(1, Number(ma10macdPage || 1) + 1);
+    loadMa10macd().catch(() => {});
+  });
+
+  const _ma10Close = document.getElementById('ma10macdDetailsClose');
+  if (_ma10Close) _ma10Close.addEventListener('click', () => {
+    const d = document.getElementById('ma10macdDetails');
+    if (d) d.classList.add('hidden');
+  });
+
+  // 代币点击：加载详情图
+  document.addEventListener('click', (ev) => {
+    try {
+      const a = ev.target && ev.target.closest ? ev.target.closest('a.ma10-sym') : null;
+      if (!a) return;
+      ev.preventDefault();
+      const c = a.getAttribute('data-contract');
+      _loadMa10macdChart(c).catch(() => {});
+    } catch (e) {}
+  });
 
   // ==========================
   // 三周期信号矩阵（Tri-Signal）
@@ -5089,6 +6220,8 @@
       x: xs,
       open, high, low, close,
       name: contract,
+      xaxis: 'x',
+      yaxis: 'y',
       increasing: { line: { color: '#22c55e' } },
       decreasing: { line: { color: '#ef4444' } }
     }];
@@ -5187,6 +6320,7 @@
           y: hist,
           name: 'MACD Hist (12,26,9)',
           yaxis: 'y2',
+          xaxis: 'x2',
           marker: { color: histColors },
           hoverinfo: 'x+y'
         });
@@ -5197,6 +6331,7 @@
           y: macd,
           name: 'DIF',
           yaxis: 'y2',
+          xaxis: 'x2',
           line: { color: 'rgba(239,68,68,0.90)', width: 1 },
           hoverinfo: 'x+y'
         });
@@ -5207,6 +6342,7 @@
           y: sig,
           name: 'DEA',
           yaxis: 'y2',
+          xaxis: 'x2',
           line: { color: 'rgba(59,130,246,0.95)', width: 1 },
           hoverinfo: 'x+y'
         });
@@ -5515,6 +6651,8 @@
     if (wEl) wEl.checked = (s.push_whales_enabled === undefined) ? true : !!s.push_whales_enabled;
     const mEl = document.getElementById('pushMove3mEnabled');
     if (mEl) mEl.checked = (s.push_move3m_enabled === undefined) ? true : !!s.push_move3m_enabled;
+    const ma10El = document.getElementById('pushMa10macdEnabled');
+    if (ma10El) ma10El.checked = (s.push_ma10macd_enabled === undefined) ? true : !!s.push_ma10macd_enabled;
   }
 
   // saveNewsSettings():
@@ -5533,6 +6671,7 @@
       push_tri_signal_enabled: !!document.getElementById('pushTriSignalEnabled').checked,
       push_master_a_enabled: !!document.getElementById('pushMasterAEnabled').checked,
       push_master_b_enabled: !!document.getElementById('pushMasterBEnabled').checked,
+      push_ma10macd_enabled: !!document.getElementById('pushMa10macdEnabled').checked,
       push_whales_enabled: !!document.getElementById('pushWhalesEnabled').checked,
       push_move3m_enabled: !!document.getElementById('pushMove3mEnabled').checked,
     };
