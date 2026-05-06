@@ -94,6 +94,7 @@ _SMARTMONEY_INSTITUTIONS_META: Dict[str, Dict[str, Any]] = {
     "brk": {"id": "brk", "name": "Berkshire Hathaway", "cik": "0001067983"},
     "blk": {"id": "blk", "name": "BlackRock", "cik": "0002012383"},
     "vgi": {"id": "vgi", "name": "Vanguard", "cik": "0000102909"},
+    "nvda": {"id": "nvda", "name": "NVIDIA", "cik": "0001045810"},
 }
 
 _SMARTMONEY_SNAPSHOT_LOCK = threading.Lock()
@@ -116,6 +117,22 @@ def _upstash_cmd(args: List[Any]) -> Any:
     if isinstance(data, list) and data:
         return data[0]
     return data
+
+
+def _upstash_pipeline(cmds: List[List[Any]]) -> Any:
+    if not UPSTASH_REDIS_REST_URL or not UPSTASH_REDIS_REST_TOKEN:
+        raise RuntimeError("upstash_not_configured")
+    url = f"{UPSTASH_REDIS_REST_URL}/pipeline"
+    headers = {
+        "Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = [[str(x) for x in (c or [])] for c in (cmds or []) if isinstance(c, list) and c]
+    if not payload:
+        return []
+    r = HTTP.post(url, headers=headers, json=payload, timeout=(10, 60))
+    r.raise_for_status()
+    return r.json()
 
 
 def _upstash_get_snapshot() -> Optional[Dict[str, Any]]:
@@ -145,6 +162,53 @@ def _upstash_set_snapshot(obj: Dict[str, Any], ttl_sec: int = 0) -> bool:
         return True
     except Exception:
         return False
+
+
+def _upstash_get_json(key: str) -> Optional[Any]:
+    try:
+        if not key:
+            return None
+        resp = _upstash_cmd(["GET", key])
+        res = resp.get("result") if isinstance(resp, dict) else None
+        if not res:
+            return None
+        if isinstance(res, str):
+            try:
+                return json.loads(res)
+            except Exception:
+                return None
+        return res
+    except Exception:
+        return None
+
+
+def _upstash_set_json(key: str, obj: Any, ttl_sec: int = 0) -> bool:
+    try:
+        if not key:
+            return False
+        raw = json.dumps(obj, ensure_ascii=False)
+        if ttl_sec and ttl_sec > 0:
+            _upstash_cmd(["SET", key, raw, "EX", str(int(ttl_sec))])
+        else:
+            _upstash_cmd(["SET", key, raw])
+        return True
+    except Exception:
+        return False
+
+
+def _sm_snap_key_inst(iid: str) -> str:
+    return f"{SMARTMONEY_SNAPSHOT_KEY}:inst:{(iid or '').strip().lower()}"
+
+
+def _sm_snap_key_flows(sector: str, period: str) -> str:
+    s = (sector or "all").strip() or "all"
+    p = (period or "quarter").strip() or "quarter"
+    return f"{SMARTMONEY_SNAPSHOT_KEY}:flows:{s}:{p}"
+
+
+def _sm_snap_key_stock(cusip: str) -> str:
+    c = re.sub(r"\s+", "", (cusip or "").strip().upper())
+    return f"{SMARTMONEY_SNAPSHOT_KEY}:stock:{c}"
 
 
 def _smartmoney_build_items() -> List[Dict[str, Any]]:
@@ -475,6 +539,16 @@ def _sec_get_13f_holdings_by_cik(cik10: str, filing_index: int = 0) -> Dict[str,
     cik10n = _sec_norm_cik(cik10)
     if not cik10n:
         return {"ok": False, "error": "invalid_cik"}
+
+    # 结果级缓存：避免在 stock/flows 中反复解析同一份 13F（submissions/index/xml 之外再缓存最终聚合结果）
+    try:
+        idxi = int(filing_index or 0)
+    except Exception:
+        idxi = 0
+    ck = f"sec:13f:holdings:{cik10n}:{idxi}"
+    cached = _cache_get(ck, SEC_EDGAR_CACHE_TTL_SEC)
+    if isinstance(cached, dict) and cached.get("ok"):
+        return cached
     try:
         sub_url = f"https://data.sec.gov/submissions/CIK{cik10n}.json"
         subs = _sec_get_json(sub_url, f"sec:submissions:{cik10n}", SEC_EDGAR_CACHE_TTL_SEC)
@@ -571,7 +645,7 @@ def _sec_get_13f_holdings_by_cik(cik10: str, filing_index: int = 0) -> Dict[str,
             except Exception:
                 r["weight"] = 0.0
         rows.sort(key=lambda x: float(x.get("value_usd") or 0.0), reverse=True)
-        return {
+        resp_obj = {
             "ok": True,
             "cik": cik10n,
             "accession": accession,
@@ -582,6 +656,8 @@ def _sec_get_13f_holdings_by_cik(cik10: str, filing_index: int = 0) -> Dict[str,
             "total_value_usd": float(total),
             "holdings": rows,
         }
+        _cache_set(ck, resp_obj)
+        return resp_obj
     except Exception as e:
         return {"ok": False, "error": _sec_err_str(e)}
 
@@ -654,8 +730,168 @@ def api_smartmoney_refresh(request: Request) -> JSONResponse:
     started = time.time()
     last_err = ""
     items: List[Dict[str, Any]] = []
+    inst_details: Dict[str, Dict[str, Any]] = {}
+    flows_snap: Dict[str, Any] = {}
+    stock_snaps: Dict[str, Dict[str, Any]] = {}
+
+    def _build_inst_detail(iid: str, inst: Dict[str, Any], cur: Dict[str, Any], prev: Dict[str, Any]) -> Dict[str, Any]:
+        hs = cur.get("holdings") or []
+        hs_prev = prev.get("holdings") if isinstance(prev, dict) and prev.get("ok") else []
+        prev_map: Dict[str, Dict[str, Any]] = {}
+        if isinstance(hs_prev, list):
+            for r in hs_prev:
+                if isinstance(r, dict) and str(r.get("cusip") or "").strip():
+                    prev_map[str(r.get("cusip") or "").strip()] = r
+        holdings2: List[Dict[str, Any]] = []
+        for h in hs:
+            if not isinstance(h, dict):
+                continue
+            cusip = str(h.get("cusip") or "").strip()
+            issuer = str(h.get("issuer") or "").strip()
+            value_usd = float(h.get("value_usd") or 0.0)
+            weight = float(h.get("weight") or 0.0)
+            shares = float(h.get("shares") or 0.0)
+            prev_r = prev_map.get(cusip)
+            prev_val = float(prev_r.get("value_usd") or 0.0) if isinstance(prev_r, dict) else 0.0
+            holdings2.append({
+                "cusip": cusip,
+                "issuer": issuer,
+                "title": str(h.get("title") or ""),
+                "weight": weight,
+                "value_usd": value_usd,
+                "shares": shares,
+                "shares_type": str(h.get("shares_type") or ""),
+                "qoq_value_change": value_usd - prev_val,
+            })
+        holdings2.sort(key=lambda x: float(x.get("value_usd") or 0.0), reverse=True)
+        top_holdings = holdings2[:10]
+        recent_changes = sorted(holdings2, key=lambda x: abs(float(x.get("qoq_value_change") or 0.0)), reverse=True)[:20]
+        # 表格限制：避免前端一次渲染上千行
+        holdings_limited = holdings2[:500]
+        cik = str(inst.get("cik") or "")
+        return {
+            "ok": True,
+            "institution": {
+                "id": inst.get("id"),
+                "name": inst.get("name"),
+                "cik": _sec_norm_cik(cik),
+                "aum_usd": float(cur.get("total_value_usd") or 0.0),
+                "accession": cur.get("accession"),
+            },
+            "holdings": holdings_limited,
+            "holdings_total": len(holdings2),
+            "top_holdings": top_holdings,
+            "recent_changes": recent_changes,
+        }
+
     try:
+        # 1) institutions 列表快照
         items = _smartmoney_build_items()
+
+        # 2) 预计算每个机构 cur/prev 13F，并生成 institution_detail 快照
+        cur_prev_by_inst: Dict[str, Tuple[Dict[str, Any], Dict[str, Any]]] = {}
+        for inst in _SMARTMONEY_INSTITUTIONS_META.values():
+            iid = str(inst.get("id") or "").strip().lower()
+            cik = str(inst.get("cik") or "")
+            cur = _sec_get_13f_holdings_by_cik(cik, filing_index=0)
+            prev = _sec_get_13f_holdings_by_cik(cik, filing_index=1)
+            cur_prev_by_inst[iid] = (cur, prev)
+            if isinstance(cur, dict) and cur.get("ok"):
+                inst_details[iid] = _build_inst_detail(iid, inst, cur, prev)
+
+        # 3) flows(all/quarter) 快照
+        buys: Dict[str, Dict[str, Any]] = {}
+        sells: Dict[str, Dict[str, Any]] = {}
+        for iid, (cur, prev) in cur_prev_by_inst.items():
+            hs = cur.get("holdings") if isinstance(cur, dict) and cur.get("ok") else None
+            hs_prev = prev.get("holdings") if isinstance(prev, dict) and prev.get("ok") else None
+            if not isinstance(hs, list):
+                continue
+            prev_map: Dict[str, float] = {}
+            if isinstance(hs_prev, list):
+                for r in hs_prev:
+                    if isinstance(r, dict) and str(r.get("cusip") or "").strip():
+                        prev_map[str(r.get("cusip") or "").strip()] = float(r.get("value_usd") or 0.0)
+            for h in hs:
+                if not isinstance(h, dict):
+                    continue
+                cusip = str(h.get("cusip") or "").strip()
+                if not cusip:
+                    continue
+                issuer = str(h.get("issuer") or "").strip()
+                cur_val = float(h.get("value_usd") or 0.0)
+                prev_val = float(prev_map.get(cusip) or 0.0)
+                delta = cur_val - prev_val
+                if delta == 0:
+                    continue
+                if delta > 0:
+                    ref = buys.get(cusip) or {"cusip": cusip, "issuer": issuer, "flow_usd": 0.0}
+                    ref["flow_usd"] = float(ref.get("flow_usd") or 0.0) + float(delta)
+                    buys[cusip] = ref
+                else:
+                    ref = sells.get(cusip) or {"cusip": cusip, "issuer": issuer, "flow_usd": 0.0}
+                    ref["flow_usd"] = float(ref.get("flow_usd") or 0.0) + float(abs(delta))
+                    sells[cusip] = ref
+        top_buys = sorted(buys.values(), key=lambda x: float(x.get("flow_usd") or 0.0), reverse=True)[:50]
+        top_sells = sorted(sells.values(), key=lambda x: float(x.get("flow_usd") or 0.0), reverse=True)[:50]
+        flows_snap = {
+            "ok": True,
+            "sector": "all",
+            "period": "quarter",
+            "top_buys": [{"cusip": x.get("cusip") or "", "issuer": x.get("issuer") or "", "sector": "", "flow_usd": float(x.get("flow_usd") or 0.0)} for x in top_buys],
+            "top_sells": [{"cusip": x.get("cusip") or "", "issuer": x.get("issuer") or "", "sector": "", "flow_usd": float(x.get("flow_usd") or 0.0)} for x in top_sells],
+        }
+
+        # 4) stock 快照（CUSIP -> holders topN + totals）
+        holders_by_cusip: Dict[str, List[Dict[str, Any]]] = {}
+        totals_by_cusip: Dict[str, float] = {}
+        for inst in _SMARTMONEY_INSTITUTIONS_META.values():
+            iid = str(inst.get("id") or "")
+            iname = str(inst.get("name") or "")
+            cik = str(inst.get("cik") or "")
+            cur, prev = cur_prev_by_inst.get(iid.lower(), ({"ok": False}, {"ok": False}))
+            hs = cur.get("holdings") if isinstance(cur, dict) and cur.get("ok") else None
+            hs_prev = prev.get("holdings") if isinstance(prev, dict) and prev.get("ok") else None
+            if not isinstance(hs, list):
+                continue
+            prev_map: Dict[str, float] = {}
+            if isinstance(hs_prev, list):
+                for r in hs_prev:
+                    if isinstance(r, dict) and str(r.get("cusip") or "").strip():
+                        prev_map[str(r.get("cusip") or "").strip().upper()] = float(r.get("value_usd") or 0.0)
+            for h in hs:
+                if not isinstance(h, dict):
+                    continue
+                cusip = str(h.get("cusip") or "").strip().upper()
+                if not cusip:
+                    continue
+                issuer = str(h.get("issuer") or "").strip()
+                val = float(h.get("value_usd") or 0.0)
+                wt = float(h.get("weight") or 0.0)
+                prev_val = float(prev_map.get(cusip) or 0.0)
+                holders_by_cusip.setdefault(cusip, []).append({
+                    "inst_id": iid,
+                    "inst_name": iname,
+                    "weight": wt,
+                    "value_usd": val,
+                    "qoq_value_change": val - prev_val,
+                })
+                totals_by_cusip[cusip] = float(totals_by_cusip.get(cusip) or 0.0) + float(val)
+                if issuer and (cusip not in stock_snaps):
+                    stock_snaps[cusip] = {"issuer": issuer}
+
+        for cusip, holders in holders_by_cusip.items():
+            holders.sort(key=lambda x: float(x.get("value_usd") or 0.0), reverse=True)
+            issuer = str((stock_snaps.get(cusip) or {}).get("issuer") or "")
+            stock_snaps[cusip] = {
+                "ok": True,
+                "stock": {"cusip": cusip, "issuer": issuer, "sector": "", "price": None, "desc": ""},
+                "holders": holders[:200],
+                "holders_total": len(holders),
+                "total_value_usd": float(totals_by_cusip.get(cusip) or 0.0),
+            }
+
+        stock_snaps = dict(stock_snaps)
     except Exception as e:
         last_err = _sec_err_str(e)
         items = []
@@ -666,10 +902,42 @@ def api_smartmoney_refresh(request: Request) -> JSONResponse:
         _SMARTMONEY_SNAPSHOT["last_error"] = str(last_err or "")
 
     upstash_ok = False
+    upstash_written = {"institutions": False, "inst_details": 0, "flows": False, "stocks": 0}
     if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
+        ttl_sec = max(0, int(SEC_EDGAR_CACHE_TTL_SEC) * 6)
         snap_obj = {"ts": float(_SMARTMONEY_SNAPSHOT.get("ts") or 0.0), "items": items if isinstance(items, list) else [], "last_error": str(last_err or "")}
-        # TTL 建议略长于本地缓存（默认 6h），这里给 36h，防止某天刷新失败导致无快照
-        upstash_ok = _upstash_set_snapshot(snap_obj, ttl_sec=max(0, int(SEC_EDGAR_CACHE_TTL_SEC) * 6))
+        upstash_written["institutions"] = _upstash_set_snapshot(snap_obj, ttl_sec=ttl_sec)
+
+        # 批量写入 detail 快照（pipeline），避免成百上千次 HTTP
+        cmds: List[List[Any]] = []
+        now_ts = int(time.time())
+        if flows_snap:
+            flows_snap2 = dict(flows_snap)
+            flows_snap2["ts"] = now_ts
+            cmds.append(["SET", _sm_snap_key_flows("all", "quarter"), json.dumps(flows_snap2, ensure_ascii=False), "EX", str(int(ttl_sec))])
+            upstash_written["flows"] = True
+
+        for iid, obj in inst_details.items():
+            o2 = dict(obj)
+            o2["ts"] = now_ts
+            cmds.append(["SET", _sm_snap_key_inst(iid), json.dumps(o2, ensure_ascii=False), "EX", str(int(ttl_sec))])
+
+        for cusip, obj in stock_snaps.items():
+            o2 = dict(obj)
+            o2["ts"] = now_ts
+            cmds.append(["SET", _sm_snap_key_stock(cusip), json.dumps(o2, ensure_ascii=False), "EX", str(int(ttl_sec))])
+
+        # 分批提交，避免 payload 过大
+        try:
+            batch = 150
+            for i in range(0, len(cmds), batch):
+                _upstash_pipeline(cmds[i : i + batch])
+            upstash_written["inst_details"] = len(inst_details)
+            upstash_written["stocks"] = len(stock_snaps)
+        except Exception as e:
+            last_err = (last_err + " | " if last_err else "") + "upstash_pipeline_failed: " + _sec_err_str(e)
+
+        upstash_ok = bool(upstash_written.get("institutions"))
 
     return JSONResponse({
         "ok": True,
@@ -678,6 +946,9 @@ def api_smartmoney_refresh(request: Request) -> JSONResponse:
         "count": len(items) if isinstance(items, list) else 0,
         "last_error": str(last_err or ""),
         "upstash_ok": bool(upstash_ok),
+        "upstash_written": upstash_written,
+        "inst_details": len(inst_details),
+        "stock_snaps": len(stock_snaps),
     })
 
 
@@ -695,6 +966,17 @@ def api_smartmoney_institution_detail(inst_id: str = Query("", alias="id")) -> J
     inst = _SMARTMONEY_INSTITUTIONS_META.get(iid)
     if not inst:
         return JSONResponse({"ok": False, "error": "institution_not_found"}, status_code=404)
+
+    # 1) Upstash 预计算快照优先（秒开）
+    if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
+        snap = _upstash_get_json(_sm_snap_key_inst(iid))
+        if isinstance(snap, dict) and snap.get("ok"):
+            return JSONResponse(snap)
+
+    ck = f"sm:inst_detail:{iid}"
+    cached = _cache_get(ck, SEC_EDGAR_CACHE_TTL_SEC)
+    if isinstance(cached, dict) and cached.get("ok"):
+        return JSONResponse(cached)
     cik = str(inst.get("cik") or "")
     cur = _sec_get_13f_holdings_by_cik(cik, filing_index=0)
     prev = _sec_get_13f_holdings_by_cik(cik, filing_index=1)
@@ -733,7 +1015,7 @@ def api_smartmoney_institution_detail(inst_id: str = Query("", alias="id")) -> J
     holdings2.sort(key=lambda x: float(x.get("value_usd") or 0.0), reverse=True)
     top10 = holdings2[:10]
     changes = sorted(holdings2, key=lambda x: abs(float(x.get("qoq_value_change") or 0.0)), reverse=True)[:10]
-    return JSONResponse({
+    resp_obj = {
         "ok": True,
         "institution": {
             "id": inst.get("id"),
@@ -745,7 +1027,9 @@ def api_smartmoney_institution_detail(inst_id: str = Query("", alias="id")) -> J
         "holdings": holdings2,
         "top_holdings": top10,
         "recent_changes": changes,
-    })
+    }
+    _cache_set(ck, resp_obj)
+    return JSONResponse(resp_obj)
 
 
 def api_smartmoney_stock_detail(ticker: str = "") -> JSONResponse:
@@ -753,6 +1037,17 @@ def api_smartmoney_stock_detail(ticker: str = "") -> JSONResponse:
     cusip = re.sub(r"\s+", "", (ticker or "").strip().upper())
     if not cusip:
         return JSONResponse({"ok": False, "error": "missing_cusip"}, status_code=400)
+
+    # 1) Upstash 预计算快照优先（秒开）
+    if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
+        snap = _upstash_get_json(_sm_snap_key_stock(cusip))
+        if isinstance(snap, dict) and snap.get("ok"):
+            return JSONResponse(snap)
+
+    ck = f"sm:stock:{cusip}"
+    cached = _cache_get(ck, SEC_EDGAR_CACHE_TTL_SEC)
+    if isinstance(cached, dict) and cached.get("ok"):
+        return JSONResponse(cached)
     holders: List[Dict[str, Any]] = []
     best_issuer = ""
     for inst in _SMARTMONEY_INSTITUTIONS_META.values():
@@ -798,7 +1093,9 @@ def api_smartmoney_stock_detail(ticker: str = "") -> JSONResponse:
         "price": None,
         "desc": "",
     }
-    return JSONResponse({"ok": True, "stock": stock, "holders": holders})
+    resp_obj = {"ok": True, "stock": stock, "holders": holders}
+    _cache_set(ck, resp_obj)
+    return JSONResponse(resp_obj)
 
 
 def api_smartmoney_flows(sector: str = "all", period: str = "quarter") -> JSONResponse:
@@ -806,6 +1103,17 @@ def api_smartmoney_flows(sector: str = "all", period: str = "quarter") -> JSONRe
     # 方案A：无行业信息，sector 仅支持 all；period 仅用于展示
     if sec and sec != "all":
         return JSONResponse({"ok": True, "sector": sec, "period": period, "top_buys": [], "top_sells": []})
+
+    # 1) Upstash 预计算快照优先（秒开）
+    if (sec == "all") and (period == "quarter") and UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
+        snap = _upstash_get_json(_sm_snap_key_flows(sec, period))
+        if isinstance(snap, dict) and snap.get("ok"):
+            return JSONResponse(snap)
+
+    ck = f"sm:flows:{sec}:{period}"
+    cached = _cache_get(ck, SEC_EDGAR_CACHE_TTL_SEC)
+    if isinstance(cached, dict) and cached.get("ok"):
+        return JSONResponse(cached)
 
     buys: Dict[str, Dict[str, Any]] = {}
     sells: Dict[str, Dict[str, Any]] = {}
@@ -858,13 +1166,15 @@ def api_smartmoney_flows(sector: str = "all", period: str = "quarter") -> JSONRe
             "flow_usd": float(r.get("flow_usd") or 0.0),
         }
 
-    return JSONResponse({
+    resp_obj = {
         "ok": True,
         "sector": sec,
         "period": period,
         "top_buys": [_row(r) for r in top_buys],
         "top_sells": [_row(r) for r in top_sells],
-    })
+    }
+    _cache_set(ck, resp_obj)
+    return JSONResponse(resp_obj)
 
 
 def _ai_structured_answer(query: str, context: Dict[str, Any]) -> Dict[str, Any]:

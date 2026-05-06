@@ -3690,6 +3690,7 @@
     const inst = (data && data.institution) ? data.institution : null;
     const holdings = (data && data.holdings) ? data.holdings : [];
     const top = (data && data.top_holdings) ? data.top_holdings : [];
+    const top10 = (top || []).slice(0, 10);
     const titleEl = document.getElementById('smInstTitle');
     const metaEl = document.getElementById('smInstMeta');
     if (titleEl) titleEl.textContent = inst ? String(inst.name || iid) : '机构详情';
@@ -3697,7 +3698,7 @@
 
     const tbTop = document.querySelector('#smTopHoldingsTable tbody');
     if (tbTop) {
-      tbTop.innerHTML = (top && top.length) ? top.map(h => {
+      tbTop.innerHTML = (top10 && top10.length) ? top10.map(h => {
         const cusip = String(h.cusip || '').trim();
         const issuer = String(h.issuer || '').trim();
         const nm = issuer || '—';
@@ -3718,25 +3719,44 @@
 
     const tbAll = document.querySelector('#smHoldingsTable tbody');
     if (tbAll) {
+      // DataTables 分页：默认 20/页，按占比（weight）排序
+      try {
+        if (window.jQuery && $.fn && $.fn.dataTable && $.fn.dataTable.isDataTable('#smHoldingsTable')) {
+          $('#smHoldingsTable').DataTable().destroy();
+        }
+      } catch (e) {}
+
       tbAll.innerHTML = (holdings && holdings.length) ? holdings.map(h => {
         const cusip = String(h.cusip || '').trim();
         const issuer = String(h.issuer || '').trim();
         const nm = issuer || '—';
         const typ = String(h.shares_type || h.title || '—');
-        const w = fmtPct2(h.weight);
-        const val = fmtUsd(h.value_usd);
+        const wNum = Number(h.weight || 0);
+        const vNum = Number(h.value_usd || 0);
+        const w = fmtPct2(wNum);
+        const val = fmtUsd(vNum);
         const ch = Number(h.qoq_value_change || 0);
         const chHtml = `<span class="${clsSigned(ch)}">${ch>0?'+':''}${fmtUsd(ch)}</span>`;
         return `
           <tr>
             <td class="py-2 font-semibold"><a href="#" class="sm-stock-open hover:underline" data-cusip="${cusip}">${nm}<div class="muted text-xs">CUSIP: ${cusip || '—'}</div></a></td>
             <td class="py-2">${typ || '—'}</td>
-            <td class="py-2">${w}</td>
-            <td class="py-2">${val}</td>
-            <td class="py-2">${chHtml}</td>
+            <td class="py-2" data-order="${isFinite(wNum)?wNum:0}">${w}</td>
+            <td class="py-2" data-order="${isFinite(vNum)?vNum:0}">${val}</td>
+            <td class="py-2" data-order="${isFinite(ch)?ch:0}">${chHtml}</td>
           </tr>
         `;
       }).join('') : `<tr><td colspan="5" class="muted py-3">暂无数据</td></tr>`;
+
+      try {
+        if (window.jQuery && $.fn && $.fn.dataTable) {
+          $('#smHoldingsTable').DataTable({
+            pageLength: 20,
+            order: [[2, 'desc']],
+            autoWidth: false,
+          });
+        }
+      } catch (e) {}
     }
 
     try {
@@ -3762,9 +3782,9 @@
         return ab;
       };
 
-      const labels = (top || []).map(h => _abbrIssuer(h.issuer || ''));
-      const values = (top || []).map(h => Number(h.weight || 0) * 100.0);
-      const hover = (top || []).map(h => {
+      const labels = (top10 || []).map(h => _abbrIssuer(h.issuer || ''));
+      const values = (top10 || []).map(h => Number(h.weight || 0) * 100.0);
+      const hover = (top10 || []).map(h => {
         const issuer = String(h.issuer || '').trim();
         const cusip = String(h.cusip || '').trim();
         const w = Number(h.weight || 0) * 100.0;
