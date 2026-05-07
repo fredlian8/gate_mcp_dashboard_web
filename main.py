@@ -875,10 +875,23 @@ def api_smartmoney_institutions_meta() -> JSONResponse:
 async def api_smartmoney_institutions_meta_import(request: Request) -> JSONResponse:
     if not SMARTMONEY_REFRESH_TOKEN:
         return JSONResponse({"ok": False, "error": "refresh_token_not_configured"}, status_code=500)
-    tok = (request.headers.get("x-refresh-token") or request.headers.get("authorization") or "").strip()
+    xrt = request.headers.get("x-refresh-token")
+    auth = request.headers.get("authorization")
+    tok = ((xrt or "") or (auth or "")).strip()
     tok = tok.replace("Bearer ", "") if tok.lower().startswith("bearer ") else tok
     if tok != SMARTMONEY_REFRESH_TOKEN:
-        return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "unauthorized",
+                "debug": {
+                    "has_x_refresh_token": bool((xrt or "").strip()),
+                    "has_authorization": bool((auth or "").strip()),
+                    "tok_len": len(tok or ""),
+                },
+            },
+            status_code=401,
+        )
     if not (UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN):
         return JSONResponse({"ok": False, "error": "upstash_not_configured"}, status_code=500)
 
