@@ -690,7 +690,9 @@ def api_smartmoney_institutions(q: str = "") -> JSONResponse:
 
     # 优先读取 Upstash 持久化快照，其次内存快照（由 /api/smartmoney/refresh 写入）
     snap_from_upstash: Optional[Dict[str, Any]] = _upstash_get_snapshot() if (UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN) else None
+    snap_from_upstash_used = False
     if isinstance(snap_from_upstash, dict) and isinstance(snap_from_upstash.get("items"), list):
+        snap_from_upstash_used = True
         try:
             with _SMARTMONEY_SNAPSHOT_LOCK:
                 _SMARTMONEY_SNAPSHOT["ts"] = float(snap_from_upstash.get("ts") or 0.0)
@@ -703,10 +705,16 @@ def api_smartmoney_institutions(q: str = "") -> JSONResponse:
         snap_items = _SMARTMONEY_SNAPSHOT.get("items")
         snap_ts = float(_SMARTMONEY_SNAPSHOT.get("ts") or 0.0)
 
+    data_source = "live"
+    snapshot_ts: Optional[float] = None
     if isinstance(snap_items, list) and snap_items and (time.time() - snap_ts) < SEC_EDGAR_CACHE_TTL_SEC:
         items = list(snap_items)
+        snapshot_ts = snap_ts if snap_ts else None
+        data_source = "upstash" if snap_from_upstash_used else "memory"
     else:
         items = _smartmoney_build_items()
+        data_source = "live"
+        snapshot_ts = None
 
     if qq:
         items = [
@@ -716,7 +724,8 @@ def api_smartmoney_institutions(q: str = "") -> JSONResponse:
             or qq in str(it.get("id") or "").lower()
             or qq in str(_SMARTMONEY_INSTITUTIONS_META.get(str(it.get("id") or "").lower(), {}).get("cik") or "").lower()
         ]
-    return JSONResponse({"ok": True, "items": items})
+    out = {"ok": True, "items": items, "data_source": data_source, "snapshot_ts": snapshot_ts}
+    return JSONResponse(out, headers={"X-SM-Source": data_source, "X-SM-Snapshot-Ts": str(snapshot_ts or "")})
 
 
 def api_smartmoney_refresh(request: Request) -> JSONResponse:
@@ -971,12 +980,24 @@ def api_smartmoney_institution_detail(inst_id: str = Query("", alias="id")) -> J
     if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
         snap = _upstash_get_json(_sm_snap_key_inst(iid))
         if isinstance(snap, dict) and snap.get("ok"):
-            return JSONResponse(snap)
+            ts = snap.get("ts") if isinstance(snap, dict) else None
+            out = dict(snap)
+            out["data_source"] = "upstash"
+            out["snapshot_ts"] = ts
+            try:
+                _cache_set(f"sm:inst_detail:{iid}", out)
+            except Exception:
+                pass
+            return JSONResponse(out, headers={"X-SM-Source": "upstash", "X-SM-Snapshot-Ts": str(ts or "")})
 
     ck = f"sm:inst_detail:{iid}"
     cached = _cache_get(ck, SEC_EDGAR_CACHE_TTL_SEC)
     if isinstance(cached, dict) and cached.get("ok"):
-        return JSONResponse(cached)
+        ts = cached.get("snapshot_ts") if isinstance(cached, dict) else None
+        out = dict(cached)
+        out.setdefault("data_source", "memory")
+        out.setdefault("snapshot_ts", ts)
+        return JSONResponse(out, headers={"X-SM-Source": "memory", "X-SM-Snapshot-Ts": str(out.get("snapshot_ts") or "")})
     cik = str(inst.get("cik") or "")
     cur = _sec_get_13f_holdings_by_cik(cik, filing_index=0)
     prev = _sec_get_13f_holdings_by_cik(cik, filing_index=1)
@@ -1028,8 +1049,10 @@ def api_smartmoney_institution_detail(inst_id: str = Query("", alias="id")) -> J
         "top_holdings": top10,
         "recent_changes": changes,
     }
+    resp_obj["data_source"] = "live"
+    resp_obj["snapshot_ts"] = None
     _cache_set(ck, resp_obj)
-    return JSONResponse(resp_obj)
+    return JSONResponse(resp_obj, headers={"X-SM-Source": "live", "X-SM-Snapshot-Ts": ""})
 
 
 def api_smartmoney_stock_detail(ticker: str = "") -> JSONResponse:
@@ -1042,12 +1065,24 @@ def api_smartmoney_stock_detail(ticker: str = "") -> JSONResponse:
     if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
         snap = _upstash_get_json(_sm_snap_key_stock(cusip))
         if isinstance(snap, dict) and snap.get("ok"):
-            return JSONResponse(snap)
+            ts = snap.get("ts") if isinstance(snap, dict) else None
+            out = dict(snap)
+            out["data_source"] = "upstash"
+            out["snapshot_ts"] = ts
+            try:
+                _cache_set(f"sm:stock:{cusip}", out)
+            except Exception:
+                pass
+            return JSONResponse(out, headers={"X-SM-Source": "upstash", "X-SM-Snapshot-Ts": str(ts or "")})
 
     ck = f"sm:stock:{cusip}"
     cached = _cache_get(ck, SEC_EDGAR_CACHE_TTL_SEC)
     if isinstance(cached, dict) and cached.get("ok"):
-        return JSONResponse(cached)
+        ts = cached.get("snapshot_ts") if isinstance(cached, dict) else None
+        out = dict(cached)
+        out.setdefault("data_source", "memory")
+        out.setdefault("snapshot_ts", ts)
+        return JSONResponse(out, headers={"X-SM-Source": "memory", "X-SM-Snapshot-Ts": str(out.get("snapshot_ts") or "")})
     holders: List[Dict[str, Any]] = []
     best_issuer = ""
     for inst in _SMARTMONEY_INSTITUTIONS_META.values():
@@ -1094,8 +1129,10 @@ def api_smartmoney_stock_detail(ticker: str = "") -> JSONResponse:
         "desc": "",
     }
     resp_obj = {"ok": True, "stock": stock, "holders": holders}
+    resp_obj["data_source"] = "live"
+    resp_obj["snapshot_ts"] = None
     _cache_set(ck, resp_obj)
-    return JSONResponse(resp_obj)
+    return JSONResponse(resp_obj, headers={"X-SM-Source": "live", "X-SM-Snapshot-Ts": ""})
 
 
 def api_smartmoney_flows(sector: str = "all", period: str = "quarter") -> JSONResponse:
@@ -1108,12 +1145,24 @@ def api_smartmoney_flows(sector: str = "all", period: str = "quarter") -> JSONRe
     if (sec == "all") and (period == "quarter") and UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
         snap = _upstash_get_json(_sm_snap_key_flows(sec, period))
         if isinstance(snap, dict) and snap.get("ok"):
-            return JSONResponse(snap)
+            ts = snap.get("ts") if isinstance(snap, dict) else None
+            out = dict(snap)
+            out["data_source"] = "upstash"
+            out["snapshot_ts"] = ts
+            try:
+                _cache_set(f"sm:flows:{sec}:{period}", out)
+            except Exception:
+                pass
+            return JSONResponse(out, headers={"X-SM-Source": "upstash", "X-SM-Snapshot-Ts": str(ts or "")})
 
     ck = f"sm:flows:{sec}:{period}"
     cached = _cache_get(ck, SEC_EDGAR_CACHE_TTL_SEC)
     if isinstance(cached, dict) and cached.get("ok"):
-        return JSONResponse(cached)
+        ts = cached.get("snapshot_ts") if isinstance(cached, dict) else None
+        out = dict(cached)
+        out.setdefault("data_source", "memory")
+        out.setdefault("snapshot_ts", ts)
+        return JSONResponse(out, headers={"X-SM-Source": "memory", "X-SM-Snapshot-Ts": str(out.get("snapshot_ts") or "")})
 
     buys: Dict[str, Dict[str, Any]] = {}
     sells: Dict[str, Dict[str, Any]] = {}
@@ -1173,8 +1222,10 @@ def api_smartmoney_flows(sector: str = "all", period: str = "quarter") -> JSONRe
         "top_buys": [_row(r) for r in top_buys],
         "top_sells": [_row(r) for r in top_sells],
     }
+    resp_obj["data_source"] = "live"
+    resp_obj["snapshot_ts"] = None
     _cache_set(ck, resp_obj)
-    return JSONResponse(resp_obj)
+    return JSONResponse(resp_obj, headers={"X-SM-Source": "live", "X-SM-Snapshot-Ts": ""})
 
 
 def _ai_structured_answer(query: str, context: Dict[str, Any]) -> Dict[str, Any]:

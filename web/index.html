@@ -248,6 +248,7 @@
                 <div>
                   <div class="font-extrabold">热门机构</div>
                   <div class="muted text-sm mt-1">点击机构进入详情；也可以直接搜索机构或股票代码。</div>
+                  <div class="muted text-xs mt-1" id="smDashMeta">—</div>
                 </div>
                 <div class="flex items-center gap-2">
                   <input id="smSearch" class="input px-3 py-2" placeholder="搜索机构（如 BlackRock）" style="min-width: 280px" />
@@ -3609,6 +3610,15 @@
     const q = qEl ? String(qEl.value || '').trim() : '';
     const data = await fetchJson(`/api/smartmoney/institutions?q=${encodeURIComponent(q)}`);
     const items = (data && data.items) ? data.items : [];
+    const ds = (data && data.data_source) ? String(data.data_source) : '';
+    const snapTs = (data && data.snapshot_ts) ? Number(data.snapshot_ts) : 0;
+    const metaEl = document.getElementById('smDashMeta');
+    if (metaEl) {
+      const srcTxt = ds ? `Source：${ds}` : '';
+      const tsTxt = snapTs ? `Snapshot：${new Date(snapTs * 1000).toLocaleString()}` : '';
+      const parts = [srcTxt, tsTxt].filter(x => String(x || '').trim());
+      metaEl.textContent = parts.length ? parts.join(' | ') : '—';
+    }
     const tb = document.querySelector('#smInstTable tbody');
     if (!tb) return;
     if (!items.length) {
@@ -3691,10 +3701,18 @@
     const holdings = (data && data.holdings) ? data.holdings : [];
     const top = (data && data.top_holdings) ? data.top_holdings : [];
     const top10 = (top || []).slice(0, 10);
+    const ds = (data && data.data_source) ? String(data.data_source) : '';
+    const snapTs = (data && data.snapshot_ts) ? Number(data.snapshot_ts) : 0;
     const titleEl = document.getElementById('smInstTitle');
     const metaEl = document.getElementById('smInstMeta');
     if (titleEl) titleEl.textContent = inst ? String(inst.name || iid) : '机构详情';
-    if (metaEl) metaEl.textContent = inst ? `AUM：${fmtUsd(inst.aum_usd)} | id：${iid}` : `id：${iid}`;
+    if (metaEl) {
+      const aumTxt = inst ? `AUM：${fmtUsd(inst.aum_usd)}` : '';
+      const srcTxt = ds ? `Source：${ds}` : '';
+      const tsTxt = snapTs ? `Snapshot：${new Date(snapTs * 1000).toLocaleString()}` : '';
+      const parts = [aumTxt, `id：${iid}`, srcTxt, tsTxt].filter(x => String(x || '').trim());
+      metaEl.textContent = parts.join(' | ');
+    }
 
     const tbTop = document.querySelector('#smTopHoldingsTable tbody');
     if (tbTop) {
@@ -3752,6 +3770,7 @@
         if (window.jQuery && $.fn && $.fn.dataTable) {
           $('#smHoldingsTable').DataTable({
             pageLength: 20,
+            lengthMenu: [[20, 50, 100, 200, -1], [20, 50, 100, 200, 'All']],
             order: [[2, 'desc']],
             autoWidth: false,
           });
@@ -3782,7 +3801,12 @@
         return ab;
       };
 
-      const labels = (top10 || []).map(h => _abbrIssuer(h.issuer || ''));
+      const labels = (top10 || []).map(h => {
+        const ab = _abbrIssuer(h.issuer || '');
+        const cusip = String(h.cusip || '').trim();
+        const suf = cusip ? cusip.slice(-4) : '';
+        return suf ? `${ab}-${suf}` : ab;
+      });
       const values = (top10 || []).map(h => Number(h.weight || 0) * 100.0);
       const hover = (top10 || []).map(h => {
         const issuer = String(h.issuer || '').trim();
