@@ -26,11 +26,21 @@ jobs:
           fi
 
           echo "Calling: $REFRESH_URL"
-          curl -sS -X POST "$REFRESH_URL" \
+          http_code=$(curl -sS -o refresh_result.json -w "%{http_code}" -X POST "$REFRESH_URL" \
             -H "x-refresh-token: $REFRESH_TOKEN" \
             -H "content-type: application/json" \
             --data '{}' \
-            --max-time 840
+            --max-time 840)
+
+          echo "Refresh HTTP status: $http_code"
+          echo "Refresh response body:"
+          cat refresh_result.json || true
+          echo ""
+
+          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+            echo "Refresh failed with HTTP $http_code" >&2
+            exit 1
+          fi
 
       - name: Check refresh status (optional)
         if: always()
@@ -41,5 +51,10 @@ jobs:
             echo "SMARTMONEY_REFRESH_STATUS_URL not set; skipping status check"
             exit 0
           fi
-          echo "Status: $STATUS_URL"
-          curl -sS "$STATUS_URL" --max-time 60
+
+          echo "Calling status: $STATUS_URL"
+          http_code=$(curl -sS -o refresh_status.json -w "%{http_code}" -X GET "$STATUS_URL" --max-time 60)
+          echo "Status HTTP status: $http_code"
+          echo "Status response body:"
+          cat refresh_status.json || true
+          echo ""

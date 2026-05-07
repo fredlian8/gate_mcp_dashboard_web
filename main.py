@@ -15,6 +15,7 @@ import json
 import math
 import random
 import re
+import asyncio
 
 import requests
 try:
@@ -87,6 +88,7 @@ SMARTMONEY_REFRESH_TOKEN = (os.getenv("SMARTMONEY_REFRESH_TOKEN") or "").strip()
 UPSTASH_REDIS_REST_URL = (os.getenv("UPSTASH_REDIS_REST_URL") or "").strip().rstrip("/")
 UPSTASH_REDIS_REST_TOKEN = (os.getenv("UPSTASH_REDIS_REST_TOKEN") or "").strip()
 SMARTMONEY_SNAPSHOT_KEY = (os.getenv("SMARTMONEY_SNAPSHOT_KEY") or "smartmoney:institutions:snapshot:v1").strip()
+SMARTMONEY_META_KEY = (os.getenv("SMARTMONEY_META_KEY") or "smartmoney:institutions:meta:v1").strip()
 SEC_EDGAR_PER_INST_DELAY_SEC = float(os.getenv("SEC_EDGAR_PER_INST_DELAY_SEC", "0.15") or "0.15")
 
 # 真实 13F（SEC EDGAR）机构配置（方案A：只依赖 CIK）
@@ -99,6 +101,9 @@ _SMARTMONEY_INSTITUTIONS_META: Dict[str, Dict[str, Any]] = {
 
 _SMARTMONEY_SNAPSHOT_LOCK = threading.Lock()
 _SMARTMONEY_SNAPSHOT: Dict[str, Any] = {"ts": 0.0, "items": [], "last_error": ""}
+
+_SMARTMONEY_META_LOCK = threading.Lock()
+_SMARTMONEY_META: Dict[str, Any] = {"ts": 0.0, "items": []}
 
 
 def _upstash_cmd(args: List[Any]) -> Any:
@@ -211,11 +216,100 @@ def _sm_snap_key_stock(cusip: str) -> str:
     return f"{SMARTMONEY_SNAPSHOT_KEY}:stock:{c}"
 
 
+def _sm_norm_inst_id(name: str) -> str:
+    # 生成稳定 id：仅用于无 id 的导入数据
+    s = str(name or "").strip().lower()
+    if not s:
+        return ""
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    s = re.sub(r"-+", "-", s).strip("-")
+    return s[:32]
+
+
+def _smartmoney_get_institutions_meta() -> List[Dict[str, Any]]:
+    # 优先 Upstash 主数据，其次内置默认（兼容旧行为）
+    meta_from_upstash: Optional[Any] = None
+    if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
+        meta_from_upstash = _upstash_get_json(SMARTMONEY_META_KEY)
+    if isinstance(meta_from_upstash, dict) and isinstance(meta_from_upstash.get("items"), list):
+        try:
+            with _SMARTMONEY_META_LOCK:
+                _SMARTMONEY_META["ts"] = float(meta_from_upstash.get("ts") or 0.0)
+                _SMARTMONEY_META["items"] = list(meta_from_upstash.get("items") or [])
+        except Exception:
+            pass
+
+    with _SMARTMONEY_META_LOCK:
+        items0 = _SMARTMONEY_META.get("items")
+    if isinstance(items0, list) and items0:
+        items = [x for x in items0 if isinstance(x, dict)]
+    else:
+        items = [x for x in _SMARTMONEY_INSTITUTIONS_META.values() if isinstance(x, dict)]
+
+    out: List[Dict[str, Any]] = []
+    used: Dict[str, int] = {}
+    for it in items:
+        nm = str(it.get("name") or "").strip()
+        iid = str(it.get("id") or "").strip().lower()
+        if not iid:
+            iid = _sm_norm_inst_id(nm)
+        if not iid:
+            continue
+        # 去重处理：同名/同 id 的极端情况
+        k = iid
+        if k in used:
+            used[k] += 1
+            k = f"{iid}-{used[iid]}"
+        else:
+            used[k] = 0
+        o = dict(it)
+        o["id"] = k
+        o["name"] = nm
+        o["cik"] = str(o.get("cik") or "").strip() or None
+        out.append(o)
+    return out
+
+
+def _smartmoney_inst_map() -> Dict[str, Dict[str, Any]]:
+    insts = _smartmoney_get_institutions_meta()
+    m: Dict[str, Dict[str, Any]] = {}
+    for it in insts:
+        iid = str(it.get("id") or "").strip().lower()
+        if not iid:
+            continue
+        m[iid] = it
+    return m
+
+
+def _smartmoney_save_institutions_meta(items: List[Dict[str, Any]]) -> bool:
+    # 写入 Upstash 主数据（不设置 TTL，作为配置长期存在）
+    if not (UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN):
+        return False
+    try:
+        payload = {"ts": int(time.time()), "items": items if isinstance(items, list) else []}
+        ok = _upstash_set_json(SMARTMONEY_META_KEY, payload, ttl_sec=0)
+        if ok:
+            try:
+                with _SMARTMONEY_META_LOCK:
+                    _SMARTMONEY_META["ts"] = float(payload.get("ts") or 0.0)
+                    _SMARTMONEY_META["items"] = list(payload.get("items") or [])
+            except Exception:
+                pass
+        return bool(ok)
+    except Exception:
+        return False
+
+
 def _smartmoney_build_items() -> List[Dict[str, Any]]:
     items2: List[Dict[str, Any]] = []
-    for inst in _SMARTMONEY_INSTITUTIONS_META.values():
+    for inst in _smartmoney_get_institutions_meta():
         name = str(inst.get("name") or "")
         iid = str(inst.get("id") or "")
+        cn_name = str(inst.get("cn_name") or "")
+        category = str(inst.get("category") or "")
+        sub_tags = inst.get("sub_tags") if isinstance(inst.get("sub_tags"), list) else []
+        importance_score = inst.get("importance_score")
+        smart_money_weight = inst.get("smart_money_weight")
         cik = str(inst.get("cik") or "")
         aum: Optional[float] = None
         prev_aum: Optional[float] = None
@@ -232,8 +326,12 @@ def _smartmoney_build_items() -> List[Dict[str, Any]]:
         cur_filing = ""
         prev_filing = ""
         try:
-            cur = _sec_get_13f_holdings_by_cik(cik, filing_index=0)
-            prev = _sec_get_13f_holdings_by_cik(cik, filing_index=1)
+            if not str(cik or "").strip():
+                cur = {"ok": False, "error": "missing_cik"}
+                prev = {"ok": False, "error": "missing_cik"}
+            else:
+                cur = _sec_get_13f_holdings_by_cik(cik, filing_index=0)
+                prev = _sec_get_13f_holdings_by_cik(cik, filing_index=1)
             if not (isinstance(cur, dict) and cur.get("ok")):
                 err = str(cur.get("error") or "sec_fetch_failed")
                 cur_q = ""
@@ -288,6 +386,11 @@ def _smartmoney_build_items() -> List[Dict[str, Any]]:
         items2.append({
             "id": iid,
             "name": name,
+            "cn_name": cn_name,
+            "category": category,
+            "sub_tags": sub_tags,
+            "importance_score": importance_score,
+            "smart_money_weight": smart_money_weight,
             "aum_usd": float(aum) if aum is not None else None,
             "prev_aum_usd": float(prev_aum) if prev_aum is not None else None,
             "aum_change_usd": float(aum_change) if aum_change is not None else None,
@@ -664,7 +767,7 @@ def _sec_get_13f_holdings_by_cik(cik10: str, filing_index: int = 0) -> Dict[str,
 
 def _smartmoney_all_holdings_flat() -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
-    for inst in _SMARTMONEY_INSTITUTIONS_META.values():
+    for inst in _smartmoney_get_institutions_meta():
         iid = str(inst.get("id") or "")
         iname = str(inst.get("name") or "")
         cik = str(inst.get("cik") or "")
@@ -707,7 +810,8 @@ def api_smartmoney_institutions(q: str = "") -> JSONResponse:
 
     data_source = "live"
     snapshot_ts: Optional[float] = None
-    if isinstance(snap_items, list) and snap_items and (time.time() - snap_ts) < SEC_EDGAR_CACHE_TTL_SEC:
+    stale_limit_sec = float(int(SEC_EDGAR_CACHE_TTL_SEC) * 6) if SEC_EDGAR_CACHE_TTL_SEC else 0.0
+    if isinstance(snap_items, list) and snap_items and (not stale_limit_sec or (time.time() - snap_ts) < stale_limit_sec):
         items = list(snap_items)
         snapshot_ts = snap_ts if snap_ts else None
         data_source = "upstash" if snap_from_upstash_used else "memory"
@@ -717,15 +821,114 @@ def api_smartmoney_institutions(q: str = "") -> JSONResponse:
         snapshot_ts = None
 
     if qq:
+        inst_map = _smartmoney_inst_map()
         items = [
             it
             for it in items
             if qq in str(it.get("name") or "").lower()
             or qq in str(it.get("id") or "").lower()
-            or qq in str(_SMARTMONEY_INSTITUTIONS_META.get(str(it.get("id") or "").lower(), {}).get("cik") or "").lower()
+            or qq in str(inst_map.get(str(it.get("id") or "").lower(), {}).get("cik") or "").lower()
+            or qq in str(inst_map.get(str(it.get("id") or "").lower(), {}).get("cn_name") or "").lower()
+            or qq in str(inst_map.get(str(it.get("id") or "").lower(), {}).get("category") or "").lower()
         ]
     out = {"ok": True, "items": items, "data_source": data_source, "snapshot_ts": snapshot_ts}
     return JSONResponse(out, headers={"X-SM-Source": data_source, "X-SM-Snapshot-Ts": str(snapshot_ts or "")})
+
+
+def api_smartmoney_institutions_meta() -> JSONResponse:
+    meta_from_upstash: Optional[Any] = None
+    meta_ts: Optional[float] = None
+    data_source = "builtin"
+    if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
+        meta_from_upstash = _upstash_get_json(SMARTMONEY_META_KEY)
+    if isinstance(meta_from_upstash, dict) and isinstance(meta_from_upstash.get("items"), list):
+        data_source = "upstash"
+        try:
+            meta_ts = float(meta_from_upstash.get("ts") or 0.0) or None
+        except Exception:
+            meta_ts = None
+        return JSONResponse(
+            {"ok": True, "items": list(meta_from_upstash.get("items") or []), "data_source": data_source, "ts": meta_ts},
+            headers={"X-SM-Source": data_source, "X-SM-Snapshot-Ts": str(meta_ts or "")},
+        )
+
+    with _SMARTMONEY_META_LOCK:
+        items0 = _SMARTMONEY_META.get("items")
+        ts0 = _SMARTMONEY_META.get("ts")
+    if isinstance(items0, list) and items0:
+        data_source = "memory"
+        try:
+            meta_ts = float(ts0 or 0.0) or None
+        except Exception:
+            meta_ts = None
+        return JSONResponse(
+            {"ok": True, "items": list(items0), "data_source": data_source, "ts": meta_ts},
+            headers={"X-SM-Source": data_source, "X-SM-Snapshot-Ts": str(meta_ts or "")},
+        )
+
+    return JSONResponse(
+        {"ok": True, "items": [x for x in _SMARTMONEY_INSTITUTIONS_META.values() if isinstance(x, dict)], "data_source": data_source, "ts": None},
+        headers={"X-SM-Source": data_source, "X-SM-Snapshot-Ts": ""},
+    )
+
+
+async def api_smartmoney_institutions_meta_import(request: Request) -> JSONResponse:
+    if not SMARTMONEY_REFRESH_TOKEN:
+        return JSONResponse({"ok": False, "error": "refresh_token_not_configured"}, status_code=500)
+    tok = (request.headers.get("x-refresh-token") or request.headers.get("authorization") or "").strip()
+    tok = tok.replace("Bearer ", "") if tok.lower().startswith("bearer ") else tok
+    if tok != SMARTMONEY_REFRESH_TOKEN:
+        return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
+    if not (UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN):
+        return JSONResponse({"ok": False, "error": "upstash_not_configured"}, status_code=500)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+
+    items_in: Any = None
+    if isinstance(body, list):
+        items_in = body
+    elif isinstance(body, dict):
+        items_in = body.get("items")
+    if not isinstance(items_in, list):
+        return JSONResponse({"ok": False, "error": "invalid_payload"}, status_code=400)
+
+    cleaned: List[Dict[str, Any]] = []
+    used: Dict[str, int] = {}
+    missing_cik = 0
+    for x in items_in:
+        if not isinstance(x, dict):
+            continue
+        nm = str(x.get("name") or "").strip()
+        iid = str(x.get("id") or "").strip().lower()
+        if not iid:
+            iid = _sm_norm_inst_id(nm)
+        if not iid:
+            continue
+        cik = str(x.get("cik") or "").strip()
+        if not cik:
+            missing_cik += 1
+        k = iid
+        if k in used:
+            used[k] += 1
+            k = f"{iid}-{used[iid]}"
+        else:
+            used[k] = 0
+        o = dict(x)
+        o["id"] = k
+        o["name"] = nm
+        o["cik"] = cik or None
+        cleaned.append(o)
+
+    if not cleaned:
+        return JSONResponse({"ok": False, "error": "empty_items"}, status_code=400)
+
+    ok = _smartmoney_save_institutions_meta(cleaned)
+    if not ok:
+        return JSONResponse({"ok": False, "error": "save_failed"}, status_code=502)
+    return JSONResponse({"ok": True, "count": len(cleaned), "missing_cik": missing_cik, "ts": int(time.time())})
 
 
 def api_smartmoney_refresh(request: Request) -> JSONResponse:
@@ -799,9 +1002,11 @@ def api_smartmoney_refresh(request: Request) -> JSONResponse:
 
         # 2) 预计算每个机构 cur/prev 13F，并生成 institution_detail 快照
         cur_prev_by_inst: Dict[str, Tuple[Dict[str, Any], Dict[str, Any]]] = {}
-        for inst in _SMARTMONEY_INSTITUTIONS_META.values():
+        for inst in _smartmoney_get_institutions_meta():
             iid = str(inst.get("id") or "").strip().lower()
             cik = str(inst.get("cik") or "")
+            if not str(cik or "").strip():
+                continue
             cur = _sec_get_13f_holdings_by_cik(cik, filing_index=0)
             prev = _sec_get_13f_holdings_by_cik(cik, filing_index=1)
             cur_prev_by_inst[iid] = (cur, prev)
@@ -854,7 +1059,7 @@ def api_smartmoney_refresh(request: Request) -> JSONResponse:
         # 4) stock 快照（CUSIP -> holders topN + totals）
         holders_by_cusip: Dict[str, List[Dict[str, Any]]] = {}
         totals_by_cusip: Dict[str, float] = {}
-        for inst in _SMARTMONEY_INSTITUTIONS_META.values():
+        for inst in _smartmoney_get_institutions_meta():
             iid = str(inst.get("id") or "")
             iname = str(inst.get("name") or "")
             cik = str(inst.get("cik") or "")
@@ -972,9 +1177,12 @@ def api_smartmoney_refresh_status() -> JSONResponse:
 
 def api_smartmoney_institution_detail(inst_id: str = Query("", alias="id")) -> JSONResponse:
     iid = (inst_id or "").strip().lower()
-    inst = _SMARTMONEY_INSTITUTIONS_META.get(iid)
+    inst = _smartmoney_inst_map().get(iid)
     if not inst:
         return JSONResponse({"ok": False, "error": "institution_not_found"}, status_code=404)
+
+    if not str(inst.get("cik") or "").strip():
+        return JSONResponse({"ok": False, "error": "missing_cik"}, status_code=422)
 
     # 1) Upstash 预计算快照优先（秒开）
     if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
@@ -1085,10 +1293,12 @@ def api_smartmoney_stock_detail(ticker: str = "") -> JSONResponse:
         return JSONResponse(out, headers={"X-SM-Source": "memory", "X-SM-Snapshot-Ts": str(out.get("snapshot_ts") or "")})
     holders: List[Dict[str, Any]] = []
     best_issuer = ""
-    for inst in _SMARTMONEY_INSTITUTIONS_META.values():
+    for inst in _smartmoney_get_institutions_meta():
         iid = str(inst.get("id") or "")
         iname = str(inst.get("name") or "")
         cik = str(inst.get("cik") or "")
+        if not str(cik or "").strip():
+            continue
         try:
             cur = _sec_get_13f_holdings_by_cik(cik, filing_index=0)
             prev = _sec_get_13f_holdings_by_cik(cik, filing_index=1)
@@ -1167,8 +1377,10 @@ def api_smartmoney_flows(sector: str = "all", period: str = "quarter") -> JSONRe
     buys: Dict[str, Dict[str, Any]] = {}
     sells: Dict[str, Dict[str, Any]] = {}
 
-    for inst in _SMARTMONEY_INSTITUTIONS_META.values():
+    for inst in _smartmoney_get_institutions_meta():
         cik = str(inst.get("cik") or "")
+        if not str(cik or "").strip():
+            continue
         try:
             cur = _sec_get_13f_holdings_by_cik(cik, filing_index=0)
             prev = _sec_get_13f_holdings_by_cik(cik, filing_index=1)
@@ -1291,10 +1503,12 @@ def api_smartmoney_ai(query: str = "", inst_id: str = "", ticker: str = "", sect
     ctx: Dict[str, Any] = {}
     if inst_id:
         iid = inst_id.strip().lower()
-        inst = _SMARTMONEY_INSTITUTIONS_META.get(iid)
+        inst = _smartmoney_inst_map().get(iid)
         if inst:
             cik = str(inst.get("cik") or "")
             try:
+                if not str(cik or "").strip():
+                    raise RuntimeError("missing_cik")
                 cur = _sec_get_13f_holdings_by_cik(cik, filing_index=0)
                 ctx["institution"] = {
                     "id": inst.get("id"),
@@ -7169,6 +7383,8 @@ app.get("/api/ma10macd/detail")(api_ma10macd_detail)
 app.get("/api/ma10macd/push_now")(api_ma10macd_push_now)
 app.get("/api/ma10macd/auto_status")(api_ma10macd_auto_status)
 app.get("/api/smartmoney/institutions")(api_smartmoney_institutions)
+app.get("/api/smartmoney/institutions/meta")(api_smartmoney_institutions_meta)
+app.post("/api/smartmoney/institutions/meta/import")(api_smartmoney_institutions_meta_import)
 app.get("/api/smartmoney/institution")(api_smartmoney_institution_detail)
 app.get("/api/smartmoney/stock")(api_smartmoney_stock_detail)
 app.get("/api/smartmoney/flows")(api_smartmoney_flows)
