@@ -55,8 +55,9 @@ jobs:
                 exit 1
               fi
 
-              done=$(python -c "import json; obj=json.load(open('refresh_result.json','r',encoding='utf-8')); print('1' if obj.get('done') else '0')" 2>/dev/null || echo 0)
-              next_cursor=$(python -c "import json; obj=json.load(open('refresh_result.json','r',encoding='utf-8')); print(int(obj.get('next_cursor') or 0))" 2>/dev/null || echo 0)
+              python -c "import json; json.load(open('refresh_result.json','r',encoding='utf-8'))" 1>/dev/null
+              done=$(python -c "import json; obj=json.load(open('refresh_result.json','r',encoding='utf-8')); print('1' if obj.get('done') else '0')")
+              next_cursor=$(python -c "import json; obj=json.load(open('refresh_result.json','r',encoding='utf-8')); print(int(obj.get('next_cursor') or 0))")
 
               if [ "$done" = "1" ]; then
                 echo "Stage ${stage} done."
@@ -65,6 +66,8 @@ jobs:
 
               if [ "$next_cursor" -le "$cursor" ]; then
                 echo "next_cursor did not advance (cursor=$cursor next=$next_cursor), abort" >&2
+                echo "Response body (for debugging):"
+                cat refresh_result.json || true
                 exit 1
               fi
               cursor="$next_cursor"
