@@ -1,0 +1,31 @@
+name: Keep Render Awake
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping healthz
+        env:
+          BASE_URL: ${{ secrets.SMARTMONEY_BASE_URL }}
+        run: |
+          if [ -z "$BASE_URL" ]; then
+            echo "Missing secrets.SMARTMONEY_BASE_URL" >&2
+            exit 1
+          fi
+          URL="$BASE_URL/api/healthz"
+          echo "Pinging: $URL"
+          http_code=$(curl -sS -o healthz.json -w "%{http_code}" -X GET "$URL" --max-time 60 || echo "000")
+          echo "HTTP status: $http_code"
+          echo "Body:"
+          cat healthz.json 2>/dev/null || true
+          echo ""
+          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+            echo "Keep-alive ping failed" >&2
+            exit 1
+          fi

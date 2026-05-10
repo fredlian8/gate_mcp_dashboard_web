@@ -1119,100 +1119,171 @@ def api_smartmoney_refresh(request: Request) -> JSONResponse:
     flows_issuer_key = "sm:flows:h:issuer:all:quarter"
 
     def _build_inst_detail(iid: str, inst: Dict[str, Any], cur: Dict[str, Any], prev: Dict[str, Any]) -> Dict[str, Any]:
-        hs = cur.get("holdings") or []
-        hs_prev = prev.get("holdings") if isinstance(prev, dict) and prev.get("ok") else []
+        import heapq
+
+        hs = cur.get("holdings") if isinstance(cur.get("holdings"), list) else []
+        hs_prev = prev.get("holdings") if isinstance(prev, dict) and prev.get("ok") and isinstance(prev.get("holdings"), list) else []
+
+        # prev cusip -> row (value_usd + issuer/sector)
         prev_map: Dict[str, Dict[str, Any]] = {}
-        if isinstance(hs_prev, list):
-            for r in hs_prev:
-                if isinstance(r, dict) and str(r.get("cusip") or "").strip():
-                    prev_map[str(r.get("cusip") or "").strip()] = r
-        holdings2: List[Dict[str, Any]] = []
+        for r in hs_prev:
+            if not isinstance(r, dict):
+                continue
+            cusip = str(r.get("cusip") or "").strip().upper()
+            if not cusip:
+                continue
+            prev_map[cusip] = r
+
         cur_seen: set = set()
-        new_pos: List[Dict[str, Any]] = []
-        add_pos: List[Dict[str, Any]] = []
-        red_pos: List[Dict[str, Any]] = []
+
+        # top holdings for output, keep only top N by value_usd
+        topN = 200
+        heap_hold: List[Tuple[float, Dict[str, Any]]] = []
+
+        # top15 for summary
+        heap_top15: List[Tuple[float, Dict[str, Any]]] = []
+
+        # change category counters + top10 heaps by abs(delta)
+        cnt_new = 0
+        cnt_add = 0
+        cnt_reduce = 0
+        cnt_exit = 0
+
+        def _push_heap(hp: List[Tuple[float, Dict[str, Any]]], limit: int, score: float, row: Dict[str, Any]) -> None:
+            if limit <= 0:
+                return
+            if len(hp) < limit:
+                heapq.heappush(hp, (score, row))
+            else:
+                if score > hp[0][0]:
+                    heapq.heapreplace(hp, (score, row))
+
+        heap_new: List[Tuple[float, Dict[str, Any]]] = []
+        heap_add: List[Tuple[float, Dict[str, Any]]] = []
+        heap_reduce: List[Tuple[float, Dict[str, Any]]] = []
+        heap_exit: List[Tuple[float, Dict[str, Any]]] = []
+
         for h in hs:
             if not isinstance(h, dict):
                 continue
-            cusip = str(h.get("cusip") or "").strip()
-            issuer = str(h.get("issuer") or "").strip()
-            value_usd = float(h.get("value_usd") or 0.0)
-            weight = float(h.get("weight") or 0.0)
-            shares = float(h.get("shares") or 0.0)
-            prev_r = prev_map.get(cusip)
-            prev_val = float(prev_r.get("value_usd") or 0.0) if isinstance(prev_r, dict) else 0.0
+            cusip = str(h.get("cusip") or "").strip().upper()
+            if not cusip:
+                continue
             cur_seen.add(cusip)
-            delta = value_usd - prev_val
-            holdings2.append({
+
+            prev_row = prev_map.get(cusip) or {}
+            prev_val = float(prev_row.get("value_usd") or 0.0)
+            cur_val = float(h.get("value_usd") or 0.0)
+            delta = float(cur_val - prev_val)
+            weight = float(h.get("weight") or 0.0)
+
+            row = {
                 "cusip": cusip,
-                "issuer": issuer,
-                "title": str(h.get("title") or ""),
+                "issuer": h.get("issuer") or "",
+                "sector": h.get("sector") or "",
+                "value_usd": cur_val,
                 "weight": weight,
-                "value_usd": value_usd,
-                "shares": shares,
-                "shares_type": str(h.get("shares_type") or ""),
                 "qoq_value_change": delta,
-            })
+            }
 
-            if prev_val <= 0 and value_usd > 0:
-                new_pos.append({"cusip": cusip, "issuer": issuer, "value_usd": value_usd, "prev_value_usd": prev_val, "delta_usd": delta})
-            elif delta > 0:
-                add_pos.append({"cusip": cusip, "issuer": issuer, "value_usd": value_usd, "prev_value_usd": prev_val, "delta_usd": delta})
-            elif delta < 0 and value_usd > 0 and prev_val > 0:
-                red_pos.append({"cusip": cusip, "issuer": issuer, "value_usd": value_usd, "prev_value_usd": prev_val, "delta_usd": delta})
-        holdings2.sort(key=lambda x: float(x.get("value_usd") or 0.0), reverse=True)
-        top_holdings = holdings2[:10]
-        recent_changes = sorted(holdings2, key=lambda x: abs(float(x.get("qoq_value_change") or 0.0)), reverse=True)[:20]
-        # 表格限制：避免前端一次渲染上千行
-        holdings_limited = holdings2[:500]
+            # holdings output: keep by value_usd
+            _push_heap(heap_hold, topN, cur_val, row)
+            _push_heap(heap_top15, 15, cur_val, row)
 
-        exit_pos: List[Dict[str, Any]] = []
-        for cusip, pr in prev_map.items():
+            # changes
+            if delta > 0:
+                if prev_val <= 0:
+                    cnt_new += 1
+                    _push_heap(heap_new, 10, abs(delta), row)
+                else:
+                    cnt_add += 1
+                    _push_heap(heap_add, 10, abs(delta), row)
+            elif delta < 0:
+                if cur_val <= 0:
+                    # normally won't happen here (SEC cur has row only if still held)
+                    pass
+                else:
+                    cnt_reduce += 1
+                    _push_heap(heap_reduce, 10, abs(delta), row)
+
+        # exited: in prev but not in cur
+        for cusip, r in prev_map.items():
             if cusip in cur_seen:
                 continue
-            try:
-                prev_val2 = float((pr or {}).get("value_usd") or 0.0)
-            except Exception:
-                prev_val2 = 0.0
-            if prev_val2 <= 0:
+            prev_val = float(r.get("value_usd") or 0.0)
+            if prev_val <= 0:
                 continue
-            issuer2 = str((pr or {}).get("issuer") or "").strip() if isinstance(pr, dict) else ""
-            exit_pos.append({"cusip": str(cusip or "").strip(), "issuer": issuer2, "value_usd": 0.0, "prev_value_usd": prev_val2, "delta_usd": -prev_val2})
+            row = {
+                "cusip": cusip,
+                "issuer": r.get("issuer") or "",
+                "sector": r.get("sector") or "",
+                "value_usd": 0.0,
+                "weight": 0.0,
+                "qoq_value_change": -float(prev_val),
+            }
+            cnt_exit += 1
+            _push_heap(heap_exit, 10, abs(prev_val), row)
 
-        def _top10(seq: List[Dict[str, Any]], key: str = "delta_usd", reverse: bool = True) -> List[Dict[str, Any]]:
-            try:
-                s2 = [x for x in (seq or []) if isinstance(x, dict)]
-                s2.sort(key=lambda x: float(x.get(key) or 0.0), reverse=reverse)
-                return s2[:10]
-            except Exception:
-                return (seq or [])[:10]
+        def _heap_to_top_rows(hp: List[Tuple[float, Dict[str, Any]]]) -> List[Dict[str, Any]]:
+            rows = [x[1] for x in sorted(hp, key=lambda t: float(t[0] or 0.0), reverse=True)]
+            out: List[Dict[str, Any]] = []
+            for r in rows:
+                out.append(
+                    {
+                        "issuer": r.get("issuer") or "",
+                        "cusip": r.get("cusip") or "",
+                        "delta_usd": float(r.get("qoq_value_change") or 0.0),
+                        "value_usd": float(r.get("value_usd") or 0.0),
+                        "weight": float(r.get("weight") or 0.0),
+                    }
+                )
+            return out
+
+        holdings_limited = [x[1] for x in sorted(heap_hold, key=lambda t: float(t[0] or 0.0), reverse=True)]
+        top_holdings_rows = [x[1] for x in sorted(heap_top15, key=lambda t: float(t[0] or 0.0), reverse=True)]
+        top_holdings = [
+            {
+                "issuer": h.get("issuer") or "",
+                "cusip": h.get("cusip") or "",
+                "value_usd": float(h.get("value_usd") or 0.0),
+                "weight": float(h.get("weight") or 0.0),
+            }
+            for h in top_holdings_rows
+        ]
 
         change_breakdown = {
             "counts": {
-                "new": int(len(new_pos)),
-                "add": int(len(add_pos)),
-                "reduce": int(len(red_pos)),
-                "exit": int(len(exit_pos)),
+                "new": int(cnt_new),
+                "add": int(cnt_add),
+                "reduce": int(cnt_reduce),
+                "exit": int(cnt_exit),
             },
             "top10": {
-                "new": _top10(new_pos, key="delta_usd", reverse=True),
-                "add": _top10(add_pos, key="delta_usd", reverse=True),
-                "reduce": _top10(red_pos, key="delta_usd", reverse=False),
-                "exit": _top10(exit_pos, key="delta_usd", reverse=False),
+                "new": _heap_to_top_rows(heap_new),
+                "add": _heap_to_top_rows(heap_add),
+                "reduce": _heap_to_top_rows(heap_reduce),
+                "exit": _heap_to_top_rows(heap_exit),
             },
         }
-        cik = str(inst.get("cik") or "")
+
+        recent_changes = {
+            "new": change_breakdown["top10"]["new"],
+            "add": change_breakdown["top10"]["add"],
+            "reduce": change_breakdown["top10"]["reduce"],
+            "exit": change_breakdown["top10"]["exit"],
+        }
+
         return {
             "ok": True,
             "institution": {
-                "id": inst.get("id"),
-                "name": inst.get("name"),
-                "cik": _sec_norm_cik(cik),
+                "id": iid,
+                "name": inst.get("name") or "",
+                "cik": inst.get("cik") or "",
                 "aum_usd": float(cur.get("total_value_usd") or 0.0),
                 "accession": cur.get("accession"),
             },
             "holdings": holdings_limited,
-            "holdings_total": len(holdings2),
+            "holdings_total": int(len(hs)) + int(cnt_exit),
             "top_holdings": top_holdings,
             "recent_changes": recent_changes,
             "change_breakdown": change_breakdown,
@@ -8119,6 +8190,18 @@ def classify(price_pct: Optional[float], oi_pct: Optional[float]) -> Optional[st
 
 
 app = FastAPI(title=APP_TITLE)
+
+
+@app.get("/api/healthz")
+def api_healthz() -> JSONResponse:
+    return JSONResponse(
+        {
+            "ok": True,
+            "ts": int(time.time()),
+            "app": str(APP_TITLE or ""),
+        }
+    )
+
 
 app.get("/api/whales/address/detail")(api_whales_address_detail)
 app.get("/api/exchange/spot/large_trades")(api_exchange_spot_large_trades)

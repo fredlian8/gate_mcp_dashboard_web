@@ -25,6 +25,66 @@ jobs:
             exit 1
           fi
 
+          curl_with_retry () {
+            local method="$1"
+            local url="$2"
+            local out_file="$3"
+            local max_attempts="${4:-10}"
+            local attempt="0"
+            local sleep_sec="5"
+
+            while true; do
+              attempt=$((attempt+1))
+              http_code=$(curl -sS -o "$out_file" -w "%{http_code}" -X "$method" "$url" \
+                -H "x-refresh-token: $REFRESH_TOKEN" \
+                -H "content-type: application/json" \
+                --data '{}' \
+                --max-time 840 || echo "000")
+
+              echo "HTTP status: $http_code"
+              if [ "$http_code" = "200" ] || [ "$http_code" = "201" ] || [ "$http_code" = "202" ]; then
+                return 0
+              fi
+
+              # Render 冷启动/网关常见：502/503/504，或 curl 连接失败(000)
+              if [ "$http_code" = "502" ] || [ "$http_code" = "503" ] || [ "$http_code" = "504" ] || [ "$http_code" = "000" ]; then
+                echo "Transient error ($http_code), attempt $attempt/$max_attempts. Response body:" >&2
+                cat "$out_file" 2>/dev/null || true
+                echo "" >&2
+                if [ "$attempt" -ge "$max_attempts" ]; then
+                  echo "Giving up after $attempt attempts" >&2
+                  return 1
+                fi
+                echo "Sleeping ${sleep_sec}s then retry..." >&2
+                sleep "$sleep_sec"
+                if [ "$sleep_sec" -lt 60 ]; then
+                  sleep_sec=$((sleep_sec*2))
+                  if [ "$sleep_sec" -gt 60 ]; then
+                    sleep_sec=60
+                  fi
+                fi
+                continue
+              fi
+
+              echo "Non-retryable HTTP $http_code. Response body:" >&2
+              cat "$out_file" 2>/dev/null || true
+              echo "" >&2
+              return 1
+            done
+          }
+
+          # Warm up: Render 睡眠后先多次探活，等服务真正起来再开始 refresh
+          echo "Warming up service..."
+          WARMUP_URL="$REFRESH_URL"
+          if echo "$REFRESH_URL" | grep -q "\\?"; then
+            WARMUP_URL="${REFRESH_URL}&stage=flows"
+          else
+            WARMUP_URL="${REFRESH_URL}?stage=flows"
+          fi
+          # flows stage 本身很轻（只读 ZSET 并写 snapshot），适合当 warmup
+          curl_with_retry POST "$WARMUP_URL" warmup_result.json 12
+          echo "Warmup done."
+
           run_stage () {
             local stage="$1"
             local cursor="0"
@@ -39,21 +99,11 @@ jobs:
 
               url="$REFRESH_URL?stage=${stage}&cursor=${cursor}&batch_size=${batch_size}"
               echo "Calling: $url"
-              http_code=$(curl -sS -o refresh_result.json -w "%{http_code}" -X POST "$url" \
-                -H "x-refresh-token: $REFRESH_TOKEN" \
-                -H "content-type: application/json" \
-                --data '{}' \
-                --max-time 840)
+              curl_with_retry POST "$url" refresh_result.json 10
 
-              echo "Refresh HTTP status: $http_code"
               echo "Refresh response body:"
               cat refresh_result.json || true
               echo ""
-
-              if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
-                echo "Refresh failed with HTTP $http_code" >&2
-                exit 1
-              fi
 
               python -c "import json; json.load(open('refresh_result.json','r',encoding='utf-8'))" 1>/dev/null
               done=$(python -c "import json; obj=json.load(open('refresh_result.json','r',encoding='utf-8')); print('1' if obj.get('done') else '0')")
@@ -78,19 +128,10 @@ jobs:
           echo "Calling flows stage (single call)"
           url="$REFRESH_URL?stage=flows"
           echo "Calling: $url"
-          http_code=$(curl -sS -o refresh_result.json -w "%{http_code}" -X POST "$url" \
-            -H "x-refresh-token: $REFRESH_TOKEN" \
-            -H "content-type: application/json" \
-            --data '{}' \
-            --max-time 840)
-          echo "Refresh HTTP status: $http_code"
+          curl_with_retry POST "$url" refresh_result.json 10
           echo "Refresh response body:"
           cat refresh_result.json || true
           echo ""
-          if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
-            echo "Flows stage failed with HTTP $http_code" >&2
-            exit 1
-          fi
           cat refresh_result.json || true
           echo ""
 
