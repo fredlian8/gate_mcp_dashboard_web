@@ -2,7 +2,7 @@
   {
     "name": "Berkshire Hathaway",
     "cn_name": "伯克希尔哈撒韦",
-    "cik": null,
+    "cik": "0001067983",
     "category": "价值投资",
     "sub_tags": ["长期持有", "高集中度", "巴菲特"],
     "importance_score": 100,
@@ -11,7 +11,7 @@
   {
     "name": "Pershing Square Capital Management",
     "cn_name": "潘兴广场资本",
-    "cik": null,
+    "cik": "0001336528",
     "category": "价值投资",
     "sub_tags": ["激进投资", "高集中度"],
     "importance_score": 92,
@@ -20,7 +20,7 @@
   {
     "name": "Baupost Group",
     "cn_name": "博普斯特集团",
-    "cik": null,
+    "cik": "0001061768",
     "category": "价值投资",
     "sub_tags": ["深度价值", "逆向投资"],
     "importance_score": 90,
@@ -29,7 +29,7 @@
   {
     "name": "Appaloosa Management",
     "cn_name": "阿帕卢萨资本",
-    "cik": null,
+    "cik": "0001006438",
     "category": "价值投资",
     "sub_tags": ["逆向投资", "事件驱动"],
     "importance_score": 85,
@@ -38,7 +38,7 @@
   {
     "name": "Greenlight Capital",
     "cn_name": "绿光资本",
-    "cik": null,
+    "cik": "0001079114",
     "category": "价值投资",
     "sub_tags": ["基本面分析", "价值投资"],
     "importance_score": 88,
@@ -47,7 +47,7 @@
   {
     "name": "Third Point",
     "cn_name": "Third Point基金",
-    "cik": null,
+    "cik": "0001040273",
     "category": "价值投资",
     "sub_tags": ["事件驱动", "激进投资"],
     "importance_score": 86,
@@ -56,7 +56,7 @@
   {
     "name": "Glenview Capital Management",
     "cn_name": "格伦维尤资本",
-    "cik": null,
+    "cik": "0001138995",
     "category": "价值投资",
     "sub_tags": ["基本面分析", "集中持仓"],
     "importance_score": 84,
@@ -65,7 +65,7 @@
   {
     "name": "Longview Asset Management",
     "cn_name": "长景资产管理",
-    "cik": null,
+    "cik": "0001086477",
     "category": "价值投资",
     "sub_tags": ["长期价值", "稳健持有"],
     "importance_score": 82,
@@ -74,7 +74,7 @@
   {
     "name": "Abrams Capital Management",
     "cn_name": "艾布拉姆斯资本",
-    "cik": null,
+    "cik": "0001358706",
     "category": "价值投资",
     "sub_tags": ["集中持仓", "长期主义"],
     "importance_score": 83,
@@ -83,7 +83,7 @@
   {
     "name": "Ruane, Cunniff & Goldfarb",
     "cn_name": "鲁安、康尼夫与戈德法布",
-    "cik": null,
+    "cik": "0001720792",
     "category": "价值投资",
     "sub_tags": ["价值投资", "长期持有"],
     "importance_score": 81,
@@ -93,7 +93,7 @@
   {
     "name": "Bridgewater Associates",
     "cn_name": "桥水基金",
-    "cik": null,
+    "cik": "0001350694",
     "category": "宏观基金",
     "sub_tags": ["全球宏观", "周期投资"],
     "importance_score": 98,
@@ -102,7 +102,7 @@
   {
     "name": "Soros Fund Management",
     "cn_name": "索罗斯基金",
-    "cik": null,
+    "cik": "0001029160",
     "category": "宏观基金",
     "sub_tags": ["货币交易", "宏观策略"],
     "importance_score": 94,
@@ -111,7 +111,7 @@
   {
     "name": "Tudor Investment Corporation",
     "cn_name": "都铎投资",
-    "cik": null,
+    "cik": "0000923093",
     "category": "宏观基金",
     "sub_tags": ["宏观交易", "趋势判断"],
     "importance_score": 89,
@@ -120,7 +120,7 @@
   {
     "name": "Brevan Howard",
     "cn_name": "布雷文霍华德",
-    "cik": null,
+    "cik": "0001512857",
     "category": "宏观基金",
     "sub_tags": ["利率", "全球宏观"],
     "importance_score": 86,
@@ -129,7 +129,7 @@
   {
     "name": "Moore Capital Management",
     "cn_name": "摩尔资本",
-    "cik": null,
+    "cik": "0001448574",
     "category": "宏观基金",
     "sub_tags": ["宏观策略", "多市场"],
     "importance_score": 84,
@@ -138,7 +138,7 @@
   {
     "name": "Caxton Associates",
     "cn_name": "卡克斯顿投资",
-    "cik": null,
+    "cik": "0000872573",
     "category": "宏观基金",
     "sub_tags": ["宏观交易", "多资产"],
     "importance_score": 83,
@@ -147,7 +147,7 @@
   {
     "name": "Element Capital Management",
     "cn_name": "元素资本管理",
-    "cik": null,
+    "cik": "0001535630",
     "category": "宏观基金",
     "sub_tags": ["利率", "宏观模型"],
     "importance_score": 82,
@@ -156,7 +156,7 @@
   {
     "name": "Discovery Capital Management",
     "cn_name": "发现资本管理",
-    "cik": null,
+    "cik": "0001389507",
     "category": "宏观基金",
     "sub_tags": ["宏观", "事件驱动"],
     "importance_score": 80,
@@ -166,7 +166,7 @@
   {
     "name": "Renaissance Technologies",
     "cn_name": "文艺复兴科技",
-    "cik": null,
+    "cik": "0001037389",
     "category": "量化基金",
     "sub_tags": ["量化交易", "高频策略"],
     "importance_score": 100,
@@ -175,7 +175,7 @@
   {
     "name": "Two Sigma Investments",
     "cn_name": "Two Sigma投资",
-    "cik": null,
+    "cik": "0001179392",
     "category": "量化基金",
     "sub_tags": ["AI量化", "系统化交易"],
     "importance_score": 94,
@@ -184,7 +184,7 @@
   {
     "name": "D. E. Shaw & Co.",
     "cn_name": "德劭集团",
-    "cik": null,
+    "cik": "0001009207",
     "category": "量化基金",
     "sub_tags": ["系统化交易", "量化模型"],
     "importance_score": 96,
@@ -193,7 +193,7 @@
   {
     "name": "Citadel Advisors",
     "cn_name": "城堡投资",
-    "cik": null,
+    "cik": "0001423053",
     "category": "量化基金",
     "sub_tags": ["多策略", "做市"],
     "importance_score": 95,
@@ -202,7 +202,7 @@
   {
     "name": "Millennium Management",
     "cn_name": "千禧管理",
-    "cik": null,
+    "cik": "0001273087",
     "category": "量化基金",
     "sub_tags": ["多策略", "系统化"],
     "importance_score": 91,
@@ -211,7 +211,7 @@
   {
     "name": "AQR Capital Management",
     "cn_name": "AQR资本管理",
-    "cik": null,
+    "cik": "0001167557",
     "category": "量化基金",
     "sub_tags": ["因子投资", "系统化"],
     "importance_score": 90,
@@ -220,7 +220,7 @@
   {
     "name": "Marshall Wace",
     "cn_name": "马歇尔·韦斯",
-    "cik": null,
+    "cik": "0001318757",
     "category": "量化基金",
     "sub_tags": ["量化", "多策略"],
     "importance_score": 88,
@@ -229,7 +229,7 @@
   {
     "name": "Schonfeld Strategic Advisors",
     "cn_name": "申费尔德策略顾问",
-    "cik": null,
+    "cik": "0001665241",
     "category": "量化基金",
     "sub_tags": ["多策略", "系统化"],
     "importance_score": 87,
@@ -239,7 +239,7 @@
   {
     "name": "Tiger Global Management",
     "cn_name": "老虎环球基金",
-    "cik": null,
+    "cik": "0001167483",
     "category": "成长投资",
     "sub_tags": ["科技股", "AI", "成长股"],
     "importance_score": 91,
@@ -248,7 +248,7 @@
   {
     "name": "Coatue Management",
     "cn_name": "Coatue资本",
-    "cik": null,
+    "cik": "0001135730",
     "category": "成长投资",
     "sub_tags": ["AI", "科技成长"],
     "importance_score": 88,
@@ -257,7 +257,7 @@
   {
     "name": "Lone Pine Capital",
     "cn_name": "孤松资本",
-    "cik": null,
+    "cik": "0001061165",
     "category": "成长投资",
     "sub_tags": ["科技成长", "全球投资"],
     "importance_score": 89,
@@ -266,7 +266,7 @@
   {
     "name": "Viking Global Investors",
     "cn_name": "维京全球投资",
-    "cik": null,
+    "cik": "0001103804",
     "category": "成长投资",
     "sub_tags": ["成长股", "全球配置"],
     "importance_score": 84,
@@ -275,7 +275,7 @@
   {
     "name": "Altimeter Capital Management",
     "cn_name": "高程资本管理",
-    "cik": null,
+    "cik": "0001541617",
     "category": "成长投资",
     "sub_tags": ["科技成长", "互联网"],
     "importance_score": 83,
@@ -284,7 +284,7 @@
   {
     "name": "Greenoaks Capital",
     "cn_name": "绿橡资本",
-    "cik": null,
+    "cik": "0001840735",
     "category": "成长投资",
     "sub_tags": ["私募成长", "科技"],
     "importance_score": 82,
@@ -293,7 +293,7 @@
   {
     "name": "Dragoneer Investment Group",
     "cn_name": "龙骑士投资集团",
-    "cik": null,
+    "cik": "0001602189",
     "category": "成长投资",
     "sub_tags": ["成长股", "科技"],
     "importance_score": 81,
@@ -302,7 +302,7 @@
   {
     "name": "Alkeon Capital Management",
     "cn_name": "阿尔基恩资本管理",
-    "cik": null,
+    "cik": "0001230239",
     "category": "成长投资",
     "sub_tags": ["成长股", "科技"],
     "importance_score": 80,
@@ -312,7 +312,7 @@
   {
     "name": "BlackRock",
     "cn_name": "贝莱德",
-    "cik": null,
+    "cik": "0002012383",
     "category": "被动指数资金",
     "sub_tags": ["ETF", "指数基金"],
     "importance_score": 99,
@@ -321,7 +321,7 @@
   {
     "name": "Vanguard Group",
     "cn_name": "先锋领航",
-    "cik": null,
+    "cik": "0000102909",
     "category": "被动指数资金",
     "sub_tags": ["ETF", "被动投资"],
     "importance_score": 98,
@@ -330,7 +330,7 @@
   {
     "name": "State Street Global Advisors",
     "cn_name": "道富环球顾问",
-    "cik": null,
+    "cik": "0000093751",
     "category": "被动指数资金",
     "sub_tags": ["ETF", "被动资金"],
     "importance_score": 92,
@@ -339,7 +339,7 @@
   {
     "name": "FMR LLC",
     "cn_name": "富达管理研究公司",
-    "cik": null,
+    "cik": "0000315066",
     "category": "被动指数资金",
     "sub_tags": ["综合资管", "指数与主动混合"],
     "importance_score": 95,
@@ -348,7 +348,7 @@
   {
     "name": "Charles Schwab Investment Management",
     "cn_name": "嘉信理财资管",
-    "cik": null,
+    "cik": "0000884546",
     "category": "被动指数资金",
     "sub_tags": ["指数基金", "ETF"],
     "importance_score": 80,
@@ -357,7 +357,7 @@
   {
     "name": "Invesco",
     "cn_name": "景顺",
-    "cik": null,
+    "cik": "0000914208",
     "category": "被动指数资金",
     "sub_tags": ["ETF", "指数基金"],
     "importance_score": 82,
@@ -366,16 +366,16 @@
   {
     "name": "Dimensional Fund Advisors",
     "cn_name": "维度基金顾问",
-    "cik": null,
+    "cik": "0000354204",
     "category": "被动指数资金",
     "sub_tags": ["系统化指数", "因子投资"],
     "importance_score": 84,
     "smart_money_weight": 0.55
   },
   {
-    "name": "Northern Trust Investments",
-    "cn_name": "北方信托投资",
-    "cik": null,
+    "name": "Northern Trust CORP",
+    "cn_name": "北方信托",
+    "cik": "0000073124",
     "category": "被动指数资金",
     "sub_tags": ["指数资金", "机构托管"],
     "importance_score": 78,
@@ -385,7 +385,7 @@
   {
     "name": "Temasek Holdings",
     "cn_name": "淡马锡",
-    "cik": null,
+    "cik": "0001021944",
     "category": "主权基金",
     "sub_tags": ["国家资本", "长期投资"],
     "importance_score": 95,
@@ -394,65 +394,73 @@
   {
     "name": "GIC Private Limited",
     "cn_name": "新加坡政府投资公司",
-    "cik": null,
+    "cik": "0001350694",
     "category": "主权基金",
     "sub_tags": ["主权财富基金", "长期配置"],
     "importance_score": 94,
     "smart_money_weight": 0.9
   },
   {
-    "name": "Public Investment Fund",
-    "cn_name": "沙特公共投资基金",
-    "cik": null,
-    "category": "主权基金",
-    "sub_tags": ["国家资本", "战略投资"],
-    "importance_score": 91,
-    "smart_money_weight": 0.88
-  },
-  {
-    "name": "Mubadala Investment Company",
-    "cn_name": "穆巴达拉投资公司",
-    "cik": null,
-    "category": "主权基金",
-    "sub_tags": ["中东资本", "长期投资"],
-    "importance_score": 88,
-    "smart_money_weight": 0.85
-  },
-  {
-    "name": "Qatar Investment Authority",
-    "cn_name": "卡塔尔投资局",
-    "cik": null,
-    "category": "主权基金",
-    "sub_tags": ["主权财富基金", "全球配置"],
-    "importance_score": 87,
-    "smart_money_weight": 0.84
-  },
-  {
-    "name": "Abu Dhabi Investment Authority",
-    "cn_name": "阿布扎比投资局",
-    "cik": null,
-    "category": "主权基金",
-    "sub_tags": ["主权财富基金", "长期配置"],
-    "importance_score": 90,
-    "smart_money_weight": 0.88
-  },
-  {
     "name": "Norges Bank Investment Management",
     "cn_name": "挪威央行投资管理",
-    "cik": null,
+    "cik": "0001374170",
     "category": "主权基金",
     "sub_tags": ["主权财富基金", "全球股票"],
     "importance_score": 93,
     "smart_money_weight": 0.88
   },
-
   {
     "name": "NVIDIA",
     "cn_name": "英伟达",
-    "cik": null,
+    "cik": "0001045810",
     "category": "产业资本",
     "sub_tags": ["AI", "半导体", "战略投资"],
     "importance_score": 97,
     "smart_money_weight": 0.85
+  },
+  {
+    "name": "Microsoft",
+    "cn_name": "微软",
+    "cik": "0000789019",
+    "category": "产业资本",
+    "sub_tags": ["AI", "云计算"],
+    "importance_score": 95,
+    "smart_money_weight": 0.82
+  },
+  {
+    "name": "Alphabet",
+    "cn_name": "谷歌",
+    "cik": "0001652044",
+    "category": "产业资本",
+    "sub_tags": ["AI", "创投"],
+    "importance_score": 94,
+    "smart_money_weight": 0.82
+  },
+  {
+    "name": "Amazon",
+    "cn_name": "亚马逊",
+    "cik": "0001018724",
+    "category": "产业资本",
+    "sub_tags": ["云服务", "AI"],
+    "importance_score": 91,
+    "smart_money_weight": 0.8
+  },
+  {
+    "name": "Meta Platforms",
+    "cn_name": "Meta",
+    "cik": "0001326801",
+    "category": "产业资本",
+    "sub_tags": ["AI", "元宇宙"],
+    "importance_score": 89,
+    "smart_money_weight": 0.78
+  },
+  {
+    "name": "SoftBank Group",
+    "cn_name": "软银集团",
+    "cik": "0001065521",
+    "category": "产业资本",
+    "sub_tags": ["科技投资", "风险投资"],
+    "importance_score": 93,
+    "smart_money_weight": 0.88
   }
 ]

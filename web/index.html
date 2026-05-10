@@ -276,16 +276,38 @@
                 </div>
               </details>
 
-              <div class="mt-4 overflow-x-auto">
-                <table class="min-w-full text-sm" id="smInstTable">
+              <div class="mt-4 overflow-x-auto" id="smInstHScroll" style="height: 14px; scrollbar-gutter: stable;">
+                <div id="smInstHScrollInner" style="height: 1px; width: 0px;"></div>
+              </div>
+
+              <div class="mt-2 overflow-x-auto" id="smInstTableWrap" style="scrollbar-gutter: stable;">
+                <table class="min-w-full text-sm table-fixed" id="smInstTable">
+                  <colgroup>
+                    <col style="width: 220px" />
+                    <col style="width: 160px" />
+                    <col style="width: 120px" />
+                    <col style="width: 140px" />
+                    <col style="width: 160px" />
+                    <col style="width: 170px" />
+                    <col style="width: 170px" />
+                    <col style="width: 150px" />
+                    <col style="width: 220px" />
+                    <col style="width: 130px" />
+                    <col style="width: 260px" />
+                  </colgroup>
                   <thead>
                     <tr class="text-left muted">
                       <th class="py-2">机构</th>
+                      <th class="py-2">机构中文名</th>
+                      <th class="py-2">市场影响力分</th>
+                      <th class="py-2">分类</th>
                       <th class="py-2">管理资产规模</th>
-                      <th class="py-2">本季持仓资产（USD）</th>
-                      <th class="py-2">上季持仓资产（USD）</th>
-                      <th class="py-2">AUM变化（USD）</th>
+                      <th class="py-2 whitespace-nowrap">本季持仓资产（USD）</th>
+                      <th class="py-2 whitespace-nowrap">上季持仓资产（USD）</th>
+                      <th class="py-2 whitespace-nowrap">AUM变化（USD）</th>
                       <th class="py-2">持仓数变化</th>
+                      <th class="py-2">聪明钱参考权重</th>
+                      <th class="py-2">细分标签</th>
                     </tr>
                   </thead>
                   <tbody></tbody>
@@ -302,10 +324,14 @@
                   <div class="muted text-sm mt-1" id="smInstMeta">—</div>
                 </div>
                 <div class="flex flex-wrap items-center gap-2">
-                  <input id="smInstId" class="input px-3 py-2" placeholder="机构 id：brk / blk / vgi" style="min-width: 220px" />
+                  <input id="smInstId" class="input px-3 py-2" placeholder="机构 id：blackrock / brk / blk / vgi" style="min-width: 220px" />
                   <button class="btn" id="smInstLoad">加载</button>
                   <button class="btn" id="smInstAi">AI 分析</button>
                 </div>
+              </div>
+              <div class="mt-4 card rounded-2xl p-4 hidden" id="smInstAiBox">
+                <div class="font-extrabold" id="smInstAiTitle">AI 分析</div>
+                <pre class="mt-2 text-xs muted whitespace-pre-wrap" id="smInstAiText">—</pre>
               </div>
               <div class="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
                 <div class="card rounded-2xl p-4">
@@ -329,6 +355,68 @@
                   </div>
                 </div>
               </div>
+              <div class="mt-4 card rounded-2xl p-4" id="smInstChangeBreakdown">
+                <div class="font-extrabold">持仓变化拆分（新建仓 / 加仓 / 减仓 / 清仓）</div>
+                <div class="muted text-sm mt-1" id="smInstChangeCounts">—</div>
+                <div class="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <div class="card rounded-2xl p-4">
+                    <div class="font-extrabold">新建仓 Top10</div>
+                    <div class="mt-3 overflow-x-auto">
+                      <table class="min-w-full text-sm" id="smInstChgNewTable">
+                        <thead>
+                          <tr class="text-left muted">
+                            <th class="py-2">标的（Issuer / CUSIP）</th>
+                            <th class="py-2">变化（$）</th>
+                          </tr>
+                        </thead>
+                        <tbody></tbody>
+                      </table>
+                    </div>
+                  </div>
+                  <div class="card rounded-2xl p-4">
+                    <div class="font-extrabold">加仓 Top10</div>
+                    <div class="mt-3 overflow-x-auto">
+                      <table class="min-w-full text-sm" id="smInstChgAddTable">
+                        <thead>
+                          <tr class="text-left muted">
+                            <th class="py-2">标的（Issuer / CUSIP）</th>
+                            <th class="py-2">变化（$）</th>
+                          </tr>
+                        </thead>
+                        <tbody></tbody>
+                      </table>
+                    </div>
+                  </div>
+                  <div class="card rounded-2xl p-4">
+                    <div class="font-extrabold">减仓 Top10</div>
+                    <div class="mt-3 overflow-x-auto">
+                      <table class="min-w-full text-sm" id="smInstChgReduceTable">
+                        <thead>
+                          <tr class="text-left muted">
+                            <th class="py-2">标的（Issuer / CUSIP）</th>
+                            <th class="py-2">变化（$）</th>
+                          </tr>
+                        </thead>
+                        <tbody></tbody>
+                      </table>
+                    </div>
+                  </div>
+                  <div class="card rounded-2xl p-4">
+                    <div class="font-extrabold">清仓 Top10</div>
+                    <div class="mt-3 overflow-x-auto">
+                      <table class="min-w-full text-sm" id="smInstChgExitTable">
+                        <thead>
+                          <tr class="text-left muted">
+                            <th class="py-2">标的（Issuer / CUSIP）</th>
+                            <th class="py-2">变化（$）</th>
+                          </tr>
+                        </thead>
+                        <tbody></tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </div>
               <div class="mt-4 card rounded-2xl p-4">
                 <div class="font-extrabold">全部持仓</div>
                 <div class="mt-3 overflow-x-auto">
@@ -346,10 +434,6 @@
                   </table>
                 </div>
               </div>
-              <div class="mt-4 card rounded-2xl p-4 hidden" id="smInstAiBox">
-                <div class="font-extrabold" id="smInstAiTitle">AI 分析</div>
-                <pre class="mt-2 text-xs muted whitespace-pre-wrap" id="smInstAiText">—</pre>
-              </div>
             </div>
           </div>
 
@@ -365,6 +449,10 @@
                   <button class="btn" id="smStockLoad">加载</button>
                   <button class="btn" id="smStockAi">AI 分析</button>
                 </div>
+              </div>
+              <div class="mt-4 card rounded-2xl p-4 hidden" id="smStockAiBox">
+                <div class="font-extrabold" id="smStockAiTitle">AI 分析</div>
+                <pre class="mt-2 text-xs muted whitespace-pre-wrap" id="smStockAiText">—</pre>
               </div>
               <div class="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-4">
                 <div class="card rounded-2xl p-4">
@@ -388,10 +476,6 @@
                     </table>
                   </div>
                 </div>
-              </div>
-              <div class="mt-4 card rounded-2xl p-4 hidden" id="smStockAiBox">
-                <div class="font-extrabold" id="smStockAiTitle">AI 分析</div>
-                <pre class="mt-2 text-xs muted whitespace-pre-wrap" id="smStockAiText">—</pre>
               </div>
             </div>
           </div>
@@ -422,6 +506,11 @@
                   <button class="btn" id="smFlowsLoad">刷新</button>
                   <button class="btn" id="smFlowsAi">AI 总结</button>
                 </div>
+              </div>
+
+              <div class="mt-4 card rounded-2xl p-4 hidden" id="smFlowsAiBox">
+                <div class="font-extrabold" id="smFlowsAiTitle">AI 总结</div>
+                <pre class="mt-2 text-xs muted whitespace-pre-wrap" id="smFlowsAiText">—</pre>
               </div>
 
               <div class="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -455,11 +544,6 @@
                     </table>
                   </div>
                 </div>
-              </div>
-
-              <div class="mt-4 card rounded-2xl p-4 hidden" id="smFlowsAiBox">
-                <div class="font-extrabold" id="smFlowsAiTitle">AI 总结</div>
-                <pre class="mt-2 text-xs muted whitespace-pre-wrap" id="smFlowsAiText">—</pre>
               </div>
             </div>
           </div>
@@ -3551,6 +3635,7 @@
   let smView = 'dash';
   let smLastInstId = '';
   let smLastTicker = '';
+  let smLastStockIssuer = '';
 
   function smSetTabActive(view) {
     const map = {
@@ -3592,6 +3677,16 @@
     return `$${n.toFixed(2)}`;
   }
 
+  function escHtml(s) {
+    const t = String(s === null || s === undefined ? '' : s);
+    return t
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
   function fmtPct2(v) {
     if (v === null || v === undefined) return '—';
     const n = Number(v);
@@ -3609,7 +3704,15 @@
     const qEl = document.getElementById('smSearch');
     const q = qEl ? String(qEl.value || '').trim() : '';
     const data = await fetchJson(`/api/smartmoney/institutions?q=${encodeURIComponent(q)}`);
-    const items = (data && data.items) ? data.items : [];
+    const itemsRaw = (data && data.items) ? data.items : [];
+    const items = Array.isArray(itemsRaw) ? itemsRaw.slice().sort((a, b) => {
+      const ia = Number((a && a.importance_score) ?? 0);
+      const ib = Number((b && b.importance_score) ?? 0);
+      if (!isFinite(ia) && !isFinite(ib)) return 0;
+      if (!isFinite(ia)) return 1;
+      if (!isFinite(ib)) return -1;
+      return ib - ia;
+    }) : [];
     const ds = (data && data.data_source) ? String(data.data_source) : '';
     const snapTs = (data && data.snapshot_ts) ? Number(data.snapshot_ts) : 0;
     const metaEl = document.getElementById('smDashMeta');
@@ -3622,12 +3725,26 @@
     const tb = document.querySelector('#smInstTable tbody');
     if (!tb) return;
     if (!items.length) {
-      tb.innerHTML = `<tr><td colspan="6" class="muted py-3">暂无数据</td></tr>`;
+      tb.innerHTML = `<tr><td colspan="11" class="muted py-3">暂无数据</td></tr>`;
       return;
     }
+
+    const _ell = (s, n) => {
+      const t = String(s || '');
+      const lim = Number(n || 120);
+      if (!t) return '';
+      if (!isFinite(lim) || lim <= 0) return t;
+      return (t.length > lim) ? (t.slice(0, lim) + '…') : t;
+    };
+
     tb.innerHTML = items.map(it => {
       const iid = String(it.id || '');
       const name = String(it.name || iid || '—');
+      const cnName = String(it.cn_name || '').trim();
+      const imp = (it.importance_score === null || it.importance_score === undefined) ? '' : String(it.importance_score);
+      const weight = (it.smart_money_weight === null || it.smart_money_weight === undefined) ? '' : String(it.smart_money_weight);
+      const category = String(it.category || '').trim();
+      const subTags = Array.isArray(it.sub_tags) ? it.sub_tags.map(x => String(x || '').trim()).filter(Boolean) : [];
       const aum = (it.aum_usd === null || it.aum_usd === undefined) ? '—' : fmtUsd(it.aum_usd);
       const curQ = String(it.cur_quarter || '').trim();
       const prevQ = String(it.prev_quarter || '').trim();
@@ -3644,7 +3761,8 @@
       let aumChgCell = '—';
       let cntCell = '—';
       if (err) {
-        aumChgCell = `<span class="neg">拉取失败</span><div class="muted text-xs">${err}</div>`;
+        const errShort = _ell(err, 120);
+        aumChgCell = `<span class="neg">拉取失败</span><div class="muted text-xs" title="${escHtml(err)}" style="max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escHtml(errShort)}</div>`;
         cntCell = `<span class="neg">拉取失败</span>`;
       } else {
         if (it.aum_change_usd === null || it.aum_change_usd === undefined) {
@@ -3663,44 +3781,124 @@
         if (net > 0) netTxt = `<span class="pos">净增持 ${n}</span>`;
         else if (net < 0) netTxt = `<span class="neg">净减持 ${n}</span>`;
         else netTxt = `<span class="muted">持平</span>`;
-        cntCell = `<div class="muted text-xs">标的计数：增持 ${inc} / 减持 ${dec}</div><div class="mt-1">${netTxt}</div>`;
+        cntCell = `<a href="#" class="sm-inst-changes-open hover:underline" data-id="${iid}"><div class="muted text-xs">标的计数：增持 ${inc} / 减持 ${dec}</div><div class="mt-1">${netTxt}</div></a>`;
       }
       return `
         <tr>
-          <td class="py-2 font-semibold"><a href="#" class="sm-inst-open hover:underline" data-id="${iid}">${name}</a><div class="muted text-xs">id: ${iid}</div></td>
+          <td class="py-2 font-semibold">
+            <a href="#" class="sm-inst-open hover:underline" data-id="${iid}">${name}</a>
+            <div class="muted text-xs">id: ${iid}</div>
+          </td>
+          <td class="py-2">${cnName}</td>
+          <td class="py-2">${imp}</td>
+          <td class="py-2">${category ? category : '—'}</td>
           <td class="py-2">${aum}</td>
-          <td class="py-2">${curAumTxt}</td>
-          <td class="py-2">${prevAumTxt}</td>
-          <td class="py-2">${aumChgCell}</td>
-          <td class="py-2">${cntCell}</td>
+          <td class="py-2 whitespace-nowrap">${curAumTxt}</td>
+          <td class="py-2 whitespace-nowrap">${prevAumTxt}</td>
+          <td class="py-2 whitespace-nowrap overflow-hidden">${aumChgCell}</td>
+          <td class="py-2 whitespace-normal break-words overflow-hidden">${cntCell}</td>
+          <td class="py-2">${weight ? weight : '—'}</td>
+          <td class="py-2">${subTags.length ? subTags.join('、') : '—'}</td>
         </tr>
       `;
     }).join('');
 
-    document.querySelectorAll('.sm-inst-open').forEach(a => {
-      a.addEventListener('click', (e) => {
-        try { e.preventDefault(); } catch (_) {}
-        const iid = a.getAttribute('data-id') || '';
-        if (!iid) return;
-        const instInput = document.getElementById('smInstId');
-        if (instInput) instInput.value = iid;
-        smShowView('inst');
-        loadSmartMoneyInstitution(iid).catch(() => {});
+    // DataTables 分页：默认 30/页，按影响力分降序
+    try {
+      if (window.jQuery && $.fn && $.fn.dataTable && $.fn.dataTable.isDataTable('#smInstTable')) {
+        $('#smInstTable').DataTable().destroy();
+      }
+    } catch (e) {}
+
+    try {
+      if (window.jQuery && $.fn && $.fn.dataTable) {
+        $('#smInstTable').DataTable({
+          pageLength: 30,
+          lengthMenu: [[30, 50, 100, 200, -1], [30, 50, 100, 200, 'All']],
+          order: [[2, 'desc']],
+          autoWidth: false,
+        });
+      }
+    } catch (e) {}
+
+    // 顶部横向滚动条：与表格外层容器同步，避免必须滚到表格最底部才能横向滚动
+    try {
+      const topBar = document.getElementById('smInstHScroll');
+      const topInner = document.getElementById('smInstHScrollInner');
+      const wrap = document.getElementById('smInstTableWrap');
+      const tblEl = document.getElementById('smInstTable');
+      if (topBar && topInner && wrap && tblEl) {
+        // 先解绑旧监听（避免重复绑定）
+        if (topBar.dataset.bound === '1') {
+          // no-op
+        } else {
+          topBar.dataset.bound = '1';
+          topBar.addEventListener('scroll', () => {
+            try { wrap.scrollLeft = topBar.scrollLeft; } catch (_) {}
+          });
+          wrap.addEventListener('scroll', () => {
+            try { topBar.scrollLeft = wrap.scrollLeft; } catch (_) {}
+          });
+        }
+
+        // DataTables 渲染可能会异步调整宽度，所以延迟一次测量
+        setTimeout(() => {
+          try {
+            const w = Math.max(
+              Number(tblEl.scrollWidth || 0),
+              Number((tblEl.getBoundingClientRect && tblEl.getBoundingClientRect().width) || 0),
+            );
+            topInner.style.width = `${w}px`;
+            topBar.classList.toggle('hidden', w <= (wrap.clientWidth || 0));
+          } catch (_) {}
+        }, 0);
+      }
+    } catch (e) {}
+
+    // 事件代理：兼容 DataTables 翻页/重绘
+    const tbl = document.getElementById('smInstTable');
+    if (tbl && !tbl.dataset.bound) {
+      tbl.dataset.bound = '1';
+      tbl.addEventListener('click', (e) => {
+        const t = e && e.target ? e.target : null;
+        if (!t || !t.closest) return;
+        const a1 = t.closest('a.sm-inst-open');
+        if (a1) {
+          try { e.preventDefault(); } catch (_) {}
+          const iid = a1.getAttribute('data-id') || '';
+          if (!iid) return;
+          const instInput = document.getElementById('smInstId');
+          if (instInput) instInput.value = iid;
+          smShowView('inst');
+          loadSmartMoneyInstitution(iid).catch(() => {});
+          return;
+        }
+        const a2 = t.closest('a.sm-inst-changes-open');
+        if (a2) {
+          try { e.preventDefault(); } catch (_) {}
+          const iid = a2.getAttribute('data-id') || '';
+          if (!iid) return;
+          const instInput = document.getElementById('smInstId');
+          if (instInput) instInput.value = iid;
+          smShowView('inst');
+          loadSmartMoneyInstitution(iid, { focus: 'change_breakdown' }).catch(() => {});
+        }
       });
-    });
+    }
   }
 
-  async function loadSmartMoneyInstitution(instId) {
+  async function loadSmartMoneyInstitution(instId, opts) {
     const iid = String(instId || '').trim();
     if (!iid) return;
     smLastInstId = iid;
-    const aiBox = document.getElementById('smInstAiBox');
-    if (aiBox) aiBox.classList.add('hidden');
+    const focus = (opts && opts.focus) ? String(opts.focus) : '';
+    smAiRestore('smInstAiBox', 'smInstAiTitle', 'smInstAiText', `inst:${String(iid || '').trim().toLowerCase()}`);
     const data = await fetchJson(`/api/smartmoney/institution?id=${encodeURIComponent(iid)}`);
     const inst = (data && data.institution) ? data.institution : null;
     const holdings = (data && data.holdings) ? data.holdings : [];
     const top = (data && data.top_holdings) ? data.top_holdings : [];
     const top10 = (top || []).slice(0, 10);
+    const chg = (data && data.change_breakdown) ? data.change_breakdown : null;
     const ds = (data && data.data_source) ? String(data.data_source) : '';
     const snapTs = (data && data.snapshot_ts) ? Number(data.snapshot_ts) : 0;
     const titleEl = document.getElementById('smInstTitle');
@@ -3713,6 +3911,36 @@
       const parts = [aumTxt, `id：${iid}`, srcTxt, tsTxt].filter(x => String(x || '').trim());
       metaEl.textContent = parts.join(' | ');
     }
+
+    try {
+      const countsEl = document.getElementById('smInstChangeCounts');
+      const bd = (chg && chg.counts) ? chg.counts : null;
+      if (countsEl) {
+        if (!bd) {
+          countsEl.textContent = '—';
+        } else {
+          countsEl.textContent = `新建仓 ${Number(bd.new||0)} | 加仓 ${Number(bd.add||0)} | 减仓 ${Number(bd.reduce||0)} | 清仓 ${Number(bd.exit||0)}`;
+        }
+      }
+      const _fill = (tableId, rows) => {
+        const tb = document.querySelector(`#${tableId} tbody`);
+        if (!tb) return;
+        const seq = Array.isArray(rows) ? rows : [];
+        tb.innerHTML = seq.length ? seq.map(r => {
+          const cusip = String((r && r.cusip) || '').trim();
+          const issuer = String((r && r.issuer) || '').trim();
+          const delta = Number((r && (r.delta_usd ?? r.delta)) || 0);
+          const nm = issuer || '—';
+          const deltaHtml = `<span class="${clsSigned(delta)}">${delta>0?'+':''}${fmtUsd(delta)}</span>`;
+          return `<tr><td class="py-2 font-semibold"><a href="#" class="sm-stock-open hover:underline" data-cusip="${cusip}">${nm}<div class="muted text-xs">CUSIP: ${cusip || '—'}</div></a></td><td class="py-2">${deltaHtml}</td></tr>`;
+        }).join('') : `<tr><td colspan="2" class="muted py-3">暂无数据</td></tr>`;
+      };
+      const top10s = (chg && chg.top10) ? chg.top10 : null;
+      _fill('smInstChgNewTable', top10s ? top10s.new : []);
+      _fill('smInstChgAddTable', top10s ? top10s.add : []);
+      _fill('smInstChgReduceTable', top10s ? top10s.reduce : []);
+      _fill('smInstChgExitTable', top10s ? top10s.exit : []);
+    } catch (e) {}
 
     const tbTop = document.querySelector('#smTopHoldingsTable tbody');
     if (tbTop) {
@@ -3844,14 +4072,71 @@
         loadSmartMoneyStock(cusip).catch(() => {});
       });
     });
+
+    if (focus === 'change_breakdown') {
+      try {
+        const el = document.getElementById('smInstChangeBreakdown');
+        if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      } catch (e) {}
+    }
+  }
+
+  function smAiStorageKey(boxId) {
+    return `sm_ai_cache:${String(boxId || '')}`;
+  }
+
+  function smAiCtxKey(extraParams) {
+    try {
+      if (!extraParams || typeof extraParams !== 'object') return '';
+      if (extraParams.inst_id) return `inst:${String(extraParams.inst_id || '').trim().toLowerCase()}`;
+      if (extraParams.ticker) return `stock:${String(extraParams.ticker || '').trim().toUpperCase()}`;
+      if (extraParams.sector || extraParams.period) {
+        const sec = String(extraParams.sector || 'all');
+        const per = String(extraParams.period || 'quarter');
+        return `flows:${sec}:${per}`;
+      }
+      return '';
+    } catch (e) { return ''; }
+  }
+
+  function smAiCacheWrite(boxId, ctxKey, titleText, bodyText) {
+    try {
+      const k = smAiStorageKey(boxId);
+      const obj = { ts: Date.now(), ctx: String(ctxKey || ''), title: String(titleText || ''), body: String(bodyText || '') };
+      sessionStorage.setItem(k, JSON.stringify(obj));
+    } catch (e) {}
+  }
+
+  function smAiCacheRead(boxId) {
+    try {
+      const k = smAiStorageKey(boxId);
+      const raw = sessionStorage.getItem(k);
+      if (!raw) return null;
+      const obj = JSON.parse(raw);
+      if (!obj || typeof obj !== 'object') return null;
+      return obj;
+    } catch (e) { return null; }
+  }
+
+  function smAiRestore(boxId, titleId, textId, ctxKey) {
+    const box = document.getElementById(boxId);
+    const titleEl = document.getElementById(titleId);
+    const textEl = document.getElementById(textId);
+    const cached = smAiCacheRead(boxId);
+    if (!cached || String(cached.ctx || '') !== String(ctxKey || '')) {
+      if (box) box.classList.add('hidden');
+      return;
+    }
+    if (titleEl) titleEl.textContent = String(cached.title || 'AI 分析');
+    if (textEl) textEl.textContent = String(cached.body || '—');
+    if (box) box.classList.remove('hidden');
   }
 
   async function loadSmartMoneyStock(ticker) {
     const cusip = String(ticker || '').trim().toUpperCase();
     if (!cusip) return;
     smLastTicker = cusip;
-    const aiBox = document.getElementById('smStockAiBox');
-    if (aiBox) aiBox.classList.add('hidden');
+    smAiRestore('smStockAiBox', 'smStockAiTitle', 'smStockAiText', `stock:${cusip}`);
     const data = await fetchJson(`/api/smartmoney/stock?ticker=${encodeURIComponent(cusip)}`);
     const st = (data && data.stock) ? data.stock : null;
     const holders = (data && data.holders) ? data.holders : [];
@@ -3860,6 +4145,7 @@
     const priceEl = document.getElementById('smStockPrice');
     const descEl = document.getElementById('smStockDesc');
     const issuer = st ? String(st.issuer || '') : '';
+    smLastStockIssuer = issuer;
     if (titleEl) titleEl.textContent = `${issuer || '标的'}（CUSIP: ${cusip}）`;
     if (metaEl) metaEl.textContent = `CUSIP：${cusip}`;
     if (priceEl) priceEl.textContent = '—';
@@ -3903,25 +4189,38 @@
     const perEl = document.getElementById('smPeriod');
     const sec = secEl ? String(secEl.value || 'all') : 'all';
     const per = perEl ? String(perEl.value || 'quarter') : 'quarter';
-    const aiBox = document.getElementById('smFlowsAiBox');
-    if (aiBox) aiBox.classList.add('hidden');
+    smAiRestore('smFlowsAiBox', 'smFlowsAiTitle', 'smFlowsAiText', `flows:${sec}:${per}`);
     const data = await fetchJson(`/api/smartmoney/flows?sector=${encodeURIComponent(sec)}&period=${encodeURIComponent(per)}`);
     const buys = (data && data.top_buys) ? data.top_buys : [];
     const sells = (data && data.top_sells) ? data.top_sells : [];
     const tbB = document.querySelector('#smBuysTable tbody');
     const tbS = document.querySelector('#smSellsTable tbody');
+
+    // DataTables：刷新前先销毁（否则重复初始化会报错）
+    try {
+      if (window.jQuery && $.fn && $.fn.dataTable && $.fn.dataTable.isDataTable('#smBuysTable')) {
+        $('#smBuysTable').DataTable().destroy();
+      }
+    } catch (e) {}
+    try {
+      if (window.jQuery && $.fn && $.fn.dataTable && $.fn.dataTable.isDataTable('#smSellsTable')) {
+        $('#smSellsTable').DataTable().destroy();
+      }
+    } catch (e) {}
+
     if (tbB) {
       tbB.innerHTML = (buys && buys.length) ? buys.map(x => {
         const cusip = String(x.cusip || '').trim();
         const issuer = String(x.issuer || '').trim();
         const nm = issuer || '—';
         const sec2 = String(x.sector || '—');
-        const amt = fmtUsd(x.flow_usd);
+        const flowNum = Number(x.flow_usd || 0);
+        const amt = fmtUsd(flowNum);
         return `
           <tr>
             <td class="py-2 font-semibold"><a href="#" class="sm-flow-stock hover:underline" data-cusip="${cusip}">${nm}<div class="muted text-xs">CUSIP: ${cusip || '—'}</div></a></td>
             <td class="py-2">${sec2}</td>
-            <td class="py-2 pos">${amt}</td>
+            <td class="py-2 pos" data-order="${isFinite(flowNum)?flowNum:0}">${amt}</td>
           </tr>
         `;
       }).join('') : `<tr><td colspan="3" class="muted py-3">暂无数据</td></tr>`;
@@ -3932,28 +4231,61 @@
         const issuer = String(x.issuer || '').trim();
         const nm = issuer || '—';
         const sec2 = String(x.sector || '—');
-        const amt = fmtUsd(x.flow_usd);
+        const flowNum = Number(x.flow_usd || 0);
+        const amt = fmtUsd(flowNum);
         return `
           <tr>
             <td class="py-2 font-semibold"><a href="#" class="sm-flow-stock hover:underline" data-cusip="${cusip}">${nm}<div class="muted text-xs">CUSIP: ${cusip || '—'}</div></a></td>
             <td class="py-2">${sec2}</td>
-            <td class="py-2 neg">${amt}</td>
+            <td class="py-2 neg" data-order="${isFinite(flowNum)?flowNum:0}">${amt}</td>
           </tr>
         `;
       }).join('') : `<tr><td colspan="3" class="muted py-3">暂无数据</td></tr>`;
     }
 
-    document.querySelectorAll('.sm-flow-stock').forEach(a => {
-      a.addEventListener('click', (e) => {
-        try { e.preventDefault(); } catch (_) {}
-        const cusip = (a.getAttribute('data-cusip') || '').trim();
-        if (!cusip) return;
-        const stockInput = document.getElementById('smStockTicker');
-        if (stockInput) stockInput.value = cusip;
-        smShowView('stock');
-        loadSmartMoneyStock(cusip).catch(() => {});
-      });
-    });
+    // DataTables 分页：默认 30/页
+    try {
+      if (window.jQuery && $.fn && $.fn.dataTable) {
+        $('#smBuysTable').DataTable({
+          pageLength: 30,
+          lengthMenu: [[30, 50, 100, 200, -1], [30, 50, 100, 200, 'All']],
+          order: [[2, 'desc']],
+          autoWidth: false,
+        });
+        $('#smSellsTable').DataTable({
+          pageLength: 30,
+          lengthMenu: [[30, 50, 100, 200, -1], [30, 50, 100, 200, 'All']],
+          order: [[2, 'desc']],
+          autoWidth: false,
+        });
+      }
+    } catch (e) {}
+
+    // 事件代理：兼容 DataTables 翻页/重绘
+    try {
+      const tb1 = document.getElementById('smBuysTable');
+      const tb2 = document.getElementById('smSellsTable');
+      const _bind = (tbl) => {
+        if (!tbl || !tbl.addEventListener) return;
+        if (tbl.dataset.boundFlow === '1') return;
+        tbl.dataset.boundFlow = '1';
+        tbl.addEventListener('click', (e) => {
+          const t = e && e.target ? e.target : null;
+          if (!t || !t.closest) return;
+          const a = t.closest('a.sm-flow-stock');
+          if (!a) return;
+          try { e.preventDefault(); } catch (_) {}
+          const cusip = (a.getAttribute('data-cusip') || '').trim();
+          if (!cusip) return;
+          const stockInput = document.getElementById('smStockTicker');
+          if (stockInput) stockInput.value = cusip;
+          smShowView('stock');
+          loadSmartMoneyStock(cusip).catch(() => {});
+        });
+      };
+      _bind(tb1);
+      _bind(tb2);
+    } catch (e) {}
   }
 
   async function smRunAi(query, extraParams, boxId, titleId, textId) {
@@ -3972,7 +4304,11 @@
     const box = document.getElementById(boxId);
     const titleEl = document.getElementById(titleId);
     const textEl = document.getElementById(textId);
-    if (titleEl) titleEl.textContent = res ? String(res.title || 'AI 分析') : 'AI 分析';
+    const modelUsed = res ? String(res.model_used || '').trim() : '';
+    if (titleEl) {
+      const t0 = res ? String(res.title || 'AI 分析') : 'AI 分析';
+      titleEl.textContent = modelUsed ? `${t0}（模型：${modelUsed}）` : t0;
+    }
     if (textEl) {
       if (!res) textEl.textContent = '—';
       else {
@@ -3981,6 +4317,7 @@
         const trend = String(res.trend || '').trim();
         textEl.textContent = [
           `问题：${String(res.query || q)}`,
+          `模型：${modelUsed || '—'}`,
           '',
           '分析要点：',
           ...(bullets.length ? bullets.map(x => `- ${x}`) : ['- —']),
@@ -3993,12 +4330,18 @@
       }
     }
     if (box) box.classList.remove('hidden');
+    try {
+      const ctxKey = smAiCtxKey(extraParams);
+      const t2 = titleEl ? String(titleEl.textContent || '') : '';
+      const b2 = textEl ? String(textEl.textContent || '') : '';
+      smAiCacheWrite(boxId, ctxKey, t2, b2);
+    } catch (e) {}
   }
 
   const _smTabDash = document.getElementById('smTabDash');
   if (_smTabDash) _smTabDash.addEventListener('click', () => { smShowView('dash'); loadSmartMoneyDashboard().catch(() => {}); });
   const _smTabInst = document.getElementById('smTabInst');
-  if (_smTabInst) _smTabInst.addEventListener('click', () => { smShowView('inst'); const iid = (document.getElementById('smInstId') || {}).value || smLastInstId || 'brk'; const instInput = document.getElementById('smInstId'); if (instInput && !instInput.value) instInput.value = String(iid); loadSmartMoneyInstitution(iid).catch(() => {}); });
+  if (_smTabInst) _smTabInst.addEventListener('click', () => { smShowView('inst'); const iid = (document.getElementById('smInstId') || {}).value || smLastInstId || 'blackrock'; const instInput = document.getElementById('smInstId'); if (instInput && !instInput.value) instInput.value = String(iid); loadSmartMoneyInstitution(iid).catch(() => {}); });
   const _smTabStock = document.getElementById('smTabStock');
   if (_smTabStock) _smTabStock.addEventListener('click', () => { smShowView('stock'); const tk = (document.getElementById('smStockTicker') || {}).value || smLastTicker || '037833100'; const stockInput = document.getElementById('smStockTicker'); if (stockInput && !stockInput.value) stockInput.value = String(tk); loadSmartMoneyStock(tk).catch(() => {}); });
   const _smTabFlows = document.getElementById('smTabFlows');
@@ -4044,7 +4387,12 @@
   if (_smStockAi) _smStockAi.addEventListener('click', () => {
     const tk = String((document.getElementById('smStockTicker') || {}).value || smLastTicker || '').trim();
     if (!tk) return;
-    smRunAi('哪些聪明钱正在买入/卖出这只股票？', { ticker: tk.toUpperCase() }, 'smStockAiBox', 'smStockAiTitle', 'smStockAiText').catch(() => {});
+    const cusip = tk.toUpperCase();
+    const issuer = String(smLastStockIssuer || '').trim();
+    const q = issuer
+      ? `请基于当前页面标的：${issuer}（CUSIP: ${cusip}）。哪些聪明钱机构在增持/减持？请列出最相关的机构，并总结可能的原因与风险。`
+      : `请基于当前页面标的（CUSIP: ${cusip}）。哪些聪明钱机构在增持/减持？请列出最相关的机构，并总结可能的原因与风险。`;
+    smRunAi(q, { ticker: cusip }, 'smStockAiBox', 'smStockAiTitle', 'smStockAiText').catch(() => {});
   });
 
   const _smFlowsLoad = document.getElementById('smFlowsLoad');

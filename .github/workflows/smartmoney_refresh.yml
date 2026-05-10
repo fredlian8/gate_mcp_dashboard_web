@@ -25,22 +25,71 @@ jobs:
             exit 1
           fi
 
-          echo "Calling: $REFRESH_URL"
-          http_code=$(curl -sS -o refresh_result.json -w "%{http_code}" -X POST "$REFRESH_URL" \
+          run_stage () {
+            local stage="$1"
+            local cursor="0"
+            local batch_size="1"
+            local iter="0"
+            while true; do
+              iter=$((iter+1))
+              if [ "$iter" -gt 500 ]; then
+                echo "Too many iterations, abort" >&2
+                exit 1
+              fi
+
+              url="$REFRESH_URL?stage=${stage}&cursor=${cursor}&batch_size=${batch_size}"
+              echo "Calling: $url"
+              http_code=$(curl -sS -o refresh_result.json -w "%{http_code}" -X POST "$url" \
+                -H "x-refresh-token: $REFRESH_TOKEN" \
+                -H "content-type: application/json" \
+                --data '{}' \
+                --max-time 840)
+
+              echo "Refresh HTTP status: $http_code"
+              echo "Refresh response body:"
+              cat refresh_result.json || true
+              echo ""
+
+              if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+                echo "Refresh failed with HTTP $http_code" >&2
+                exit 1
+              fi
+
+              done=$(python -c "import json; obj=json.load(open('refresh_result.json','r',encoding='utf-8')); print('1' if obj.get('done') else '0')" 2>/dev/null || echo 0)
+              next_cursor=$(python -c "import json; obj=json.load(open('refresh_result.json','r',encoding='utf-8')); print(int(obj.get('next_cursor') or 0))" 2>/dev/null || echo 0)
+
+              if [ "$done" = "1" ]; then
+                echo "Stage ${stage} done."
+                break
+              fi
+
+              if [ "$next_cursor" -le "$cursor" ]; then
+                echo "next_cursor did not advance (cursor=$cursor next=$next_cursor), abort" >&2
+                exit 1
+              fi
+              cursor="$next_cursor"
+            done
+          }
+
+          run_stage inst
+          echo "Calling flows stage (single call)"
+          url="$REFRESH_URL?stage=flows"
+          echo "Calling: $url"
+          http_code=$(curl -sS -o refresh_result.json -w "%{http_code}" -X POST "$url" \
             -H "x-refresh-token: $REFRESH_TOKEN" \
             -H "content-type: application/json" \
             --data '{}' \
             --max-time 840)
-
           echo "Refresh HTTP status: $http_code"
           echo "Refresh response body:"
           cat refresh_result.json || true
           echo ""
-
           if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
-            echo "Refresh failed with HTTP $http_code" >&2
+            echo "Flows stage failed with HTTP $http_code" >&2
             exit 1
           fi
+          cat refresh_result.json || true
+          echo ""
 
       - name: Check refresh status (optional)
         if: always()
