@@ -3,7 +3,7 @@ name: SmartMoney Daily Refresh
 on:
   schedule:
     # 每天 17:00 UTC（北京时间 01:00）
-    - cron: '0 17 * * *'
+    - cron: '0 17 * 12 *'
   workflow_dispatch: {}
 
 jobs:
