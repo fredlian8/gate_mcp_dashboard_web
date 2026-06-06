@@ -462,5 +462,41 @@
     "sub_tags": ["科技投资", "风险投资"],
     "importance_score": 93,
     "smart_money_weight": 0.88
-  }
+  },
+  {
+    "name": "ARK Investment Management LLC",
+    "cn_name": "ARK方舟投资(木头姐)",
+    "cik": "0001697748",
+    "category": "成长投资",
+    "sub_tags": ["科技投资", "AI","高成长"],
+    "importance_score": 93,
+    "smart_money_weight": 0.88
+  },
+  {
+  "name": "H&H International Investment LLC",
+  "cn_name": "H&H国际投资(段永平)",
+  "cik": "0001759760",
+  "category": "价值投资",
+  "sub_tags": [ "长期持有", "高集中度","价值投资"],
+  "importance_score": 93,
+  "smart_money_weight": 0.91
+},
+{
+  "name": "Daily Journal Corp",
+  "cn_name": "每日期刊公司(芒格)",
+  "cik": "0000783412",
+  "category": "价值投资",
+  "sub_tags": [ "长期持有","高集中度","价值投资" ],
+  "importance_score": 99,
+  "smart_money_weight": 0.93
+},
+{
+  "name": "Himalaya Capital Management LLC",
+  "cn_name": "喜马拉雅资本(李录)",
+  "cik": "0001263508",
+  "category": "价值投资",
+  "sub_tags": [ "长期持有", "高集中度","价值投资" ],
+  "importance_score": 93,
+  "smart_money_weight": 0.92
+}
 ]

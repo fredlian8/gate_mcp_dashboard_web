@@ -1,9 +1,10 @@
-import os
+﻿import os
 import re
 import sqlite3
 import threading
 import time
 import warnings
+import heapq
 from urllib.parse import parse_qs, unquote, urlparse, quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -18,12 +19,40 @@ import re
 import asyncio
 
 import requests
+import httpx
+try:
+    import pandas as pd
+    import numpy as np
+except Exception:
+    pd = None
+    np = None
 try:
     import feedparser  # type: ignore
 except Exception:
     feedparser = None
 import xml.etree.ElementTree as ET
+try:
+    import yfinance as yf
+except Exception:
+    yf = None
 from fastapi import FastAPI, Request
+
+# Finnhub API 客户端（CUSIP → Ticker 映射）
+try:
+    import finnhub
+    _finnhub_client = None
+    def _get_finnhub_client():
+        global _finnhub_client
+        if _finnhub_client is not None:
+            return _finnhub_client
+        key = (os.getenv("FINNHUB_API_KEY") or "").strip()
+        if key:
+            _finnhub_client = finnhub.Client(api_key=key)
+            return _finnhub_client
+        return None
+except Exception:
+    finnhub = None
+    def _get_finnhub_client(): return None
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi import Query
 from fastapi.staticfiles import StaticFiles
@@ -93,17 +122,21 @@ SEC_EDGAR_PER_INST_DELAY_SEC = float(os.getenv("SEC_EDGAR_PER_INST_DELAY_SEC", "
 
 # 真实 13F（SEC EDGAR）机构配置（方案A：只依赖 CIK）
 _SMARTMONEY_INSTITUTIONS_META: Dict[str, Dict[str, Any]] = {
-    "brk": {"id": "brk", "name": "Berkshire Hathaway", "cik": "0001067983"},
-    "blk": {"id": "blk", "name": "BlackRock", "cik": "0002012383"},
-    "vgi": {"id": "vgi", "name": "Vanguard", "cik": "0000102909"},
-    "nvda": {"id": "nvda", "name": "NVIDIA", "cik": "0001045810"},
-}
+     "brk": {"id": "berkshire-hathaway", "name": "Berkshire Hathaway", "cik": "0001067983"},
+     "blk": {"id": "blk", "name": "BlackRock", "cik": "0002012383"},
+     "vgi": {"id": "vgi", "name": "Vanguard", "cik": "0000102909"},
+     "nvda": {"id": "nvda", "name": "NVIDIA", "cik": "0001045810"},
+ } 
 
 _SMARTMONEY_SNAPSHOT_LOCK = threading.Lock()
 _SMARTMONEY_SNAPSHOT: Dict[str, Any] = {"ts": 0.0, "items": [], "last_error": ""}
 
 _SMARTMONEY_META_LOCK = threading.Lock()
 _SMARTMONEY_META: Dict[str, Any] = {"ts": 0.0, "items": []}
+
+# 手动刷新任务状态跟踪
+_SMARTMONEY_REFRESH_TASKS_LOCK = threading.Lock()
+_SMARTMONEY_REFRESH_TASKS: Dict[str, Dict[str, Any]] = {}
 
 
 def _upstash_cmd(args: List[Any]) -> Any:
@@ -173,8 +206,11 @@ def _upstash_get_json(key: str) -> Optional[Any]:
     try:
         if not key:
             return None
+        print(f"[DEBUG] _upstash_get_json: getting key={key}")
         resp = _upstash_cmd(["GET", key])
+        print(f"[DEBUG] _upstash_get_json: resp={resp}")
         res = resp.get("result") if isinstance(resp, dict) else None
+        print(f"[DEBUG] _upstash_get_json: res type={type(res)}, len={len(res) if isinstance(res, str) else 'N/A'}")
         if not res:
             return None
         if isinstance(res, str):
@@ -183,21 +219,26 @@ def _upstash_get_json(key: str) -> Optional[Any]:
             except Exception:
                 return None
         return res
-    except Exception:
+    except Exception as e:
+        print(f"[DEBUG] _upstash_get_json: error={e}")
         return None
 
 
 def _upstash_set_json(key: str, obj: Any, ttl_sec: int = 0) -> bool:
     try:
         if not key:
+            print(f"[DEBUG] _upstash_set_json: empty key")
             return False
         raw = json.dumps(obj, ensure_ascii=False)
+        print(f"[DEBUG] _upstash_set_json: key={key}, raw_len={len(raw)}, ttl={ttl_sec}")
         if ttl_sec and ttl_sec > 0:
             _upstash_cmd(["SET", key, raw, "EX", str(int(ttl_sec))])
         else:
             _upstash_cmd(["SET", key, raw])
+        print(f"[DEBUG] _upstash_set_json: success")
         return True
-    except Exception:
+    except Exception as e:
+        print(f"[DEBUG] _upstash_set_json: error={e}")
         return False
 
 
@@ -226,23 +267,39 @@ def _sm_norm_inst_id(name: str) -> str:
 
 
 def _smartmoney_get_institutions_meta() -> List[Dict[str, Any]]:
-    # 优先 Upstash 主数据，其次内置默认（兼容旧行为）
-    meta_from_upstash: Optional[Any] = None
-    if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
-        meta_from_upstash = _upstash_get_json(SMARTMONEY_META_KEY)
-    if isinstance(meta_from_upstash, dict) and isinstance(meta_from_upstash.get("items"), list):
-        try:
-            with _SMARTMONEY_META_LOCK:
-                _SMARTMONEY_META["ts"] = float(meta_from_upstash.get("ts") or 0.0)
-                _SMARTMONEY_META["items"] = list(meta_from_upstash.get("items") or [])
-        except Exception:
-            pass
-
-    with _SMARTMONEY_META_LOCK:
-        items0 = _SMARTMONEY_META.get("items")
-    if isinstance(items0, list) and items0:
-        items = [x for x in items0 if isinstance(x, dict)]
-    else:
+    # 优先顺序：1.本地JSON文件 2.Upstash 3.内置默认
+    items: List[Dict[str, Any]] = []
+    
+    # 1. 尝试从本地 JSON 文件加载
+    try:
+        json_path = os.path.join(os.path.dirname(__file__), "institutions_50.json")
+        if os.path.exists(json_path):
+            with open(json_path, "r", encoding="utf-8") as f:
+                file_items = json.load(f)
+            if isinstance(file_items, list) and file_items:
+                items = [x for x in file_items if isinstance(x, dict) and x.get("cik")]
+    except Exception:
+        pass
+    
+    # 2. 如果本地文件没有，尝试 Upstash
+    if not items:
+        meta_from_upstash: Optional[Any] = None
+        if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
+            meta_from_upstash = _upstash_get_json(SMARTMONEY_META_KEY)
+        if isinstance(meta_from_upstash, dict) and isinstance(meta_from_upstash.get("items"), list):
+            try:
+                with _SMARTMONEY_META_LOCK:
+                    _SMARTMONEY_META["ts"] = float(meta_from_upstash.get("ts") or 0.0)
+                    _SMARTMONEY_META["items"] = list(meta_from_upstash.get("items") or [])
+            except Exception:
+                pass
+        with _SMARTMONEY_META_LOCK:
+            items0 = _SMARTMONEY_META.get("items")
+        if isinstance(items0, list) and items0:
+            items = [x for x in items0 if isinstance(x, dict)]
+    
+    # 3. 最后 fallback 到内置默认
+    if not items:
         items = [x for x in _SMARTMONEY_INSTITUTIONS_META.values() if isinstance(x, dict)]
 
     out: List[Dict[str, Any]] = []
@@ -904,34 +961,58 @@ def _smartmoney_all_holdings_flat() -> List[Dict[str, Any]]:
 def api_smartmoney_institutions(q: str = "") -> JSONResponse:
     qq = (q or "").strip().lower()
 
-    # 优先读取 Upstash 持久化快照，其次内存快照（由 /api/smartmoney/refresh 写入）
-    snap_from_upstash: Optional[Dict[str, Any]] = _upstash_get_snapshot() if (UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN) else None
-    snap_from_upstash_used = False
-    if isinstance(snap_from_upstash, dict) and isinstance(snap_from_upstash.get("items"), list):
-        snap_from_upstash_used = True
+    # 优先读取 SQLite 持久化快照，其次 Upstash，最后内存快照
+    db_data = _db_get_smartmoney_institutions()
+    if isinstance(db_data, dict) and isinstance(db_data.get("items"), list) and db_data["items"]:
+        # 写入内存缓存
         try:
             with _SMARTMONEY_SNAPSHOT_LOCK:
-                _SMARTMONEY_SNAPSHOT["ts"] = float(snap_from_upstash.get("ts") or 0.0)
-                _SMARTMONEY_SNAPSHOT["items"] = list(snap_from_upstash.get("items") or [])
-                _SMARTMONEY_SNAPSHOT["last_error"] = str(snap_from_upstash.get("last_error") or "")
+                _SMARTMONEY_SNAPSHOT["ts"] = float(db_data.get("ts") or 0.0)
+                _SMARTMONEY_SNAPSHOT["items"] = list(db_data.get("items") or [])
+                _SMARTMONEY_SNAPSHOT["last_error"] = ""
         except Exception:
             pass
-
-    with _SMARTMONEY_SNAPSHOT_LOCK:
-        snap_items = _SMARTMONEY_SNAPSHOT.get("items")
-        snap_ts = float(_SMARTMONEY_SNAPSHOT.get("ts") or 0.0)
-
-    data_source = "live"
-    snapshot_ts: Optional[float] = None
-    stale_limit_sec = float(int(SEC_EDGAR_CACHE_TTL_SEC) * 6) if SEC_EDGAR_CACHE_TTL_SEC else 0.0
-    if isinstance(snap_items, list) and snap_items and (not stale_limit_sec or (time.time() - snap_ts) < stale_limit_sec):
-        items = list(snap_items)
-        snapshot_ts = snap_ts if snap_ts else None
-        data_source = "upstash" if snap_from_upstash_used else "memory"
+        items = list(db_data["items"])
+        snapshot_ts = float(db_data.get("ts") or 0.0)
+        data_source = "db"
     else:
-        items = _smartmoney_build_items()
+        # SQLite 无数据，尝试 Upstash
+        snap_from_upstash: Optional[Dict[str, Any]] = None
+        if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
+            snap_from_upstash = _upstash_get_snapshot()
+        
+        snap_from_upstash_used = False
+        if isinstance(snap_from_upstash, dict) and isinstance(snap_from_upstash.get("items"), list):
+            snap_from_upstash_used = True
+            try:
+                with _SMARTMONEY_SNAPSHOT_LOCK:
+                    _SMARTMONEY_SNAPSHOT["ts"] = float(snap_from_upstash.get("ts") or 0.0)
+                    _SMARTMONEY_SNAPSHOT["items"] = list(snap_from_upstash.get("items") or [])
+                    _SMARTMONEY_SNAPSHOT["last_error"] = str(snap_from_upstash.get("last_error") or "")
+            except Exception:
+                pass
+
+        with _SMARTMONEY_SNAPSHOT_LOCK:
+            snap_items = _SMARTMONEY_SNAPSHOT.get("items")
+            snap_ts = float(_SMARTMONEY_SNAPSHOT.get("ts") or 0.0)
+
         data_source = "live"
-        snapshot_ts = None
+        snapshot_ts: Optional[float] = None
+        stale_limit_sec = float(int(SEC_EDGAR_CACHE_TTL_SEC) * 6) if SEC_EDGAR_CACHE_TTL_SEC else 0.0
+        
+        if snap_from_upstash_used and isinstance(snap_items, list) and snap_items:
+            items = list(snap_items)
+            snapshot_ts = snap_ts if snap_ts else None
+            data_source = "upstash"
+        elif isinstance(snap_items, list) and snap_items and snap_ts > 0 and (not stale_limit_sec or (time.time() - snap_ts) < stale_limit_sec):
+            items = list(snap_items)
+            snapshot_ts = snap_ts if snap_ts else None
+            data_source = "memory"
+        else:
+            items = _smartmoney_build_items()
+            data_source = "live"
+            snapshot_ts = None
+          
 
     if qq:
         inst_map = _smartmoney_inst_map()
@@ -1079,25 +1160,30 @@ def api_smartmoney_refresh(request: Request) -> JSONResponse:
     if tok != SMARTMONEY_REFRESH_TOKEN:
         return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
 
-    # 方案A：分批刷新，降低 Render 免费实例内存峰值
+    # 一次性刷新所有数据（batch_size=60覆盖全部机构）
     qp = getattr(request, "query_params", None)
     stage = ""
     cursor_raw = ""
-    batch_size = 5
+    batch_size = 60
+    target = "both"  # sqlite, upstash, or both
     try:
         stage = str((qp.get("stage") if qp is not None else "") or "").strip().lower()
         cursor_raw = str((qp.get("cursor") if qp is not None else "") or "").strip()
-        batch_size = int((qp.get("batch_size") if qp is not None else 5) or 5)
+        batch_size = int((qp.get("batch_size") if qp is not None else 60) or 60)
+        target = str((qp.get("target") if qp is not None else "both") or "both").strip().lower()
     except Exception:
         stage = stage or ""
         cursor_raw = cursor_raw or ""
-        batch_size = 5
+        batch_size = 60
+        target = "both"
     if stage not in ("", "inst", "flows"):
         return JSONResponse({"ok": False, "error": "invalid_stage"}, status_code=400)
+    if target not in ("sqlite", "upstash", "both"):
+        return JSONResponse({"ok": False, "error": "invalid_target"}, status_code=400)
     if batch_size <= 0:
-        batch_size = 5
-    if batch_size > 20:
-        batch_size = 20
+        batch_size = 60
+    if batch_size > 100:
+        batch_size = 100
     try:
         cursor = int(cursor_raw or "0")
     except Exception:
@@ -1149,19 +1235,21 @@ def api_smartmoney_refresh(request: Request) -> JSONResponse:
         cnt_reduce = 0
         cnt_exit = 0
 
-        def _push_heap(hp: List[Tuple[float, Dict[str, Any]]], limit: int, score: float, row: Dict[str, Any]) -> None:
+        heap_counter = [0]
+        def _push_heap(hp: List[Tuple[float, int, Dict[str, Any]]], limit: int, score: float, row: Dict[str, Any]) -> None:
             if limit <= 0:
                 return
+            heap_counter[0] += 1
             if len(hp) < limit:
-                heapq.heappush(hp, (score, row))
+                heapq.heappush(hp, (score, heap_counter[0], row))
             else:
                 if score > hp[0][0]:
-                    heapq.heapreplace(hp, (score, row))
+                    heapq.heapreplace(hp, (score, heap_counter[0], row))
 
-        heap_new: List[Tuple[float, Dict[str, Any]]] = []
-        heap_add: List[Tuple[float, Dict[str, Any]]] = []
-        heap_reduce: List[Tuple[float, Dict[str, Any]]] = []
-        heap_exit: List[Tuple[float, Dict[str, Any]]] = []
+        heap_new: List[Tuple[float, int, Dict[str, Any]]] = []
+        heap_add: List[Tuple[float, int, Dict[str, Any]]] = []
+        heap_reduce: List[Tuple[float, int, Dict[str, Any]]] = []
+        heap_exit: List[Tuple[float, int, Dict[str, Any]]] = []
 
         for h in hs:
             if not isinstance(h, dict):
@@ -1224,8 +1312,8 @@ def api_smartmoney_refresh(request: Request) -> JSONResponse:
             cnt_exit += 1
             _push_heap(heap_exit, 10, abs(prev_val), row)
 
-        def _heap_to_top_rows(hp: List[Tuple[float, Dict[str, Any]]]) -> List[Dict[str, Any]]:
-            rows = [x[1] for x in sorted(hp, key=lambda t: float(t[0] or 0.0), reverse=True)]
+        def _heap_to_top_rows(hp: List[Tuple[float, int, Dict[str, Any]]]) -> List[Dict[str, Any]]:
+            rows = [x[2] for x in sorted(hp, key=lambda t: float(t[0] or 0.0), reverse=True)]
             out: List[Dict[str, Any]] = []
             for r in rows:
                 out.append(
@@ -1239,8 +1327,8 @@ def api_smartmoney_refresh(request: Request) -> JSONResponse:
                 )
             return out
 
-        holdings_limited = [x[1] for x in sorted(heap_hold, key=lambda t: float(t[0] or 0.0), reverse=True)]
-        top_holdings_rows = [x[1] for x in sorted(heap_top15, key=lambda t: float(t[0] or 0.0), reverse=True)]
+        holdings_limited = [x[2] for x in sorted(heap_hold, key=lambda t: float(t[0] or 0.0), reverse=True)]
+        top_holdings_rows = [x[2] for x in sorted(heap_top15, key=lambda t: float(t[0] or 0.0), reverse=True)]
         top_holdings = [
             {
                 "issuer": h.get("issuer") or "",
@@ -1290,13 +1378,13 @@ def api_smartmoney_refresh(request: Request) -> JSONResponse:
         }
 
     # 分批：inst
-    if stage in ("", "inst"):
+    if stage in ("", "inst", "flows"):
         insts = _smartmoney_get_institutions_meta()
         total = len(insts)
         if cursor >= total:
             return JSONResponse({
                 "ok": True,
-                "stage": "inst",
+                "stage": stage if stage == "flows" else "inst",
                 "done": True,
                 "next_cursor": cursor,
                 "total": total,
@@ -1304,8 +1392,8 @@ def api_smartmoney_refresh(request: Request) -> JSONResponse:
                 "last_error": "",
             })
 
-        # cursor=0 时刷新 institutions 列表快照（轻量）
-        if cursor == 0:
+        # cursor=0 时刷新 institutions 列表快照（轻量）- 仅在 stage="" 或 stage="inst" 时执行
+        if cursor == 0 and stage != "flows":
             try:
                 items = _smartmoney_build_items()
                 with _SMARTMONEY_SNAPSHOT_LOCK:
@@ -1313,11 +1401,16 @@ def api_smartmoney_refresh(request: Request) -> JSONResponse:
                     _SMARTMONEY_SNAPSHOT["items"] = items if isinstance(items, list) else []
                     _SMARTMONEY_SNAPSHOT["last_error"] = ""
                 snap_obj = {"ts": float(_SMARTMONEY_SNAPSHOT.get("ts") or 0.0), "items": items if isinstance(items, list) else [], "last_error": ""}
-                _upstash_set_snapshot(snap_obj, ttl_sec=ttl_sec)
+                # 根据 target 参数决定写入位置
+                if target in ("upstash", "both"):
+                    _upstash_set_snapshot(snap_obj, ttl_sec=ttl_sec)
+                if target in ("sqlite", "both"):
+                    _db_set_smartmoney_institutions(snap_obj, ttl_sec=ttl_sec)
             except Exception:
                 pass
 
-            # 重置 flows 聚合（写入 Redis 端，避免 Python 内存累加）
+        # 重置 flows 聚合（写入 Redis 端，避免 Python 内存累加）- 仅在 cursor=0 时执行
+        if cursor == 0:
             try:
                 _upstash_pipeline(
                     [
@@ -1353,6 +1446,9 @@ def api_smartmoney_refresh(request: Request) -> JSONResponse:
                 hs_full = cur.get("holdings") if isinstance(cur.get("holdings"), list) else []
                 hs_prev = prev.get("holdings") if isinstance(prev, dict) and prev.get("ok") and isinstance(prev.get("holdings"), list) else []
                 prev_val_map: Dict[str, float] = {}
+                # Debug: log flows calculation
+                if stage == "flows" and cursor == 0:
+                    print(f"[DEBUG] Flows calc for {iid}: cur_holdings={len(hs_full)}, prev_holdings={len(hs_prev)}, prev_ok={prev.get('ok') if isinstance(prev, dict) else False}")
                 for r in hs_prev:
                     if not isinstance(r, dict):
                         continue
@@ -1363,6 +1459,7 @@ def api_smartmoney_refresh(request: Request) -> JSONResponse:
 
                 fcmds: List[List[Any]] = []
                 f_batch = 500
+                flow_count = 0
                 for h in hs_full:
                     if not isinstance(h, dict):
                         continue
@@ -1375,6 +1472,7 @@ def api_smartmoney_refresh(request: Request) -> JSONResponse:
                     delta = float(cur_val - prev_val)
                     if delta == 0:
                         continue
+                    flow_count += 1
                     if issuer:
                         fcmds.append(["HSET", flows_issuer_key, cusip, issuer])
                     if delta > 0:
@@ -1382,16 +1480,14 @@ def api_smartmoney_refresh(request: Request) -> JSONResponse:
                     else:
                         fcmds.append(["ZINCRBY", flows_zsell_key, str(float(abs(delta))), cusip])
                     if len(fcmds) >= f_batch:
-                        fcmds.append(["EXPIRE", flows_zbuy_key, str(int(ttl_sec))])
-                        fcmds.append(["EXPIRE", flows_zsell_key, str(int(ttl_sec))])
-                        fcmds.append(["EXPIRE", flows_issuer_key, str(int(ttl_sec))])
                         _upstash_pipeline(fcmds)
                         fcmds = []
+
                 if fcmds:
-                    fcmds.append(["EXPIRE", flows_zbuy_key, str(int(ttl_sec))])
-                    fcmds.append(["EXPIRE", flows_zsell_key, str(int(ttl_sec))])
-                    fcmds.append(["EXPIRE", flows_issuer_key, str(int(ttl_sec))])
                     _upstash_pipeline(fcmds)
+                # Debug: log flow count
+                if stage == "flows" and cursor == 0:
+                    print(f"[DEBUG] {iid} calculated {flow_count} flows")
             except Exception as e:
                 last_err = (last_err + " | " if last_err else "") + _sec_err_str(e)
 
@@ -1403,16 +1499,18 @@ def api_smartmoney_refresh(request: Request) -> JSONResponse:
 
         next_cursor = cursor + len(slice2)
         done = next_cursor >= total
-        return JSONResponse({
-            "ok": True,
-            "stage": "inst",
-            "done": bool(done),
-            "next_cursor": int(next_cursor),
-            "total": int(total),
-            "batch_wrote": int(wrote),
-            "took_sec": round(time.time() - started, 3),
-            "last_error": str(last_err or ""),
-        })
+        # 仅在 stage="" 或 stage="inst" 时返回，stage="flows" 时继续执行 flows 分支
+        if stage != "flows":
+            return JSONResponse({
+                "ok": True,
+                "stage": "inst",
+                "done": bool(done),
+                "next_cursor": int(next_cursor),
+                "total": int(total),
+                "batch_wrote": int(wrote),
+                "took_sec": round(time.time() - started, 3),
+                "last_error": str(last_err or ""),
+            })
 
     # flows：从 Redis ZSET 读取 Top50 并写入快照（不做 Python 端全量聚合）
     insts = _smartmoney_get_institutions_meta()
@@ -1420,16 +1518,130 @@ def api_smartmoney_refresh(request: Request) -> JSONResponse:
     next_cursor = total
     done = True
     flows_written = False
-    if done:
+
+    # target=sqlite时，直接从SEC文件计算flows
+    if target == "sqlite" and done:
         try:
+            print(f"[DEBUG] Calculating flows from SEC files for SQLite, institutions count: {len(insts)}")
+
+            # 定义heap辅助函数
+            def _push_heap(hp: List[Tuple[float, Dict[str, Any]]], limit: int, score: float, row: Dict[str, Any]) -> None:
+                if limit <= 0:
+                    return
+                if len(hp) < limit:
+                    heapq.heappush(hp, (score, row))
+                else:
+                    if score > hp[0][0]:
+                        heapq.heapreplace(hp, (score, row))
+
+            # 使用字典按CUSIP聚合delta
+            cusip_delta_map: Dict[str, float] = {}
+            issuer_map: Dict[str, str] = {}
+
+            for inst in insts:
+                iid = str(inst.get("id") or "").strip().lower()
+                cik = str(inst.get("cik") or "")
+                if not iid or not str(cik or "").strip():
+                    continue
+                print(f"[DEBUG] Processing institution: {iid}, cik={cik}")
+                try:
+                    cur = _sec_get_13f_holdings_by_cik(cik, filing_index=0)
+                    prev = _sec_get_13f_holdings_by_cik(cik, filing_index=1)
+                    print(f"[DEBUG] {iid} cur ok={cur.get('ok') if isinstance(cur, dict) else False}, prev ok={prev.get('ok') if isinstance(prev, dict) else False}")
+                    if not (isinstance(cur, dict) and cur.get("ok")):
+                        continue
+
+                    hs_full = cur.get("holdings") if isinstance(cur.get("holdings"), list) else []
+                    hs_prev = prev.get("holdings") if isinstance(prev, dict) and prev.get("ok") and isinstance(prev.get("holdings"), list) else []
+                    print(f"[DEBUG] {iid} cur_holdings={len(hs_full)}, prev_holdings={len(hs_prev)}")
+                    prev_val_map: Dict[str, float] = {}
+                    for r in hs_prev:
+                        if not isinstance(r, dict):
+                            continue
+                        pc = str(r.get("cusip") or "").strip().upper()
+                        if not pc:
+                            continue
+                        prev_val_map[pc] = float(r.get("value_usd") or 0.0)
+
+                    flow_count = 0
+                    for h in hs_full:
+                        if not isinstance(h, dict):
+                            continue
+                        cusip = str(h.get("cusip") or "").strip().upper()
+                        if not cusip:
+                            continue
+                        issuer = str(h.get("issuer") or "").strip()
+                        if issuer:
+                            issuer_map[cusip] = issuer
+                        cur_val = float(h.get("value_usd") or 0.0)
+                        prev_val = float(prev_val_map.get(cusip) or 0.0)
+                        delta = float(cur_val - prev_val)
+                        if delta == 0:
+                            continue
+                        flow_count += 1
+                        # 按CUSIP聚合delta
+                        cusip_delta_map[cusip] = cusip_delta_map.get(cusip, 0.0) + delta
+                    print(f"[DEBUG] {iid} calculated {flow_count} flows")
+                except Exception as e:
+                    print(f"[DEBUG] Error calculating flows for {iid}: {e}")
+                    continue
+
+            # 使用heap聚合Top50 buys和Top50 sells
+            buys_heap: List[Tuple[float, Dict[str, Any]]] = []
+            sells_heap: List[Tuple[float, Dict[str, Any]]] = []
+
+            for cusip, total_delta in cusip_delta_map.items():
+                if total_delta == 0:
+                    continue
+                row = {"cusip": cusip, "issuer": issuer_map.get(cusip, ""), "sector": "", "flow_usd": float(total_delta)}
+                if total_delta > 0:
+                    _push_heap(buys_heap, 50, total_delta, row)
+                else:
+                    _push_heap(sells_heap, 50, abs(total_delta), row)
+
+            # 从heap提取并排序（降序）
+            top_buys_rows = [row for score, row in sorted(buys_heap, key=lambda x: x[0], reverse=True)]
+            top_sells_rows = [row for score, row in sorted(sells_heap, key=lambda x: x[0], reverse=True)]
+
+            # 填充issuer
+            for row in top_buys_rows:
+                cusip = row.get("cusip", "")
+                if not row.get("issuer") and cusip in issuer_map:
+                    row["issuer"] = issuer_map[cusip]
+            for row in top_sells_rows:
+                cusip = row.get("cusip", "")
+                if not row.get("issuer") and cusip in issuer_map:
+                    row["issuer"] = issuer_map[cusip]
+
+            print(f"[DEBUG] Calculated flows: buys={len(top_buys_rows)}, sells={len(top_sells_rows)}")
+            flows_snap = {
+                "ok": True,
+                "sector": "all",
+                "period": "quarter",
+                "top_buys": top_buys_rows,
+                "top_sells": top_sells_rows,
+                "ts": int(time.time()),
+            }
+            set_ok = _db_set_smartmoney_flows(flows_snap, ttl_sec=ttl_sec)
+            print(f"[DEBUG] _db_set_smartmoney_flows result: {set_ok}")
+            flows_written = True
+        except Exception as e:
+            last_err = _sec_err_str(e)
+    elif done:
+        # target=upstash时，从Redis ZSET读取
+        try:
+            print(f"[DEBUG] Reading flows from ZSETs: {flows_zbuy_key}, {flows_zsell_key}")
             rb = _upstash_pipeline([["ZREVRANGE", flows_zbuy_key, "0", "49", "WITHSCORES"]])
             rs = _upstash_pipeline([["ZREVRANGE", flows_zsell_key, "0", "49", "WITHSCORES"]])
+            print(f"[DEBUG] ZREVRANGE buys: {rb}, sells: {rs}")
             braw = None
             sraw = None
-            if isinstance(rb, list) and rb:
-                braw = rb[0]
-            if isinstance(rs, list) and rs:
-                sraw = rs[0]
+            # Upstash returns [{'result': [...]}], extract the inner result
+            if isinstance(rb, list) and rb and isinstance(rb[0], dict):
+                braw = rb[0].get("result")
+            if isinstance(rs, list) and rs and isinstance(rs[0], dict):
+                sraw = rs[0].get("result")
+            print(f"[DEBUG] Extracted braw: {braw}, sraw: {sraw}")
 
             def _pairs_to_rows(raw: Any) -> List[Dict[str, Any]]:
                 out: List[Dict[str, Any]] = []
@@ -1456,13 +1668,17 @@ def api_smartmoney_refresh(request: Request) -> JSONResponse:
                         hres = _upstash_pipeline(hcmds)
                         if isinstance(hres, list) and len(hres) == len(cusips):
                             for j in range(len(out)):
-                                out[j]["issuer"] = str(hres[j] or "")
+                                val = hres[j]
+                                if isinstance(val, dict) and "result" in val:
+                                    val = val["result"]
+                                out[j]["issuer"] = str(val or "")
                     except Exception:
                         pass
                 return out
 
             top_buys_rows = _pairs_to_rows(braw)
             top_sells_rows = _pairs_to_rows(sraw)
+            print(f"[DEBUG] Flows rows: buys={len(top_buys_rows)}, sells={len(top_sells_rows)}")
             flows_snap = {
                 "ok": True,
                 "sector": "all",
@@ -1471,7 +1687,10 @@ def api_smartmoney_refresh(request: Request) -> JSONResponse:
                 "top_sells": top_sells_rows,
                 "ts": int(time.time()),
             }
-            _upstash_set_json(_sm_snap_key_flows("all", "quarter"), flows_snap, ttl_sec=ttl_sec)
+            flows_key = _sm_snap_key_flows("all", "quarter")
+            print(f"[DEBUG] Writing flows to key: {flows_key}")
+            set_ok = _upstash_set_json(flows_key, flows_snap, ttl_sec=ttl_sec)
+            print(f"[DEBUG] _upstash_set_json result: {set_ok}, ttl={ttl_sec}")
             flows_written = True
         except Exception as e:
             last_err = _sec_err_str(e)
@@ -1511,6 +1730,280 @@ def api_smartmoney_refresh_status() -> JSONResponse:
     })
 
 
+def api_smartmoney_refresh_manual() -> JSONResponse:
+    """手动刷新接口：同步拉取所有机构 SEC 数据并写入 Upstash（不轮询）"""
+    import json as _json
+    import heapq as _heapq
+
+    insts = _smartmoney_get_institutions_meta()
+    total = len(insts)
+    ttl_sec = max(0, int(SEC_EDGAR_CACHE_TTL_SEC) * 6) if SEC_EDGAR_CACHE_TTL_SEC else 0
+    now_ts = int(time.time())
+
+    flows_zbuy_key = "sm:flows:z:buys:all:quarter"
+    flows_zsell_key = "sm:flows:z:sells:all:quarter"
+    flows_issuer_key = "sm:flows:h:issuer:all:quarter"
+
+    all_cmds = []
+    fcmds = []
+    all_cmds.append(["DEL", flows_zbuy_key])
+    all_cmds.append(["DEL", flows_zsell_key])
+    all_cmds.append(["DEL", flows_issuer_key])
+
+    # institutions 列表快照
+    try:
+        items = _smartmoney_build_items()
+        with _SMARTMONEY_SNAPSHOT_LOCK:
+            _SMARTMONEY_SNAPSHOT["ts"] = time.time()
+            _SMARTMONEY_SNAPSHOT["items"] = items if isinstance(items, list) else []
+            _SMARTMONEY_SNAPSHOT["last_error"] = ""
+        snap_obj = {"ts": _SMARTMONEY_SNAPSHOT["ts"], "items": _SMARTMONEY_SNAPSHOT["items"], "last_error": ""}
+        raw = _json.dumps(snap_obj, ensure_ascii=False)
+        if ttl_sec > 0:
+            all_cmds.append(["SET", SMARTMONEY_SNAPSHOT_KEY, raw, "EX", str(int(ttl_sec))])
+        else:
+            all_cmds.append(["SET", SMARTMONEY_SNAPSHOT_KEY, raw])
+    except Exception:
+        pass
+
+    failed: List[str] = []
+    for inst in insts:
+        iid = str(inst.get("id") or "").strip().lower()
+        cik = str(inst.get("cik") or "")
+        if not iid or not str(cik or "").strip():
+            continue
+        try:
+            cur = _sec_get_13f_holdings_by_cik(cik, filing_index=0)
+            prev = _sec_get_13f_holdings_by_cik(cik, filing_index=1)
+            if not (isinstance(cur, dict) and cur.get("ok")):
+                failed.append(f"{iid}:sec_fetch_failed")
+                continue
+
+            hs = cur.get("holdings") if isinstance(cur.get("holdings"), list) else []
+            hs_prev = prev.get("holdings") if isinstance(prev, dict) and prev.get("ok") and isinstance(prev.get("holdings"), list) else []
+            prev_map = {}
+            for r in hs_prev:
+                if not isinstance(r, dict):
+                    continue
+                cusip = str(r.get("cusip") or "").strip().upper()
+                if not cusip:
+                    continue
+                prev_map[cusip] = r
+
+            cur_seen = set()
+            topN = 200
+            heap_hold = []
+            heap_top15 = []
+            cnt_new = 0
+            cnt_add = 0
+            cnt_reduce = 0
+            cnt_exit = 0
+            heap_new = []
+            heap_add = []
+            heap_reduce = []
+            heap_exit = []
+
+            heap_counter2 = [0]
+            def _push_heap(hp, limit, score, row):
+                if limit <= 0:
+                    return
+                heap_counter2[0] += 1
+                if len(hp) < limit:
+                    _heapq.heappush(hp, (score, heap_counter2[0], row))
+                else:
+                    if score > hp[0][0]:
+                        _heapq.heapreplace(hp, (score, heap_counter2[0], row))
+
+            for h in hs:
+                if not isinstance(h, dict):
+                    continue
+                cusip = str(h.get("cusip") or "").strip().upper()
+                if not cusip:
+                    continue
+                cur_seen.add(cusip)
+                prev_row = prev_map.get(cusip) or {}
+                prev_val = float(prev_row.get("value_usd") or 0.0)
+                cur_val = float(h.get("value_usd") or 0.0)
+                delta = float(cur_val - prev_val)
+                weight = float(h.get("weight") or 0.0)
+                row = {"cusip": cusip, "issuer": h.get("issuer") or "", "sector": h.get("sector") or "", "value_usd": cur_val, "weight": weight, "qoq_value_change": delta}
+                _push_heap(heap_hold, topN, cur_val, row)
+                _push_heap(heap_top15, 15, cur_val, row)
+                if delta > 0:
+                    if prev_val <= 0:
+                        cnt_new += 1
+                        _push_heap(heap_new, 10, abs(delta), row)
+                    else:
+                        cnt_add += 1
+                        _push_heap(heap_add, 10, abs(delta), row)
+                elif delta < 0:
+                    if cur_val > 0:
+                        cnt_reduce += 1
+                        _push_heap(heap_reduce, 10, abs(delta), row)
+
+            for cusip, r in prev_map.items():
+                if cusip in cur_seen:
+                    continue
+                prev_val = float(r.get("value_usd") or 0.0)
+                if prev_val <= 0:
+                    continue
+                cnt_exit += 1
+                _push_heap(heap_exit, 10, abs(prev_val), {"cusip": cusip, "issuer": r.get("issuer") or "", "sector": r.get("sector") or "", "value_usd": 0.0, "weight": 0.0, "qoq_value_change": -prev_val})
+
+            def _heap_to_top_rows(hp):
+                rows = [x[2] for x in sorted(hp, key=lambda t: float(t[0] or 0.0), reverse=True)]
+                out = []
+                for r in rows:
+                    out.append({"issuer": r.get("issuer") or "", "cusip": r.get("cusip") or "", "value_usd": float(r.get("value_usd") or 0.0), "weight": float(r.get("weight") or 0.0), "qoq_value_change": float(r.get("qoq_value_change") or 0.0)})
+                return out
+
+            holdings_limited = [x[2] for x in sorted(heap_hold, key=lambda t: float(t[0] or 0.0), reverse=True)]
+            top_holdings_rows = [x[2] for x in sorted(heap_top15, key=lambda t: float(t[0] or 0.0), reverse=True)]
+            top_holdings = [{"issuer": h.get("issuer") or "", "cusip": h.get("cusip") or "", "value_usd": float(h.get("value_usd") or 0.0), "weight": float(h.get("weight") or 0.0), "qoq_value_change": float(h.get("qoq_value_change") or 0.0)} for h in top_holdings_rows]
+
+            change_breakdown = {"counts": {"new": int(cnt_new), "add": int(cnt_add), "reduce": int(cnt_reduce), "exit": int(cnt_exit)}, "top10": {"new": _heap_to_top_rows(heap_new), "add": _heap_to_top_rows(heap_add), "reduce": _heap_to_top_rows(heap_reduce), "exit": _heap_to_top_rows(heap_exit)}}
+            recent_changes = {"new": change_breakdown["top10"]["new"], "add": change_breakdown["top10"]["add"], "reduce": change_breakdown["top10"]["reduce"], "exit": change_breakdown["top10"]["exit"]}
+
+            detail_obj = {
+                "ok": True,
+                "institution": {"id": iid, "name": inst.get("name") or "", "cik": inst.get("cik") or "", "aum_usd": float(cur.get("total_value_usd") or 0.0), "accession": cur.get("accession")},
+                "holdings": holdings_limited,
+                "holdings_total": int(len(hs)) + int(cnt_exit),
+                "top_holdings": top_holdings,
+                "recent_changes": recent_changes,
+                "change_breakdown": change_breakdown,
+                "ts": now_ts,
+            }
+            detail_raw = _json.dumps(detail_obj, ensure_ascii=False)
+            all_cmds.append(["SET", _sm_snap_key_inst(iid), detail_raw, "EX", str(int(ttl_sec))])
+
+            hs_full = cur.get("holdings") if isinstance(cur.get("holdings"), list) else []
+            hs_prev2 = prev.get("holdings") if isinstance(prev, dict) and prev.get("ok") and isinstance(prev.get("holdings"), list) else []
+            prev_val_map2 = {}
+            for r in hs_prev2:
+                if not isinstance(r, dict):
+                    continue
+                c = str(r.get("cusip") or "").strip().upper()
+                if not c:
+                    continue
+                prev_val_map2[c] = float(r.get("value_usd") or 0.0)
+            seen_cusips = set()
+            for h in hs_full:
+                if not isinstance(h, dict):
+                    continue
+                cusip = str(h.get("cusip") or "").strip().upper()
+                if not cusip or cusip in seen_cusips:
+                    continue
+                seen_cusips.add(cusip)
+                cur_val2 = float(h.get("value_usd") or 0.0)
+                prev_val2 = float(prev_val_map2.get(cusip) or 0.0)
+                delta2 = cur_val2 - prev_val2
+                # 跟踪个股持仓信息（用于生成 stock 快照）
+                wt = float(h.get("weight") or 0.0)
+                issuer = str(h.get("issuer") or "").strip()
+                if cusip not in cusip_holders:
+                    cusip_holders[cusip] = {"issuer": issuer, "holders": []}
+                cusip_holders[cusip]["holders"].append({
+                    "inst_id": iid,
+                    "inst_name": iname,
+                    "weight": wt,
+                    "value_usd": cur_val2,
+                    "qoq_value_change": delta2,
+                })
+                if delta2 == 0:
+                    continue
+                issuer = str(h.get("issuer") or "").strip()
+                if issuer:
+                    fcmds.append(["HSET", flows_issuer_key, cusip, issuer])
+                if delta2 > 0:
+                    fcmds.append(["ZINCRBY", flows_zbuy_key, str(float(delta2)), cusip])
+                else:
+                    fcmds.append(["ZINCRBY", flows_zsell_key, str(float(abs(delta2))), cusip])
+        except Exception as e:
+            failed.append(f"{iid}:{_sec_err_str(e)}")
+
+    # 一次性 pipeline 写入
+    if fcmds:
+        fcmds.append(["EXPIRE", flows_zbuy_key, str(int(ttl_sec))])
+        fcmds.append(["EXPIRE", flows_zsell_key, str(int(ttl_sec))])
+        fcmds.append(["EXPIRE", flows_issuer_key, str(int(ttl_sec))])
+        all_cmds.extend(fcmds)
+    if all_cmds:
+        try:
+            _upstash_pipeline(all_cmds)
+        except Exception:
+            pass
+
+    # flows 快照
+    try:
+        rb = _upstash_pipeline([["ZREVRANGE", flows_zbuy_key, "0", "49", "WITHSCORES"]])
+        rs = _upstash_pipeline([["ZREVRANGE", flows_zsell_key, "0", "49", "WITHSCORES"]])
+        # Upstash returns [{'result': [...]}], extract the inner result
+        braw = rb[0].get("result") if isinstance(rb, list) and rb and isinstance(rb[0], dict) else None
+        sraw = rs[0].get("result") if isinstance(rs, list) and rs and isinstance(rs[0], dict) else None
+
+        def _pairs_to_rows(raw):
+            out = []
+            if not isinstance(raw, list):
+                return out
+            cusips = []
+            for i in range(0, len(raw), 2):
+                if i + 1 >= len(raw):
+                    break
+                cusip = str(raw[i] or "").strip().upper()
+                try:
+                    score = float(raw[i + 1] or 0.0)
+                except Exception:
+                    score = 0.0
+                if not cusip:
+                    continue
+                cusips.append(cusip)
+                out.append({"cusip": cusip, "issuer": "", "sector": "", "flow_usd": float(score)})
+            if cusips:
+                try:
+                    hcmds = [["HGET", flows_issuer_key, c] for c in cusips]
+                    hres = _upstash_pipeline(hcmds)
+                    if isinstance(hres, list) and len(hres) == len(cusips):
+                        for j in range(len(out)):
+                            out[j]["issuer"] = str(hres[j] or "")
+                except Exception:
+                    pass
+            return out
+
+        top_buys_rows = _pairs_to_rows(braw)
+        top_sells_rows = _pairs_to_rows(sraw)
+        flows_snap = {"ok": True, "sector": "all", "period": "quarter", "top_buys": top_buys_rows, "top_sells": top_sells_rows, "ts": int(time.time())}
+        _upstash_set_json(_sm_snap_key_flows("all", "quarter"), flows_snap, ttl_sec=ttl_sec)
+
+    except Exception:
+        pass
+
+    return JSONResponse({
+        "ok": True,
+        "total": int(total),
+        "failed": failed,
+        "snapshot_ts": now_ts,
+    })
+
+def api_smartmoney_refresh_manual_status(task_id: str = Query(...)) -> JSONResponse:
+    """查询手动刷新任务状态"""
+    with _SMARTMONEY_REFRESH_TASKS_LOCK:
+        task = _SMARTMONEY_REFRESH_TASKS.get(task_id)
+    
+    if not task:
+        return JSONResponse({"ok": False, "error": "task_not_found"}, status_code=404)
+    
+    return JSONResponse({
+        "ok": True,
+        "status": task.get("status"),
+        "stage": task.get("stage"),
+        "progress": task.get("progress"),
+        "total": task.get("total"),
+        "started_at": task.get("started_at"),
+        "error": task.get("error"),
+    })
+
+
 def api_smartmoney_institution_detail(
     inst_id: str = Query("", alias="id"),
     nocache: int = 0,
@@ -1528,21 +2021,8 @@ def api_smartmoney_institution_detail(
     except Exception:
         bypass_cache = False
 
+    # 仅使用内存缓存，不使用 Upstash
     if not bypass_cache:
-        # 优先读 Upstash 快照
-        if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
-            snap = _upstash_get_json(_sm_snap_key_inst(iid))
-            if isinstance(snap, dict) and snap.get("ok"):
-                ts = snap.get("ts") if isinstance(snap, dict) else None
-                out = dict(snap)
-                out["data_source"] = "upstash"
-                out["snapshot_ts"] = ts
-                try:
-                    _cache_set(f"sm:inst_detail:{iid}", out)
-                except Exception:
-                    pass
-                return JSONResponse(out, headers={"X-SM-Source": "upstash", "X-SM-Snapshot-Ts": str(ts or "")})
-        # 内存缓存
         cached = _cache_get(ck, SEC_EDGAR_CACHE_TTL_SEC)
         if isinstance(cached, dict) and cached.get("ok"):
             ts = cached.get("snapshot_ts") if isinstance(cached, dict) else None
@@ -1671,34 +2151,464 @@ def api_smartmoney_institution_detail(
     return JSONResponse(resp_obj, headers={"X-SM-Source": "live", "X-SM-Snapshot-Ts": ""})
 
 
-def api_smartmoney_stock_detail(ticker: str = "") -> JSONResponse:
-    # 兼容旧参数名 ticker：方案A中实际应传 cusip；ticker 映射不做
-    cusip = re.sub(r"\s+", "", (ticker or "").strip().upper())
-    if not cusip:
-        return JSONResponse({"ok": False, "error": "missing_cusip"}, status_code=400)
+# YFinance helpers ------------------------------------------------------------
 
-    # 1) Upstash 预计算快照优先（秒开）
-    if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
-        snap = _upstash_get_json(_sm_snap_key_stock(cusip))
-        if isinstance(snap, dict) and snap.get("ok"):
-            ts = snap.get("ts") if isinstance(snap, dict) else None
-            out = dict(snap)
-            out["data_source"] = "upstash"
-            out["snapshot_ts"] = ts
+_YF_CUSIP_TICKER_CACHE: Dict[str, Tuple[float, Optional[str]]] = {}
+_YF_CUSIP_TICKER_CACHE_TTL = 86400 * 7  # 7 days
+
+def _yf_search_issuer(issuer: str) -> Optional[str]:
+    """通过发行人名称（issuer）搜索 Yahoo Finance 找到对应 ticker。
+    使用 yfinance.Search 进行搜索并缓存结果。
+    缓存 key 为归一化的 issuer 名称，TTL = 7 天。
+    """
+    if yf is None:
+        return None
+    raw_key = (issuer or "").strip()
+    key = re.sub(r"\s+", "", raw_key.upper())
+    if not key:
+        return None
+    # check cache
+    cached = _YF_CUSIP_TICKER_CACHE.get(key)
+    if cached is not None:
+        ts, val = cached
+        if time.time() - ts < _YF_CUSIP_TICKER_CACHE_TTL:
+            return val
+    try:
+        # 尝试直接查询 ticker（一些知名公司有标准代码）
+        # 先用原始名称（带空格）查 known dict
+        known_raw = raw_key.upper()
+        known = {
+            "APPLE INC": "AAPL",
+            "APPLE": "AAPL",
+            "MICROSOFT CORP": "MSFT",
+            "MICROSOFT CORPORATION": "MSFT",
+            "MICROSOFT": "MSFT",
+            "ALPHABET INC": "GOOGL",
+            "ALPHABET": "GOOGL",
+            "GOOGLE": "GOOGL",
+            "AMAZON COM INC": "AMZN",
+            "AMAZON": "AMZN",
+            "META PLATFORMS INC": "META",
+            "META": "META",
+            "BERKSHIRE HATHAWAY INC": "BRK.B",
+            "BERKSHIRE HATHAWAY": "BRK.B",
+            "NVIDIA CORPORATION": "NVDA",
+            "NVIDIA": "NVDA",
+            "TESLA INC": "TSLA",
+            "TESLA": "TSLA",
+            "JPMORGAN CHASE & CO": "JPM",
+            "JPMORGAN CHASE": "JPM",
+            "VISA INC": "V",
+            "VISA": "V",
+            "JOHNSON & JOHNSON": "JNJ",
+            "WALMART INC": "WMT",
+            "WALMART": "WMT",
+            "PROCTER & GAMBLE": "PG",
+            "PROCTER & GAMBLE CO": "PG",
+            "UNITEDHEALTH GROUP INC": "UNH",
+            "UNITEDHEALTH": "UNH",
+            "BANK OF AMERICA CORP": "BAC",
+            "BANK OF AMERICA": "BAC",
+            "COCA COLA": "KO",
+            "COCA-COLA": "KO",
+            "COCA COLA CO": "KO",
+            "WELLS FARGO & CO": "WFC",
+            "WELLS FARGO": "WFC",
+            "WALT DISNEY": "DIS",
+            "WALT DISNEY CO": "DIS",
+            "DISNEY": "DIS",
+            "ADOBE INC": "ADBE",
+            "ADOBE": "ADBE",
+            "PFIZER INC": "PFE",
+            "PFIZER": "PFE",
+            "INTEL CORPORATION": "INTC",
+            "INTEL": "INTC",
+            "CISCO SYSTEMS INC": "CSCO",
+            "CISCO": "CSCO",
+            "NETFLIX INC": "NFLX",
+            "NETFLIX": "NFLX",
+            "CHEVRON CORPORATION": "CVX",
+            "CHEVRON": "CVX",
+            "EXXON MOBIL CORPORATION": "XOM",
+            "EXXON MOBIL": "XOM",
+            "HOME DEPOT INC": "HD",
+            "HOME DEPOT": "HD",
+            "NEOGENOMICS INC": "NEO",
+            "NEOGENOMICS": "NEO",
+            "AMERICAN TOWER CORP": "AMT",
+            "AMERICAN TOWER": "AMT",
+            "GENERAL ELECTRIC": "GE",
+            "GENERAL ELECTRIC CO": "GE",
+            "DIGITAL REALTY TRUST INC": "DLR",
+            "DIGITAL REALTY": "DLR",
+            "ASTRAZENECA PLC": "AZN",
+            "ASTRAZENECA": "AZN",
+            "MCDONALDS CORPORATION": "MCD",
+            "MCDONALDS": "MCD",
+        }
+        if known_raw in known:
+            ticker = known[known_raw]
+            _YF_CUSIP_TICKER_CACHE[key] = (time.time(), ticker)
+            return ticker
+
+        # 利用 yfinance 的 Search 来查找
+        search = yf.Search(query=issuer, max_results=3)
+        quotes = search.quotes if hasattr(search, 'quotes') else []
+        if isinstance(quotes, list) and quotes:
+            for q in quotes[:3]:
+                if isinstance(q, dict):
+                    symbol = str(q.get('symbol') or '').strip()
+                    if symbol:
+                        _YF_CUSIP_TICKER_CACHE[key] = (time.time(), symbol)
+                        return symbol
+        # 如果 Search 没能返回结果，备选：尝试用 Ticker 直接查询
+        # 把 issuername 中的不常见词去掉后尝试
+        cleaned = re.sub(r'\b(INC|CORP|CORPORATION|&|CO|PLC|LTD|LIMITED|NV|SA|LP|LLC)\b', '', issuer, flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        if cleaned and cleaned != issuer:
+            search2 = yf.Search(query=cleaned, max_results=3)
+            quotes2 = search2.quotes if hasattr(search2, 'quotes') else []
+            if isinstance(quotes2, list) and quotes2:
+                for q in quotes2[:3]:
+                    if isinstance(q, dict):
+                        symbol = str(q.get('symbol') or '').strip()
+                        if symbol:
+                            _YF_CUSIP_TICKER_CACHE[key] = (time.time(), symbol)
+                            return symbol
+    except Exception:
+        pass
+    _YF_CUSIP_TICKER_CACHE[key] = (time.time(), None)
+    return None
+
+
+def _yf_get_price(ticker: str) -> Optional[Dict[str, Any]]:
+    """获取股票实时价格（支持盘后价）、涨跌幅等。
+    
+    返回: {"price": float, "change_pct": float, "currency": str, "market_state": str}
+    或 None（查询失败时）。
+    结果缓存 60 秒。
+    """
+    if yf is None or not ticker:
+        return None
+    ck = f"yf:price:{ticker}"
+    cached = _cache_get(ck, ttl=60)
+    if cached is not None:
+        return cached
+    try:
+        tk = yf.Ticker(ticker)
+        info = tk.info if hasattr(tk, 'info') else {}
+        if not isinstance(info, dict):
+            info = {}
+        price = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('previousClose')
+        if price is None:
+            # fallback: 尝试获取快速报价
             try:
-                _cache_set(f"sm:stock:{cusip}", out)
+                fast_info = tk.fast_info if hasattr(tk, 'fast_info') else None
+                if fast_info is not None:
+                    price = getattr(fast_info, 'last_price', None) or getattr(fast_info, 'regular_market_previous_close', None)
             except Exception:
                 pass
-            return JSONResponse(out, headers={"X-SM-Source": "upstash", "X-SM-Snapshot-Ts": str(ts or "")})
+        if price is None:
+            return None
+        try:
+            price = float(price)
+        except Exception:
+            return None
+        change_pct = info.get('regularMarketChangePercent') or info.get('regularMarketChange')
+        try:
+            change_pct = float(change_pct) if change_pct is not None else None
+        except Exception:
+            change_pct = None
+        currency = str(info.get('currency') or 'USD')
+        market_state = str(info.get('marketState') or 'REGULAR')
+        result = {
+            "price": float(price),
+            "change_pct": float(change_pct) if change_pct is not None else None,
+            "currency": currency,
+            "market_state": market_state,
+        }
+        _cache_set(ck, result)
+        return result
+    except Exception:
+        return None
 
-    ck = f"sm:stock:{cusip}"
-    cached = _cache_get(ck, SEC_EDGAR_CACHE_TTL_SEC)
-    if isinstance(cached, dict) and cached.get("ok"):
-        ts = cached.get("snapshot_ts") if isinstance(cached, dict) else None
-        out = dict(cached)
-        out.setdefault("data_source", "memory")
-        out.setdefault("snapshot_ts", ts)
-        return JSONResponse(out, headers={"X-SM-Source": "memory", "X-SM-Snapshot-Ts": str(out.get("snapshot_ts") or "")})
+
+def _cusip_to_ticker_via_finnhub(cusip: str) -> Optional[str]:
+    """
+    使用 Finnhub API 的 /search 接口将 CUSIP 映射为股票 Ticker。
+    优先选择 type 为 "Common Stock" 且 exchange 为美国市场的结果。
+    结果缓存 7 天。
+    """
+    cusip = (cusip or "").strip().upper()
+    if not cusip:
+        return None
+    ck = f"finnhub:cusip2tk:{cusip}"
+    cached = _cache_get(ck, ttl=86400 * 7)
+    if isinstance(cached, str) and cached:
+        return cached
+    client = _get_finnhub_client()
+    if client is None:
+        return None
+    try:
+        result = client.symbol_lookup(cusip)
+        if not isinstance(result, dict):
+            return None
+        items = result.get("result")
+        if not isinstance(items, list) or not items:
+            return None
+        # 优先选择 Common Stock + 美国交易所
+        best = None
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            sym = str(item.get("symbol") or "").strip().upper()
+            if not sym:
+                continue
+            itype = str(item.get("type") or "")
+            exchange = str(item.get("exchange") or "").upper()
+            mic = str(item.get("mic") or "").upper()
+            # 强匹配：Common Stock + US
+            if itype == "Common Stock" and ("US" in exchange or exchange in ("XNYS", "XNAS", "XASE", "BATS", "ARCX")):
+                best = sym
+                break
+            # 次匹配：Common Stock
+            if itype == "Common Stock" and best is None:
+                best = sym
+            # 再次：只要 exchange 是美国
+            if best is None and (exchange.startswith("US") or exchange in ("XNYS", "XNAS", "XASE", "BATS", "ARCX")):
+                best = sym
+        # 兜底：第一个结果
+        if best is None:
+            first = items[0]
+            best = str((isinstance(first, dict) and first.get("symbol")) or "").strip().upper() or None
+        if best:
+            _cache_set(ck, best)
+            return best
+        return None
+    except Exception:
+        return None
+
+
+def _yf_get_indicators(ticker: str) -> Optional[Dict[str, Any]]:
+    """
+    使用 yfinance 获取股票当前指标（实时价格 + 财务指标）。
+    返回完整指标面板数据，缓存 120 秒。
+    """
+    if yf is None or not ticker:
+        return None
+    ticker = (ticker or "").strip().upper()
+    ck = f"yf:indicators:{ticker}"
+    cached = _cache_get(ck, ttl=120)
+    if isinstance(cached, dict) and cached.get("ticker") == ticker:
+        return cached
+    try:
+        tk = yf.Ticker(ticker)
+        info = tk.info if hasattr(tk, "info") else {}
+        if not isinstance(info, dict):
+            info = {}
+
+        # 价格字段
+        current_price = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
+        try: current_price = float(current_price) if current_price is not None else None
+        except Exception: current_price = None
+
+        previous_close = info.get("previousClose") or info.get("regularMarketPreviousClose")
+        try: previous_close = float(previous_close) if previous_close is not None else None
+        except Exception: previous_close = None
+
+        # 市值
+        market_cap = info.get("marketCap")
+        try: market_cap = float(market_cap) if market_cap is not None else None
+        except Exception: market_cap = None
+
+        # PE
+        pe_trailing = info.get("trailingPE")
+        try: pe_trailing = float(pe_trailing) if pe_trailing is not None else None
+        except Exception: pe_trailing = None
+
+        pe_forward = info.get("forwardPE")
+        try: pe_forward = float(pe_forward) if pe_forward is not None else None
+        except Exception: pe_forward = None
+
+        # EPS
+        eps_trailing = info.get("trailingEps")
+        try: eps_trailing = float(eps_trailing) if eps_trailing is not None else None
+        except Exception: eps_trailing = None
+
+        # ROE
+        roe = info.get("returnOnEquity")
+        try: roe = float(roe) if roe is not None else None
+        except Exception: roe = None
+
+        # Beta
+        beta = info.get("beta")
+        try: beta = float(beta) if beta is not None else None
+        except Exception: beta = None
+
+        # 52周高低
+        fifty_two_week_high = info.get("fiftyTwoWeekHigh")
+        try: fifty_two_week_high = float(fifty_two_week_high) if fifty_two_week_high is not None else None
+        except Exception: fifty_two_week_high = None
+
+        fifty_two_week_low = info.get("fiftyTwoWeekLow")
+        try: fifty_two_week_low = float(fifty_two_week_low) if fifty_two_week_low is not None else None
+        except Exception: fifty_two_week_low = None
+
+        # 成交量
+        volume = info.get("volume") or info.get("regularMarketVolume")
+        try: volume = int(volume) if volume is not None else None
+        except Exception: volume = None
+
+        average_volume = info.get("averageVolume") or info.get("averageDailyVolume10Day")
+        try: average_volume = int(average_volume) if average_volume is not None else None
+        except Exception: average_volume = None
+
+        # 分析师目标价
+        target_mean_price = info.get("targetMeanPrice")
+        try: target_mean_price = float(target_mean_price) if target_mean_price is not None else None
+        except Exception: target_mean_price = None
+
+        # 分析师建议
+        recommendation = info.get("recommendationKey") or info.get("recommendationMean")
+        if recommendation is not None:
+            try:
+                if isinstance(recommendation, str):
+                    recommendation = recommendation
+                else:
+                    recommendation = str(recommendation)
+            except Exception:
+                recommendation = None
+
+        # 公司名
+        company_name = (info.get("longName") or info.get("shortName") or ticker)
+
+        # 货币
+        currency = str(info.get("currency") or "USD")
+
+        result = {
+            "ticker": ticker,
+            "company_name": str(company_name),
+            "current_price": current_price,
+            "previous_close": previous_close,
+            "market_cap": market_cap,
+            "pe_trailing": pe_trailing,
+            "pe_forward": pe_forward,
+            "eps_trailing": eps_trailing,
+            "roe": roe,
+            "beta": beta,
+            "fifty_two_week_high": fifty_two_week_high,
+            "fifty_two_week_low": fifty_two_week_low,
+            "volume": volume,
+            "average_volume": average_volume,
+            "target_mean_price": target_mean_price,
+            "recommendation": recommendation,
+            "currency": currency,
+            "last_updated": int(time.time()),
+        }
+        _cache_set(ck, result)
+        return result
+    except Exception as e:
+        # 检查是否是速率限制错误
+        err_type = type(e).__name__
+        err_str = str(e)[:200]
+        if "RateLimit" in err_type or "Too Many Requests" in err_str or "rate limited" in err_str.lower():
+            return {
+                "ticker": ticker,
+                "error": "yfinance_rate_limited",
+                "error_type": err_type,
+                "error_message": "Yahoo Finance API 速率限制，请稍后重试",
+                "last_updated": int(time.time()),
+            }
+        return None
+
+
+def _resolve_cusip_to_indicators(cusip: str) -> Dict[str, Any]:
+    """
+    CUSIP → Ticker → 指标 的完整解析链：
+    1) 本地映射表
+    2) Finnhub API
+    3) 13F issuer 推导
+    然后调用 yfinance 获取当前指标。
+    """
+    indicators = None
+    resolved_ticker = None
+    resolved_method = ""
+
+    # 策略1: 本地映射表
+    from_map = _CUSIP_TICKER_MAP.get(cusip)
+    if from_map:
+        indicators = _yf_get_indicators(from_map)
+        if indicators:
+            resolved_ticker = from_map
+            resolved_method = "local_map"
+
+    # 策略2: Finnhub API
+    if indicators is None or (indicators and indicators.get("error")):
+        finn_ticker = _cusip_to_ticker_via_finnhub(cusip)
+        if finn_ticker:
+            indicators = _yf_get_indicators(finn_ticker)
+            if indicators:
+                resolved_ticker = finn_ticker
+                resolved_method = "finnhub"
+
+    # 策略3: 13F issuer → ticker 推导
+    if indicators is None or (indicators and indicators.get("error")):
+        # 尝试通过 13F 找到 issuer
+        issuer = ""
+        for inst in _smartmoney_get_institutions_meta():
+            cik = str(inst.get("cik") or "")
+            if not cik:
+                continue
+            try:
+                cur = _sec_get_13f_holdings_by_cik(cik, filing_index=0)
+                hs = cur.get("holdings") if isinstance(cur, dict) and cur.get("ok") else None
+                if isinstance(hs, list):
+                    for h in hs:
+                        if isinstance(h, dict) and str(h.get("cusip") or "").strip().upper() == cusip:
+                            issuer = str(h.get("issuer") or "").strip()
+                            break
+                if issuer:
+                    break
+            except Exception:
+                continue
+        if issuer:
+            yf_ticker = _yf_search_issuer(issuer)
+            if yf_ticker:
+                indicators = _yf_get_indicators(yf_ticker)
+                if indicators:
+                    resolved_ticker = yf_ticker
+                    resolved_method = "13f_issuer"
+
+    return {
+        "indicators": indicators,
+        "resolved_ticker": resolved_ticker,
+        "resolved_method": resolved_method,
+    }
+
+# ==================== Stock Holders 数据缓存 ====================
+_SMARTMONEY_HOLDERS_SNAPSHOT: Dict[str, Any] = {}
+_SMARTMONEY_HOLDERS_SNAPSHOT_LOCK = threading.Lock()
+SMARTMONEY_HOLDERS_SNAPSHOT_KEY = (os.getenv("SMARTMONEY_HOLDERS_SNAPSHOT_KEY") or "smartmoney:holders:snapshot:v1").strip()
+
+def _build_holders_data(cusip: str) -> Dict[str, Any]:
+    """从 SEC EDGAR 实时构建 holders 数据"""
+    # 加载机构中文名映射
+    cn_name_map: Dict[str, str] = {}
+    try:
+        json_path = os.path.join(os.path.dirname(__file__), "institutions_50.json")
+        if os.path.exists(json_path):
+            with open(json_path, "r", encoding="utf-8") as f:
+                file_items = json.load(f)
+            if isinstance(file_items, list):
+                for item in file_items:
+                    if isinstance(item, dict):
+                        name = str(item.get("name") or "").strip()
+                        cn_name = str(item.get("cn_name") or "").strip()
+                        if name and cn_name:
+                            cn_name_map[name.lower()] = cn_name
+    except Exception:
+        pass
+
     holders: List[Dict[str, Any]] = []
     best_issuer = ""
     for inst in _smartmoney_get_institutions_meta():
@@ -1734,30 +2644,2105 @@ def api_smartmoney_stock_detail(ticker: str = "") -> JSONResponse:
             holders.append({
                 "inst_id": iid,
                 "inst_name": iname,
+                "cn_name": cn_name_map.get(iname.lower(), ""),
                 "weight": wt,
                 "value_usd": val,
                 "qoq_value_change": val - prev_val,
             })
-    # 页面展示口径为“按占比（weight）”，此处也按 weight 降序排序，保持一致性
     holders.sort(
-        key=lambda x: (
-            float(x.get("weight") or 0.0),
-            float(x.get("value_usd") or 0.0),
-        ),
+        key=lambda x: (float(x.get("weight") or 0.0), float(x.get("value_usd") or 0.0)),
         reverse=True,
     )
-    stock = {
+    return {
         "cusip": cusip,
         "issuer": best_issuer,
-        "sector": "",
-        "price": None,
-        "desc": "",
+        "holders": holders,
+        "ts": time.time(),
     }
-    resp_obj = {"ok": True, "stock": stock, "holders": holders}
-    resp_obj["data_source"] = "live"
-    resp_obj["snapshot_ts"] = None
-    _cache_set(ck, resp_obj)
-    return JSONResponse(resp_obj, headers={"X-SM-Source": "live", "X-SM-Snapshot-Ts": ""})
+
+def api_smartmoney_stock_holders(
+    ticker: str = "",
+    refresh: bool = Query(False, alias="refresh"),
+) -> JSONResponse:
+    """
+    获取股票的机构持有（按占比）
+    
+    数据源优先级：
+    1. 内存快照（本进程缓存）
+    2. SQLite 数据库缓存（持久化，重启后恢复）
+    3. SEC EDGAR 实时获取
+    
+    Args:
+        ticker: 股票代码或 CUSIP
+        refresh: 强制刷新，从 SEC 重新获取并更新缓存和数据库
+    """
+    cusip = re.sub(r"\s+", "", (ticker or "").strip().upper())
+    if not cusip:
+        return JSONResponse({"ok": False, "error": "missing_cusip"}, status_code=400)
+    
+    ttl_sec = max(0, int(SEC_EDGAR_CACHE_TTL_SEC) * 6) if SEC_EDGAR_CACHE_TTL_SEC else 21600
+    
+    # 强制刷新模式：直接获取最新数据
+    if refresh:
+        # 先清除 SEC 缓存，强制重新请求
+        try:
+            with _CACHE_LOCK:
+                keys_to_del = [k for k in list(_CACHE.keys()) if k.startswith("sec:13f:holdings:") or k.startswith("sec:submissions:") or k.startswith("sec:index:")]
+                for k in keys_to_del:
+                    del _CACHE[k]
+        except Exception:
+            pass
+        data = _build_holders_data(cusip)
+        data["ok"] = True
+        data["data_source"] = "live"
+        # 写入内存缓存
+        with _SMARTMONEY_HOLDERS_SNAPSHOT_LOCK:
+            _SMARTMONEY_HOLDERS_SNAPSHOT[cusip] = data
+        # 写入数据库（持久化）
+        db_ok = False
+        try:
+            db_ok = _db_set_stock_holders(cusip, data, ttl_sec=ttl_sec)
+        except Exception as e:
+            data["db_error"] = str(e)
+        data["db_saved"] = db_ok
+        return JSONResponse(data, headers={"X-SM-Source": "live"})
+    
+    # 检查内存缓存
+    stale_limit_sec = ttl_sec
+    snap_ts: float = 0.0
+    snap_items: Optional[List[Dict[str, Any]]] = None
+    snap_issuer: str = ""
+    try:
+        with _SMARTMONEY_HOLDERS_SNAPSHOT_LOCK:
+            snap = _SMARTMONEY_HOLDERS_SNAPSHOT.get(cusip)
+            if isinstance(snap, dict):
+                snap_ts = float(snap.get("ts") or 0.0)
+                snap_items = snap.get("holders")
+                snap_issuer = snap.get("issuer", "")
+    except Exception:
+        pass
+    
+    # 使用内存缓存数据（如果未过期）
+    if isinstance(snap_items, list) and snap_items and (not stale_limit_sec or (time.time() - snap_ts) < stale_limit_sec):
+        return JSONResponse({
+            "ok": True,
+            "cusip": cusip,
+            "issuer": snap_issuer,
+            "holders": snap_items,
+            "data_source": "memory",
+            "ts": snap_ts if snap_ts else None,
+        }, headers={"X-SM-Source": "memory", "X-SM-Snapshot-Ts": str(snap_ts or "")})
+    
+    # 检查数据库缓存
+    try:
+        db_data = _db_get_stock_holders(cusip)
+        if db_data and isinstance(db_data.get("holders"), list) and db_data["holders"]:
+            # 写入内存缓存
+            with _SMARTMONEY_HOLDERS_SNAPSHOT_LOCK:
+                _SMARTMONEY_HOLDERS_SNAPSHOT[cusip] = db_data
+            return JSONResponse({
+                "ok": True,
+                "cusip": cusip,
+                "issuer": db_data.get("issuer", ""),
+                "holders": db_data["holders"],
+                "data_source": "db",
+                "ts": db_data.get("ts"),
+            }, headers={"X-SM-Source": "db"})
+    except Exception:
+        pass
+    
+    # 从 SEC 实时获取
+    data = _build_holders_data(cusip)
+    data["ok"] = True
+    data["data_source"] = "live"
+    
+    # 写入内存缓存
+    try:
+        with _SMARTMONEY_HOLDERS_SNAPSHOT_LOCK:
+            _SMARTMONEY_HOLDERS_SNAPSHOT[cusip] = data
+    except Exception:
+        pass
+    
+    # 写入数据库（持久化）
+    try:
+        _db_set_stock_holders(cusip, data, ttl_sec=ttl_sec)
+    except Exception:
+        pass
+    
+    return JSONResponse(data, headers={"X-SM-Source": "live"})
+
+
+# ==================== SEC EDGAR 公司财报分析功能 ====================
+
+def _sec_get_company_facts(cik: str, max_retries: int = 3, delay: float = 0.5) -> Optional[Dict[str, Any]]:
+    """
+    从 SEC EDGAR API 获取公司财务数据 (companyfacts.json)
+    
+    Args:
+        cik: 公司 CIK (10位数字格式，如 0000320193)
+        max_retries: 最大重试次数
+        delay: 请求间隔延时（秒）
+    
+    Returns:
+        companyfacts.json 解析后的字典，失败返回 None
+    """
+    cik_clean = (cik or "").strip()
+    if not cik_clean:
+        return None
+    
+    # 确保 CIK 是 10 位格式
+    cik_padded = cik_clean.zfill(10)
+    
+    # 缓存 key
+    cache_key = f"sec:companyfacts:{cik_padded}"
+    ttl = 86400 * 7  # 7 天缓存
+    
+    # 检查缓存
+    cached = _cache_get(cache_key, ttl)
+    if isinstance(cached, dict):
+        return cached
+    
+    # SEC EDGAR API URL
+    url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik_padded}.json"
+    
+    headers = _sec_headers()
+    
+    # 重试机制
+    for attempt in range(max_retries):
+        try:
+            # 延时避免请求过快
+            if attempt > 0:
+                time.sleep(delay * (2 ** attempt))  # 指数退避
+            
+            resp = HTTP.get(url, headers=headers, timeout=(10, 60))
+            resp.raise_for_status()
+            data = resp.json()
+            
+            # 存入缓存
+            _cache_set(cache_key, data)
+            return data
+            
+        except Exception as e:
+            if attempt == max_retries - 1:
+                break
+            continue
+    
+    return None
+
+
+def _sec_get_submissions(cik: str, max_retries: int = 3, delay: float = 0.5) -> Optional[Dict[str, Any]]:
+    """
+    从 SEC EDGAR API 获取公司提交的 filings (submissions.json)
+    
+    Args:
+        cik: 公司 CIK (10位数字格式)
+        max_retries: 最大重试次数
+        delay: 请求间隔延时
+    
+    Returns:
+        submissions.json 解析后的字典，失败返回 None
+    """
+    cik_clean = (cik or "").strip()
+    if not cik_clean:
+        return None
+    
+    cik_padded = cik_clean.zfill(10)
+    cache_key = f"sec:submissions:{cik_padded}"
+    ttl = 86400 * 1  # 1 天缓存
+    
+    cached = _cache_get(cache_key, ttl)
+    if isinstance(cached, dict):
+        return cached
+    
+    url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
+    headers = _sec_headers()
+    
+    for attempt in range(max_retries):
+        try:
+            if attempt > 0:
+                time.sleep(delay * (2 ** attempt))
+            
+            resp = HTTP.get(url, headers=headers, timeout=(10, 30))
+            resp.raise_for_status()
+            data = resp.json()
+            
+            _cache_set(cache_key, data)
+            return data
+            
+        except Exception:
+            if attempt == max_retries - 1:
+                break
+            continue
+    
+    return None
+
+
+def _extract_financial_metrics(
+    company_facts: Dict[str, Any],
+    period_type: str = "annual",
+    quarter_id: str = "",
+    annual_id: str = "",
+    eps_data: Dict[str, Any] = None
+) -> Dict[str, Any]:
+    """
+    从 companyfacts.json 中提取关键财务指标
+    
+    Args:
+        company_facts: SEC EDGAR companyfacts.json 数据
+        period_type: "annual" (年报 10-K) 或 "quarterly" (季报 10-Q)
+        quarter_id: 具体季度ID，如 "2026Q1"，用于筛选该季度的数据
+        annual_id: 具体年报ID，如 "FY2025"，用于筛选该年度的数据
+        eps_data: EPS数据结构，包含 basic_eps 和 diluted_eps
+    
+    提取的数据包括：
+    - 盈利能力 (Income Statement)
+    - 资产负债表 (Balance Sheet)
+    - 现金流量表 (Cash Flow)
+    - 其他重要指标
+    """
+    if not isinstance(company_facts, dict):
+        return {"error": "invalid_data"}
+    
+    facts = company_facts.get("facts", {})
+    if not isinstance(facts, dict):
+        return {"error": "no_facts_data"}
+    
+    # 使用 us-gaap 或 ifrs-full  taxonomy
+    gaap = facts.get("us-gaap", {})
+    ifrs = facts.get("ifrs-full", {})
+    
+    # 合并数据（优先使用 us-gaap）
+    data = {**ifrs, **gaap}
+    
+    # 根据 period_type 确定筛选条件
+    # annual: 10-K 年报，取 fiscal period FY (全年)
+    # quarterly: 10-Q 季报，取 fiscal period Q1/Q2/Q3/Q4
+    is_annual = period_type == "annual"
+    target_quarter = quarter_id  # 如 "2026Q1"
+    
+    def _filter_by_period(item: Dict[str, Any]) -> bool:
+        """根据年报/季报筛选数据"""
+        form = str(item.get("form", ""))
+        fp = str(item.get("fp", "")).upper()
+        fy = str(item.get("fy", ""))
+        
+        if is_annual:
+            # 年报：10-K 或 fiscal period 为 FY
+            return form == "10-K" or fp == "FY"
+        else:
+            # 季报：10-Q 且 fiscal period 为 Q1/Q2/Q3/Q4
+            is_quarter = form == "10-Q" or fp in ["Q1", "Q2", "Q3", "Q4"]
+            if not is_quarter:
+                return False
+            # 如果指定了 quarter_id，则只匹配该季度
+            if target_quarter:
+                item_quarter = f"{fy}{fp}"
+                return item_quarter == target_quarter
+            return True
+    
+    def _get_latest_value(concept: str, unit_preference: List[str] = None) -> Optional[float]:
+        """获取某个财务概念的最新值（根据 period_type 筛选）"""
+        concept_data = data.get(concept)
+        if not isinstance(concept_data, dict):
+            return None
+        
+        units = concept_data.get("units", {})
+        if not isinstance(units, dict):
+            return None
+        
+        # 确定单位优先级（默认 USD）
+        unit_prefs = unit_preference or ["USD", "usd", "shares", "Shares"]
+        unit_data = None
+        for unit in unit_prefs:
+            unit_data = units.get(unit)
+            if isinstance(unit_data, list) and unit_data:
+                break
+        
+        if not isinstance(unit_data, list) or not unit_data:
+            return None
+        
+        # 按 filed 日期排序，并根据 period_type 筛选
+        sorted_items = sorted(
+            unit_data,
+            key=lambda x: str(x.get("filed", "")),
+            reverse=True
+        )
+        
+        for item in sorted_items:
+            if not _filter_by_period(item):
+                continue
+            val = item.get("val")
+            if val is not None:
+                return float(val)
+        
+        # 如果筛选后没有数据，回退到使用所有数据
+        for item in sorted_items:
+            val = item.get("val")
+            if val is not None:
+                return float(val)
+        
+        return None
+    
+    def _get_historical_values(concept: str, limit: int = 5, unit_preference: List[str] = None) -> List[Dict[str, Any]]:
+        """获取某个财务概念的历史值列表（根据 period_type 筛选）"""
+        concept_data = data.get(concept)
+        if not isinstance(concept_data, dict):
+            return []
+        
+        units = concept_data.get("units", {})
+        if not isinstance(units, dict):
+            return []
+        
+        # 确定单位优先级（默认 USD）
+        unit_prefs = unit_preference or ["USD", "usd", "shares", "Shares"]
+        unit_data = None
+        for unit in unit_prefs:
+            unit_data = units.get(unit)
+            if isinstance(unit_data, list) and unit_data:
+                break
+        
+        if not isinstance(unit_data, list):
+            return []
+        
+        # 按 filed 日期排序，去重，并根据 period_type 筛选
+        seen = set()
+        results = []
+        for item in sorted(unit_data, key=lambda x: str(x.get("filed", "")), reverse=True):
+            filed = str(item.get("filed", ""))
+            if filed in seen:
+                continue
+            
+            # 年报/季报筛选
+            if not _filter_by_period(item):
+                continue
+            
+            seen.add(filed)
+            
+            val = item.get("val")
+            if val is not None:
+                results.append({
+                    "filed": filed,
+                    "fy": item.get("fy"),
+                    "fp": item.get("fp"),
+                    "val": float(val),
+                    "form": item.get("form"),
+                })
+            
+            if len(results) >= limit:
+                break
+        
+        # 如果筛选后数据不足，补充非筛选数据
+        if len(results) < limit:
+            for item in sorted(unit_data, key=lambda x: str(x.get("filed", "")), reverse=True):
+                filed = str(item.get("filed", ""))
+                if filed in seen:
+                    continue
+                seen.add(filed)
+                val = item.get("val")
+                if val is not None:
+                    results.append({
+                        "filed": filed,
+                        "fy": item.get("fy"),
+                        "fp": item.get("fp"),
+                        "val": float(val),
+                        "form": item.get("form"),
+                    })
+                if len(results) >= limit:
+                    break
+        
+        return results
+    
+    # ============== A. 盈利能力指标 ==============
+    # 使用统一的季度计算逻辑获取收入指标（与EPS相同逻辑）
+    
+    # Revenue / Total Revenue
+    revenue_data = _get_quarterly_financial_data(company_facts, [
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "Revenues",
+        "SalesRevenueNet",
+        "TotalRevenues"
+    ])
+    
+    # Gross Profit
+    gross_profit_data = _get_quarterly_financial_data(company_facts, [
+        "GrossProfit"
+    ])
+    
+    # Operating Income
+    operating_income_data = _get_quarterly_financial_data(company_facts, [
+        "OperatingIncomeLoss"
+    ])
+    
+    # Net Income
+    net_income_data = _get_quarterly_financial_data(company_facts, [
+        "NetIncomeLoss",
+        "ProfitLoss"
+    ])
+    
+    # 根据当前选中的period获取对应的值（与EPS逻辑一致）
+    def _get_value_from_quarterly_data(data: Dict, period_type: str, 
+                                       quarter_id: str, annual_id: str) -> Optional[float]:
+        """从季度数据中获取对应期间的值"""
+        if not data or not data.get("quarters"):
+            return None
+        
+        if period_type == "annual":
+            # 年报模式：获取对应年份的数据
+            if annual_id:
+                target_fy = int(annual_id.replace("FY", ""))
+                for a in data.get("annual_list", []):
+                    if a.get("fy") == target_fy:
+                        return a.get("value")
+            else:
+                # 未指定年份，取最新年报
+                if data.get("latest_annual"):
+                    return data["latest_annual"].get("value")
+        else:
+            # 季报模式：根据 quarter_id 找对应季度
+            for q in data.get("quarters", []):
+                if quarter_id:
+                    if q.get("quarter") == quarter_id or q.get("quarter_label") == quarter_id:
+                        return q.get("value")
+                    if quarter_id.startswith("20") and q.get("quarter") == quarter_id:
+                        return q.get("value")
+                    if not quarter_id.startswith("20") and q.get("quarter_label") == quarter_id:
+                        return q.get("value")
+        return None
+    
+    # 获取当前选中期的指标值
+    revenue = _get_value_from_quarterly_data(revenue_data, period_type, quarter_id, annual_id)
+    gross_profit = _get_value_from_quarterly_data(gross_profit_data, period_type, quarter_id, annual_id)
+    operating_income = _get_value_from_quarterly_data(operating_income_data, period_type, quarter_id, annual_id)
+    net_income = _get_value_from_quarterly_data(net_income_data, period_type, quarter_id, annual_id)
+    
+    # 如果Gross Profit缺失但Revenue和Cost of Revenue有数据，尝试计算
+    cost_of_revenue = None
+    if gross_profit is None and revenue is not None:
+        cost_of_revenue_data = _get_quarterly_financial_data(company_facts, [
+            "CostOfRevenue",
+            "CostOfGoodsAndServicesSold"
+        ])
+        cost_of_revenue = _get_value_from_quarterly_data(cost_of_revenue_data, period_type, quarter_id, annual_id)
+        if cost_of_revenue is not None:
+            gross_profit = revenue - cost_of_revenue
+    
+    # EPS - 从 eps_data 中获取当前选中期的值
+    eps_basic = None
+    eps_diluted = None
+    
+    if eps_data:
+        is_annual_period = period_type == "annual"
+        
+        if is_annual_period:
+            # 年报模式：根据 annual_id 获取对应年份的 EPS
+            basic_info = eps_data.get("basic_eps", {})
+            diluted_info = eps_data.get("diluted_eps", {})
+            
+            if annual_id:
+                # annual_id 格式如 "FY2025"，提取年份
+                target_fy = int(annual_id.replace("FY", ""))
+                # 从 annual_list 中查找对应年份
+                for a in basic_info.get("annual_list", []):
+                    if a.get("fy") == target_fy:
+                        eps_basic = a.get("value")
+                        break
+                for a in diluted_info.get("annual_list", []):
+                    if a.get("fy") == target_fy:
+                        eps_diluted = a.get("value")
+                        break
+            else:
+                # 未指定年份，取最新年报
+                if basic_info.get("latest_annual"):
+                    eps_basic = basic_info["latest_annual"].get("value")
+                if diluted_info.get("latest_annual"):
+                    eps_diluted = diluted_info["latest_annual"].get("value")
+        else:
+            # 季报模式：根据 quarter_id 找对应季度
+            basic_info = eps_data.get("basic_eps", {})
+            diluted_info = eps_data.get("diluted_eps", {})
+            
+            # 在 quarters 列表中查找匹配的季度
+            for q in basic_info.get("quarters", []):
+                # 匹配 quarter_id (如 "2026Q1") 或 quarter_label (如 "26Q1")
+                q_match = False
+                if quarter_id:
+                    # quarter_id 可能是 "2026Q1" 格式
+                    if q.get("quarter") == quarter_id or q.get("quarter_label") == quarter_id:
+                        q_match = True
+                    # 也可能是 "26Q1" 格式
+                    if quarter_id.startswith("20") and q.get("quarter") == quarter_id:
+                        q_match = True
+                    if not quarter_id.startswith("20") and q.get("quarter_label") == quarter_id:
+                        q_match = True
+                if q_match:
+                    eps_basic = q.get("value")
+                    break
+            
+            for q in diluted_info.get("quarters", []):
+                q_match = False
+                if quarter_id:
+                    if q.get("quarter") == quarter_id or q.get("quarter_label") == quarter_id:
+                        q_match = True
+                    if quarter_id.startswith("20") and q.get("quarter") == quarter_id:
+                        q_match = True
+                    if not quarter_id.startswith("20") and q.get("quarter_label") == quarter_id:
+                        q_match = True
+                if q_match:
+                    eps_diluted = q.get("value")
+                    break
+    
+    # ============== B. 资产负债表指标 ==============
+    # 使用基于 frame 的新逻辑获取资产负债表数据（时点数据）
+    
+    # Total Assets
+    total_assets_data = _get_balance_sheet_data(company_facts, ["Assets"])
+    
+    # Total Liabilities
+    total_liabilities_data = _get_balance_sheet_data(company_facts, ["Liabilities"])
+    
+    # Total Equity
+    total_equity_data = _get_balance_sheet_data(company_facts, ["StockholdersEquity", "Equity"])
+    
+    # Current Assets
+    current_assets_data = _get_balance_sheet_data(company_facts, ["AssetsCurrent"])
+    
+    # Current Liabilities
+    current_liabilities_data = _get_balance_sheet_data(company_facts, ["LiabilitiesCurrent"])
+    
+    # Cash & Equivalents
+    cash_data = _get_balance_sheet_data(company_facts, [
+        "CashAndCashEquivalentsAtCarryingValue",
+        "CashCashEquivalentsAndRestrictedCash",
+        "CashAndCashEquivalents"
+    ])
+    
+    # Total Debt
+    total_debt_data = _get_balance_sheet_data(company_facts, [
+        "LongTermDebt",
+        "LongTermDebtNoncurrent",
+        "DebtNoncurrent"
+    ])
+    
+    # 根据当前选中的 period 获取对应的值
+    def _get_balance_sheet_value(data: Dict, period_type: str,
+                                   quarter_id: str, annual_id: str) -> Optional[float]:
+        """从资产负债表数据中获取当前选中期的值"""
+        if not data:
+            return None
+        
+        if period_type == "annual":
+            # 年报模式
+            if annual_id:
+                target_fy = int(annual_id.replace("FY", ""))
+                for a in data.get("annual_list", []):
+                    if a.get("fy") == target_fy:
+                        return a.get("value")
+            else:
+                if data.get("latest_annual"):
+                    return data["latest_annual"].get("value")
+        else:
+            # 季报模式
+            for p in data.get("periods", []):
+                if quarter_id:
+                    if p.get("quarter") == quarter_id or p.get("quarter_label") == quarter_id:
+                        return p.get("value")
+                    if quarter_id.startswith("20") and p.get("quarter") == quarter_id:
+                        return p.get("value")
+                    if not quarter_id.startswith("20") and p.get("quarter_label") == quarter_id:
+                        return p.get("value")
+        return None
+    
+    # 获取当前选中期的指标值
+    total_assets = _get_balance_sheet_value(total_assets_data, period_type, quarter_id, annual_id)
+    total_liabilities = _get_balance_sheet_value(total_liabilities_data, period_type, quarter_id, annual_id)
+    total_equity = _get_balance_sheet_value(total_equity_data, period_type, quarter_id, annual_id)
+    current_assets = _get_balance_sheet_value(current_assets_data, period_type, quarter_id, annual_id)
+    current_liabilities = _get_balance_sheet_value(current_liabilities_data, period_type, quarter_id, annual_id)
+    cash = _get_balance_sheet_value(cash_data, period_type, quarter_id, annual_id)
+    total_debt = _get_balance_sheet_value(total_debt_data, period_type, quarter_id, annual_id)
+    
+    # ============== C. 现金流量表指标 ==============
+    # 使用统一的季度计算逻辑获取现金流量指标（与EPS相同逻辑）
+    
+    # Operating Cash Flow
+    operating_cash_flow_data = _get_quarterly_financial_data(company_facts, [
+        "NetCashProvidedByUsedInOperatingActivities",
+        "CashProvidedByUsedInOperatingActivities"
+    ])
+    
+    # Capital Expenditures
+    capex_data = _get_quarterly_financial_data(company_facts, [
+        "PaymentsToAcquirePropertyPlantAndEquipment",
+        "CapitalExpendituresIncurredButNotYetPaid"
+    ])
+    
+    # 获取当前选中期的指标值
+    operating_cash_flow = _get_value_from_quarterly_data(
+        operating_cash_flow_data, period_type, quarter_id, annual_id
+    )
+    capex = _get_value_from_quarterly_data(
+        capex_data, period_type, quarter_id, annual_id
+    )
+    
+    # Free Cash Flow = Operating CF - CapEx
+    free_cash_flow = None
+    if operating_cash_flow is not None and capex is not None:
+        free_cash_flow = operating_cash_flow - abs(capex)
+    
+    # ============== D. 其他重要指标 ==============
+    # Shares Outstanding (用于计算每股指标) - 使用与EPS相同的季度计算逻辑
+    shares_outstanding_data = _get_quarterly_financial_data(
+        company_facts,
+        [
+            "WeightedAverageNumberOfSharesOutstandingBasic",
+            "CommonStockSharesOutstanding",
+            "WeightedAverageNumberOfDilutedSharesOutstanding"
+        ],
+        unit_prefs=["shares", "Shares", "USD", "usd"]
+    )
+    
+    shares_outstanding = _get_value_from_quarterly_data(
+        shares_outstanding_data, period_type, quarter_id, annual_id
+    )
+    
+    # 计算利润率
+    gross_margin = None
+    operating_margin = None
+    net_margin = None
+    
+    if revenue and revenue > 0:
+        if gross_profit is not None:
+            gross_margin = gross_profit / revenue
+        if operating_income is not None:
+            operating_margin = operating_income / revenue
+        if net_income is not None:
+            net_margin = net_income / revenue
+    
+    # 计算财务健康指标
+    current_ratio = None
+    debt_to_equity = None
+    
+    if current_assets is not None and current_liabilities is not None and current_liabilities > 0:
+        current_ratio = current_assets / current_liabilities
+    
+    if total_debt is not None and total_equity is not None and total_equity > 0:
+        debt_to_equity = total_debt / total_equity
+    
+    # ROE, ROA
+    roe = None
+    roa = None
+    
+    if net_income is not None:
+        if total_equity is not None and total_equity > 0:
+            roe = net_income / total_equity
+        if total_assets is not None and total_assets > 0:
+            roa = net_income / total_assets
+    
+    # Book Value Per Share
+    book_value_per_share = None
+    if total_equity is not None and shares_outstanding is not None and shares_outstanding > 0:
+        book_value_per_share = total_equity / shares_outstanding
+    
+    # 获取历史数据用于计算增长率（尝试多个备选概念）
+    def _get_historical_with_fallback(concepts: List[str], limit: int = 10) -> List[Dict[str, Any]]:
+        """尝试多个概念名称获取历史数据，返回第一个有数据的"""
+        for concept in concepts:
+            history = _get_historical_values(concept, limit=limit)
+            if history and len(history) > 0:
+                return history
+        return []
+    
+    # 历史数据转换函数
+    def _convert_to_history_format(data: Dict, is_annual: bool = False) -> List[Dict[str, Any]]:
+        """将季度/年报数据转换为历史格式用于YoY计算"""
+        history = []
+        if is_annual:
+            # 年报模式：使用 annual_list
+            for a in data.get("annual_list", []):
+                history.append({
+                    "filed": a.get("end_date", ""),
+                    "fy": a.get("fy"),
+                    "fp": "FY",
+                    "val": a.get("value"),
+                    "form": a.get("form"),
+                })
+        else:
+            # 季报模式：使用 quarters
+            for q in data.get("quarters", []):
+                history.append({
+                    "filed": q.get("end_date", ""),
+                    "fy": q.get("fy"),
+                    "fp": q.get("fp"),
+                    "val": q.get("value"),
+                    "form": q.get("form"),
+                })
+        return history
+    
+    is_annual = period_type == "annual"
+    revenue_history = _convert_to_history_format(revenue_data, is_annual=is_annual)
+    net_income_history = _convert_to_history_format(net_income_data, is_annual=is_annual)
+    
+    # 计算 YoY 增长率
+    def _calc_yoy_growth(
+        history: List[Dict[str, Any]], 
+        is_quarterly_mode: bool = False,
+        target_quarter_id: str = "",
+        target_annual_id: str = ""
+    ) -> Optional[float]:
+        """
+        计算 YoY 增长率
+        
+        年报模式：按 fiscal year 去重，对比最近两年 (FY2024 vs FY2023)
+        季报模式：对比上年同期 (2026Q1 vs 2025Q1)
+        
+        基于当前选中的 quarter_id 或 annual_id 来计算，而不是总是取最新记录
+        """
+        if len(history) < 2:
+            return None
+        
+        if is_quarterly_mode:
+            # 季报模式：找到当前选中的季度和去年同期
+            # 从 quarter_id 解析 fy 和 fp
+            current_fy = None
+            current_fp = None
+            
+            if target_quarter_id:
+                # quarter_id 格式如 "CY2025Q1" 或 "25Q1"
+                if target_quarter_id.startswith("CY"):
+                    # CY2025Q1 -> fy=2025, fp=Q1
+                    match = re.match(r'CY(\d{4})Q([1-4])', target_quarter_id)
+                    if match:
+                        current_fy = int(match.group(1))
+                        current_fp = f"Q{match.group(2)}"
+                elif target_quarter_id.startswith("20"):
+                    # 2025Q1 -> fy=2025, fp=Q1
+                    match = re.match(r'(\d{4})Q([1-4])', target_quarter_id)
+                    if match:
+                        current_fy = int(match.group(1))
+                        current_fp = f"Q{match.group(2)}"
+                else:
+                    # 25Q1 -> 需要找到对应的完整年份
+                    # 从 history 中查找匹配的 quarter_label
+                    for item in history:
+                        if item.get("quarter_label") == target_quarter_id:
+                            current_fy = item.get("fy")
+                            current_fp = item.get("fp")
+                            break
+            
+            # 如果没有找到当前选中季度，使用 filed 最新的作为回退
+            if not current_fy or not current_fp:
+                sorted_items = sorted(history, key=lambda x: str(x.get("filed", "")), reverse=True)
+                current_item = sorted_items[0]
+                current_fy = current_item.get("fy")
+                current_fp = current_item.get("fp")
+            
+            if not current_fy or not current_fp:
+                return None
+            
+            # 找当前选中期的值
+            current_val = None
+            for item in history:
+                if item.get("fy") == current_fy and item.get("fp") == current_fp:
+                    current_val = item.get("val")
+                    break
+            
+            if current_val is None:
+                return None
+            
+            # 找上年同期（相同 fiscal period，前一年）
+            previous_fy = current_fy - 1
+            previous_val = None
+            for item in history:
+                if item.get("fy") == previous_fy and item.get("fp") == current_fp:
+                    previous_val = item.get("val")
+                    break
+            
+            if previous_val is None or previous_val == 0:
+                return None
+            
+            return (current_val - previous_val) / abs(previous_val)
+        else:
+            # 年报模式：基于选中的 annual_id 计算 YoY
+            target_fy = None
+            if target_annual_id and target_annual_id.startswith("FY"):
+                target_fy = int(target_annual_id.replace("FY", ""))
+            
+            # 按 fiscal year 去重
+            fy_map = {}
+            for item in history:
+                fy = item.get("fy")
+                if fy and fy not in fy_map:
+                    fy_map[fy] = item.get("val")
+            
+            if target_fy:
+                # 计算选中年的 YoY
+                current = fy_map.get(target_fy)
+                previous = fy_map.get(target_fy - 1)
+                
+                if current is None or previous is None or previous == 0:
+                    return None
+                
+                return (current - previous) / abs(previous)
+            else:
+                # 没有选中年报，对比最近两年
+                fys = sorted(fy_map.keys(), reverse=True)
+                if len(fys) < 2:
+                    return None
+                
+                current = fy_map.get(fys[0])
+                previous = fy_map.get(fys[1])
+                
+                if current is None or previous is None or previous == 0:
+                    return None
+                
+                return (current - previous) / abs(previous)
+    
+    is_annual = period_type == "annual"
+    revenue_yoy = _calc_yoy_growth(
+        revenue_history, 
+        is_quarterly_mode=not is_annual,
+        target_quarter_id=quarter_id,
+        target_annual_id=annual_id
+    )
+    net_income_yoy = _calc_yoy_growth(
+        net_income_history, 
+        is_quarterly_mode=not is_annual,
+        target_quarter_id=quarter_id,
+        target_annual_id=annual_id
+    )
+    
+    return {
+        "ok": True,
+        "profitability": {
+            "revenue": revenue,
+            "gross_profit": gross_profit,
+            "operating_income": operating_income,
+            "net_income": net_income,
+            "eps_basic": eps_basic,
+            "eps_diluted": eps_diluted,
+            "gross_margin": gross_margin,
+            "operating_margin": operating_margin,
+            "net_margin": net_margin,
+        },
+        "balance_sheet": {
+            "total_assets": total_assets,
+            "total_liabilities": total_liabilities,
+            "total_equity": total_equity,
+            "current_assets": current_assets,
+            "current_liabilities": current_liabilities,
+            "cash_and_equivalents": cash,
+            "total_debt": total_debt,
+            "current_ratio": current_ratio,
+            "debt_to_equity": debt_to_equity,
+        },
+        "cash_flow": {
+            "operating_cash_flow": operating_cash_flow,
+            "capital_expenditures": capex,
+            "free_cash_flow": free_cash_flow,
+        },
+        "other_metrics": {
+            "roe": roe,
+            "roa": roa,
+            "shares_outstanding": shares_outstanding,
+            "book_value_per_share": book_value_per_share,
+            "revenue_yoy_growth": revenue_yoy,
+            "net_income_yoy_growth": net_income_yoy,
+        },
+        "raw_data_available": {
+            "revenue_count": len(revenue_history),
+            "net_income_count": len(net_income_history),
+        },
+    }
+
+
+def _get_quarterly_eps_direct(company_facts: Dict[str, Any], concept: str) -> List[Dict[str, Any]]:
+    """
+    优先根据10-Q/10-Q/A表单直接获取季度EPS数据
+    按照用户指定的逻辑：
+    1. 过滤有效记录（form in 10-Q, 10-Q/A, start/end/val not null）
+    2. 计算期间长度，只保留80-101天的季度数据
+    3. 转换为自然季度（CYYYYYQX）
+    4. 按CIK+calendar_quarter分组去重
+    5. 选择最终记录（filed最新，duration最接近91天）
+    """
+    from datetime import datetime
+    from collections import defaultdict
+    
+    facts = company_facts.get("facts", {})
+    if not isinstance(facts, dict):
+        return []
+    
+    gaap = facts.get("us-gaap", {})
+    ifrs = facts.get("ifrs-full", {})
+    data = {**ifrs, **gaap}
+    
+    concept_data = data.get(concept)
+    if not isinstance(concept_data, dict):
+        return []
+    
+    units = concept_data.get("units", {})
+    unit_data = units.get("USD/shares") or units.get("usd/shares") or units.get("USD") or units.get("usd")
+    if not isinstance(unit_data, list):
+        return []
+    
+    # STEP 1: 过滤有效记录
+    valid_forms = {"10-Q", "10-Q/A"}
+    valid_records = []
+    
+    for item in unit_data:
+        form = str(item.get("form", ""))
+        start = item.get("start", "")
+        end = item.get("end", "")
+        val = item.get("val")
+        
+        # 保留条件检查
+        if form not in valid_forms:
+            continue
+        if not start or not end or val is None:
+            continue
+        
+        # STEP 2: 计算期间长度
+        try:
+            start_dt = datetime.strptime(start, "%Y-%m-%d")
+            end_dt = datetime.strptime(end, "%Y-%m-%d")
+            duration_days = (end_dt - start_dt).days
+        except:
+            continue
+        
+        # STEP 3: 只保留季度EPS（80-101天）
+        if not (80 <= duration_days <= 101):
+            continue
+        
+        # STEP 4: 转换为自然季度
+        try:
+            month = end_dt.month
+            year = end_dt.year
+            if month <= 3:
+                calendar_quarter = f"{year}Q1"
+            elif month <= 6:
+                calendar_quarter = f"{year}Q2"
+            elif month <= 9:
+                calendar_quarter = f"{year}Q3"
+            else:
+                calendar_quarter = f"{year}Q4"
+        except:
+            continue
+        
+        filed = str(item.get("filed", ""))
+        
+        valid_records.append({
+            "value": float(val),
+            "start": start,
+            "end": end,
+            "filed": filed,
+            "duration_days": duration_days,
+            "calendar_quarter": calendar_quarter,
+            "form": form,
+            "frame": item.get("frame", ""),
+        })
+    
+    # STEP 5: 按calendar_quarter分组去重
+    quarter_groups = defaultdict(list)
+    for record in valid_records:
+        quarter_groups[record["calendar_quarter"]].append(record)
+    
+    # STEP 6: 选择最终记录（排序：filed最新，duration最接近91天）
+    def _duration_score(days):
+        """计算duration与91天的接近程度，越小越接近"""
+        return abs(days - 91)
+    
+    final_quarters = []
+    for quarter, records in quarter_groups.items():
+        if not records:
+            continue
+        
+        # 排序优先级：1. filed最新 2. duration最接近91天
+        records.sort(key=lambda x: (x["filed"], -_duration_score(x["duration_days"])), reverse=True)
+        best_record = records[0]
+        
+        # 生成quarter_id
+        year = quarter[:4]
+        q = quarter[4:]
+        q_id = f"CY{quarter}"
+        quarter_label = f"{year[-2:]}{q}"
+        
+        # 从calendar_quarter解析年份和季度
+        cal_year = int(quarter[:4])
+        cal_q = quarter[4:]
+        
+        final_quarters.append({
+            "quarter": q_id,
+            "quarter_label": quarter_label,
+            "form": best_record["form"],
+            "value": best_record["value"],
+            "end_date": best_record["end"],
+            "start_date": best_record["start"],
+            "frame": best_record["frame"],
+            "calendar_quarter": quarter,
+            "filed": best_record["filed"],
+            "duration_days": best_record["duration_days"],
+            "is_calculated": False,
+            "is_direct_quarterly": True,  # 标记为直接从10-Q获取的季度数据
+            "fy": cal_year,  # 财年使用日历年
+            "fp": cal_q,     # 财季使用日历年季度
+        })
+    
+    # 按end_date倒序排序
+    final_quarters.sort(key=lambda x: x["end_date"], reverse=True)
+    return final_quarters
+
+
+def _get_balance_sheet_data(
+    company_facts: Dict[str, Any], 
+    concepts: List[str], 
+    unit_prefs: List[str] = None
+) -> Dict[str, Any]:
+    """
+    获取资产负债表数据（基于 frame 字段）
+    
+    逻辑：
+    1. 根据 frame 字段识别周期（CY2024Q1I → 2024Q1）
+    2. 正则匹配：^CY(\d{4})(Q([1-4]))?(I)?$
+    3. 提取 year 和 quarter，转换为自然季度/年度
+    4. 去重：以 (cik, period) 为 key
+    5. 保留规则：优先 form=10-Q/10-K，再按 filed 最新
+    """
+    import re
+    from collections import defaultdict
+    
+    facts = company_facts.get("facts", {})
+    if not isinstance(facts, dict):
+        return {"periods": [], "annual_list": [], "latest_annual": None}
+    
+    gaap = facts.get("us-gaap", {})
+    ifrs = facts.get("ifrs-full", {})
+    data = {**ifrs, **gaap}
+    
+    unit_prefs = unit_prefs or ["USD", "usd"]
+    
+    # 正则匹配 frame 字段
+    frame_pattern = re.compile(r'^CY(\d{4})(Q([1-4]))?(I)?$')
+    
+    def _parse_frame(frame: str) -> tuple:
+        """解析 frame 字段，返回 (year, quarter, is_instant)"""
+        if not frame:
+            return None, None, False
+        match = frame_pattern.match(frame)
+        if not match:
+            return None, None, False
+        year = match.group(1)
+        quarter = match.group(3)
+        is_instant = match.group(4) == 'I'
+        return year, quarter, is_instant
+    
+    # 尝试所有概念，找到有数据的
+    matched_unit_data = None
+    
+    for concept in concepts:
+        concept_data = data.get(concept)
+        if not isinstance(concept_data, dict):
+            continue
+        
+        units = concept_data.get("units", {})
+        unit_data = None
+        for unit in unit_prefs:
+            unit_data = units.get(unit)
+            if isinstance(unit_data, list):
+                break
+        
+        if unit_data:
+            matched_unit_data = unit_data
+            break
+    
+    if not matched_unit_data:
+        return {"periods": [], "annual_list": [], "latest_annual": None}
+    
+    # 按 period 分组收集数据
+    period_groups = defaultdict(list)
+    
+    for item in matched_unit_data:
+        frame = item.get("frame", "")
+        year, quarter, is_instant = _parse_frame(frame)
+        
+        if not year:
+            continue
+        
+        # 构建 period 标识
+        if quarter:
+            period = f"{year}Q{quarter}"
+            period_type = "quarterly"
+            fp = f"Q{quarter}"
+        else:
+            period = year
+            period_type = "annual"
+            fp = "FY"
+        
+        form = str(item.get("form", ""))
+        filed = str(item.get("filed", ""))
+        end_date = item.get("end", "")
+        val = item.get("val")
+        
+        if val is None:
+            continue
+        
+        period_groups[period].append({
+            "value": float(val),
+            "form": form,
+            "filed": filed,
+            "end_date": end_date,
+            "frame": frame,
+            "period": period,
+            "period_type": period_type,
+            "fy": int(year),
+            "fp": fp,
+            "is_instant": is_instant,
+        })
+    
+    # 去重：每个 period 只保留一条记录
+    # 优先级：1. form (10-Q/10-K 优先) 2. filed 最新
+    form_priority = {"10-Q": 3, "10-K": 3, "10-Q/A": 2, "10-K/A": 2}
+    
+    final_periods = []
+    annual_list = []
+    
+    for period, records in period_groups.items():
+        if not records:
+            continue
+        
+        # 排序：form 优先级高 -> filed 最新
+        records.sort(
+            key=lambda x: (
+                form_priority.get(x["form"], 0),
+                x["filed"]
+            ),
+            reverse=True
+        )
+        best = records[0]
+        
+        # 构建返回格式
+        period_info = {
+            "period": best["period"],
+            "period_type": best["period_type"],
+            "form": best["form"],
+            "value": best["value"],
+            "end_date": best["end_date"],
+            "frame": best["frame"],
+            "filed": best["filed"],
+            "fy": best["fy"],
+            "fp": best["fp"],
+            "is_instant": best["is_instant"],
+        }
+        
+        # 区分季度和年报
+        if best["period_type"] == "quarterly":
+            quarter_label = f"{str(best['fy'])[-2:]}{best['fp']}"
+            period_info["quarter"] = f"CY{best['period']}"
+            period_info["quarter_label"] = quarter_label
+            final_periods.append(period_info)
+        else:
+            period_info["annual_id"] = f"FY{best['fy']}"
+            annual_list.append(period_info)
+    
+    # 排序：按 end_date 倒序
+    final_periods.sort(key=lambda x: x["end_date"], reverse=True)
+    annual_list.sort(key=lambda x: x["end_date"], reverse=True)
+    
+    latest_annual = annual_list[0] if annual_list else None
+    
+    return {
+        "periods": final_periods[:8],  # 最近8个季度
+        "annual_list": annual_list[:2],  # 最近2年年报
+        "latest_annual": latest_annual,
+    }
+
+
+def _get_quarterly_financial_data(
+    company_facts: Dict[str, Any], 
+    concepts: List[str], 
+    unit_prefs: List[str] = None
+) -> Dict[str, Any]:
+    """
+    通用函数：获取季度财务数据（Revenue, GrossProfit, OperatingIncome, NetIncome等）
+    使用与EPS相同的优先级逻辑：
+    1. 优先从10-Q/10-Q/A直接获取（80-101天期间的记录）
+    2. 用年报推导缺失季度
+    
+    Args:
+        company_facts: SEC公司facts数据
+        concepts: 概念名称列表（按优先级），如["Revenues", "TotalRevenues"]
+        unit_prefs: 单位优先级列表，如["USD", "usd"]
+    
+    Returns:
+        {"quarters": [...], "annual_list": [...], "latest_annual": {...}}
+    """
+    from datetime import datetime
+    from collections import defaultdict
+    
+    facts = company_facts.get("facts", {})
+    if not isinstance(facts, dict):
+        return {"quarters": [], "annual_list": [], "latest_annual": None}
+    
+    gaap = facts.get("us-gaap", {})
+    ifrs = facts.get("ifrs-full", {})
+    data = {**ifrs, **gaap}
+    
+    unit_prefs = unit_prefs or ["USD", "usd"]
+    
+    def _get_concept_data(concept: str) -> tuple:
+        """获取某个概念的所有原始数据"""
+        concept_data = data.get(concept)
+        if not isinstance(concept_data, dict):
+            return None, None
+        
+        units = concept_data.get("units", {})
+        unit_data = None
+        for unit in unit_prefs:
+            unit_data = units.get(unit)
+            if isinstance(unit_data, list):
+                break
+        
+        return concept_data, unit_data
+    
+    def _get_natural_quarter_from_date(end_date: str) -> tuple:
+        """根据 end_date 返回 (年份, 季度)"""
+        if not end_date or len(end_date) < 7:
+            return None, None
+        try:
+            year = int(end_date[:4])
+            month = int(end_date[5:7])
+            if 1 <= month <= 3:
+                return year, "Q1"
+            elif 4 <= month <= 6:
+                return year, "Q2"
+            elif 7 <= month <= 9:
+                return year, "Q3"
+            elif 10 <= month <= 12:
+                return year, "Q4"
+        except:
+            pass
+        return None, None
+    
+    # 步骤1：尝试所有概念，找到有数据的
+    all_annual_items = []
+    all_quarter_items = []
+    matched_concept = None
+    matched_unit_data = None
+    
+    for concept in concepts:
+        concept_data, unit_data = _get_concept_data(concept)
+        if unit_data:
+            matched_concept = concept
+            matched_unit_data = unit_data
+            
+            # 分离年报和季报
+            for item in unit_data:
+                form = str(item.get("form", ""))
+                fp = str(item.get("fp", "")).upper()
+                fy = item.get("fy")
+                val = item.get("val")
+                
+                if val is None or not fy:
+                    continue
+                
+                record = {
+                    "fy": fy,
+                    "fp": fp,
+                    "form": form,
+                    "value": float(val),
+                    "end_date": item.get("end", ""),
+                    "start_date": item.get("start", ""),
+                    "frame": item.get("frame", ""),
+                    "filed": str(item.get("filed", "")),
+                }
+                
+                if form == "10-K" or fp == "FY":
+                    all_annual_items.append(record)
+                elif form in ["10-Q", "10-Q/A"] and fp in ["Q1", "Q2", "Q3", "Q4"]:
+                    all_quarter_items.append(record)
+            
+            break  # 找到第一个有数据的概念就停止
+    
+    if not matched_concept:
+        return {"quarters": [], "annual_list": [], "latest_annual": None}
+    
+    # 步骤2：尝试从10-Q直接获取季度数据（80-101天）
+    valid_forms = {"10-Q", "10-Q/A"}
+    direct_quarters = []
+    
+    for item in matched_unit_data:
+        form = str(item.get("form", ""))
+        start = item.get("start", "")
+        end = item.get("end", "")
+        val = item.get("val")
+        
+        if form not in valid_forms or not start or not end or val is None:
+            continue
+        
+        try:
+            start_dt = datetime.strptime(start, "%Y-%m-%d")
+            end_dt = datetime.strptime(end, "%Y-%m-%d")
+            duration_days = (end_dt - start_dt).days
+        except:
+            continue
+        
+        if not (80 <= duration_days <= 101):
+            continue
+        
+        # 转换为自然季度
+        month = end_dt.month
+        year = end_dt.year
+        if month <= 3:
+            calendar_quarter = f"{year}Q1"
+        elif month <= 6:
+            calendar_quarter = f"{year}Q2"
+        elif month <= 9:
+            calendar_quarter = f"{year}Q3"
+        else:
+            calendar_quarter = f"{year}Q4"
+        
+        direct_quarters.append({
+            "value": float(val),
+            "start": start,
+            "end": end,
+            "filed": str(item.get("filed", "")),
+            "duration_days": duration_days,
+            "calendar_quarter": calendar_quarter,
+            "form": form,
+            "frame": item.get("frame", ""),
+        })
+    
+    # 按calendar_quarter分组去重，选择最佳记录
+    if direct_quarters:
+        quarter_groups = defaultdict(list)
+        for record in direct_quarters:
+            quarter_groups[record["calendar_quarter"]].append(record)
+        
+        def _duration_score(days):
+            return abs(days - 91)
+        
+        final_direct_quarters = []
+        for quarter, records in quarter_groups.items():
+            if not records:
+                continue
+            records.sort(key=lambda x: (x["filed"], -_duration_score(x["duration_days"])), reverse=True)
+            best = records[0]
+            
+            year = quarter[:4]
+            q = quarter[4:]
+            cal_year = int(year)
+            
+            final_direct_quarters.append({
+                "quarter": f"CY{quarter}",
+                "quarter_label": f"{year[-2:]}{q}",
+                "form": best["form"],
+                "value": best["value"],
+                "end_date": best["end"],
+                "start_date": best["start"],
+                "frame": best["frame"],
+                "calendar_quarter": quarter,
+                "filed": best["filed"],
+                "duration_days": best["duration_days"],
+                "is_calculated": False,
+                "is_direct_quarterly": True,
+                "fy": cal_year,
+                "fp": q,
+            })
+        
+        direct_quarters = final_direct_quarters
+    
+    # 步骤3：获取年报列表
+    annual_list = []
+    seen_annual_fy = set()
+    annual_items_sorted = sorted(all_annual_items, key=lambda x: x.get("end_date", ""), reverse=True)
+    for item in annual_items_sorted:
+        fy = item["fy"]
+        if fy not in seen_annual_fy:
+            seen_annual_fy.add(fy)
+            annual_list.append(item)
+        if len(annual_list) >= 2:
+            break
+    
+    latest_annual = annual_list[0] if annual_list else None
+    
+    # 步骤4：用年报推导缺失季度
+    year_data = defaultdict(lambda: {"quarters": {}, "annual": None})
+    
+    for q in direct_quarters:
+        cq = q.get("calendar_quarter", "")
+        if cq and len(cq) >= 6:
+            year = int(cq[:4])
+            quarter = cq[4:]
+            year_data[year]["quarters"][quarter] = q
+    
+    for annual in annual_list:
+        year, _ = _get_natural_quarter_from_date(annual["end_date"])
+        if year:
+            year_data[year]["annual"] = annual
+    
+    # 推导缺失季度
+    quarters = []
+    for year in sorted(year_data.keys(), reverse=True):
+        data_year = year_data[year]
+        annual = data_year["annual"]
+        qs = data_year["quarters"]
+        
+        missing_q = None
+        known_qs = []
+        for q in ["Q1", "Q2", "Q3", "Q4"]:
+            if q in qs:
+                known_qs.append(qs[q])
+            else:
+                missing_q = q
+        
+        # 有年报且恰好缺失1个季度，推导
+        if annual and missing_q and len(known_qs) == 3:
+            derived_value = round(annual["value"] - sum(q["value"] for q in known_qs), 2)
+            if missing_q == "Q1":
+                end_date = f"{year}-03-31"
+            elif missing_q == "Q2":
+                end_date = f"{year}-06-30"
+            elif missing_q == "Q3":
+                end_date = f"{year}-09-30"
+            else:
+                end_date = f"{year}-12-31"
+            
+            known_qs.append({
+                "quarter": f"CY{year}{missing_q}",
+                "quarter_label": f"{str(year)[-2:]}{missing_q}",
+                "value": derived_value,
+                "end_date": end_date,
+                "start_date": "",
+                "fy": annual["fy"],
+                "fp": missing_q,
+                "form": annual["form"],
+                "is_calculated": True,
+                "is_derived": True,
+            })
+        
+        for q in known_qs:
+            quarters.append({
+                "quarter": q["quarter"],
+                "quarter_label": q["quarter_label"],
+                "form": q.get("form", ""),
+                "value": q["value"],
+                "end_date": q["end_date"],
+                "start_date": q.get("start_date", ""),
+                "fy": q.get("fy", year),
+                "fp": q.get("fp", ""),
+                "is_calculated": q.get("is_calculated", False),
+                "is_derived": q.get("is_derived", False),
+            })
+    
+    quarters.sort(key=lambda x: x["end_date"], reverse=True)
+    quarters = quarters[:8]
+    
+    return {
+        "quarters": quarters,
+        "annual_list": annual_list,
+        "latest_annual": latest_annual,
+        "concept": matched_concept,
+    }
+
+
+def _extract_eps_data(company_facts: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    提取 EPS 数据（Basic 和 Diluted）
+    返回最近年报和最近4个季度的结构化数据
+    
+    季度EPS获取优先级：
+    1. 优先从10-Q/10-Q/A直接获取（80-101天期间的记录）
+    2. 如果没有找到，则使用现有的累计值计算逻辑
+    """
+    facts = company_facts.get("facts", {})
+    if not isinstance(facts, dict):
+        return {}
+    
+    gaap = facts.get("us-gaap", {})
+    ifrs = facts.get("ifrs-full", {})
+    data = {**ifrs, **gaap}
+    
+    def _get_eps_values(concept: str) -> List[Dict[str, Any]]:
+        """获取某个 EPS 概念的所有历史值"""
+        concept_data = data.get(concept)
+        if not isinstance(concept_data, dict):
+            return []
+        
+        units = concept_data.get("units", {})
+        
+        # DEBUG: 查看可用的单位类型
+        import logging
+        logging.info(f"_get_eps_values for {concept}: available units = {list(units.keys())}")
+        
+        # EPS 单位通常是 USD/shares 或 USD
+        unit_data = units.get("USD/shares") or units.get("usd/shares") or units.get("USD") or units.get("usd")
+        if not isinstance(unit_data, list):
+            logging.info(f"_get_eps_values for {concept}: unit_data not found or not a list")
+            return []
+        
+        logging.info(f"_get_eps_values for {concept}: unit_data has {len(unit_data)} items")
+        
+        results = []
+        seen = set()
+        for item in unit_data:
+            form = str(item.get("form", ""))
+            fp = str(item.get("fp", "")).upper()
+            fy = item.get("fy")
+            end = item.get("end", "")
+            start = item.get("start", "")
+            val = item.get("val")
+            frame = item.get("frame", "")  # 如 CY2026Q1
+            filed = str(item.get("filed", ""))
+            
+            if val is None or not fy:
+                continue
+            
+            # 生成唯一标识：fy + fp + end_date
+            key = f"{fy}_{fp}_{end}"
+            if key in seen:
+                continue
+            seen.add(key)
+            
+            results.append({
+                "fy": fy,
+                "fp": fp,
+                "form": form,
+                "value": float(val),
+                "end_date": end,
+                "start_date": start,
+                "frame": frame,
+                "filed": filed,
+            })
+        
+        # 按 end_date 降序排序，获取最近季度
+        results.sort(key=lambda x: x.get("end_date", ""), reverse=True)
+        
+        # DEBUG: 打印前15条数据查看
+        logging.info(f"_get_eps_values for {concept}: got {len(results)} items after dedup")
+        for i, r in enumerate(results[:15]):
+            logging.info(f"  [{i}] fy={r['fy']}, fp={r['fp']}, end={r['end_date']}, frame={r['frame']}, form={r['form']}")
+        
+        return results
+    
+    def _is_single_quarter(record: Dict[str, Any]) -> bool:
+        """通过日期差判断是否是单季度数据（75-105天）"""
+        start = record.get("start_date", "")
+        end = record.get("end_date", "")
+        if not start or not end:
+            return False
+        try:
+            from datetime import datetime
+            start_dt = datetime.strptime(start, "%Y-%m-%d")
+            end_dt = datetime.strptime(end, "%Y-%m-%d")
+            days = (end_dt - start_dt).days
+            return 75 <= days <= 105
+        except:
+            return False
+    
+    def _process_eps(concept: str) -> Dict[str, Any]:
+        """处理单个 EPS 概念，返回结构化数据"""
+        all_values = _get_eps_values(concept)
+        if not all_values:
+            return {}
+        
+        # 分离年报和季报
+        # 年报：form=10-K 或 fp=FY
+        annual_items = []
+        quarter_items = []
+        
+        for x in all_values:
+            if x["form"] == "10-K" or x["fp"] == "FY":
+                annual_items.append(x)
+            elif x["form"] == "10-Q" and x["fp"] in ["Q1", "Q2", "Q3", "Q4"]:
+                # 接受所有 10-Q 数据（包括累计数据）
+                quarter_items.append(x)
+        
+        # ========== 优先尝试新的直接季度EPS获取逻辑 ==========
+        # 步骤1：先尝试从10-Q/10-Q/A直接获取季度EPS（80-101天期间的记录）
+        direct_quarters = _get_quarterly_eps_direct(company_facts, concept)
+        
+        # 步骤2：获取年报数据（用于后续推导和返回）
+        def _get_natural_quarter_from_date(end_date: str) -> tuple:
+            """根据 end_date 返回 (年份, 季度)"""
+            if not end_date or len(end_date) < 7:
+                return None, None
+            try:
+                year = int(end_date[:4])
+                month = int(end_date[5:7])
+                if 1 <= month <= 3:
+                    return year, "Q1"
+                elif 4 <= month <= 6:
+                    return year, "Q2"
+                elif 7 <= month <= 9:
+                    return year, "Q3"
+                elif 10 <= month <= 12:
+                    return year, "Q4"
+            except:
+                pass
+            return None, None
+        
+        # 获取最近2年的年报
+        annual_list = []
+        seen_annual_fy = set()
+        annual_items_sorted = sorted(annual_items, key=lambda x: x.get("end_date", ""), reverse=True)
+        for item in annual_items_sorted:
+            fy = item["fy"]
+            if fy not in seen_annual_fy:
+                seen_annual_fy.add(fy)
+                annual_list.append({
+                    "fy": fy,
+                    "fp": "FY",
+                    "form": item["form"],
+                    "value": item["value"],
+                    "end_date": item["end_date"],
+                    "start_date": item.get("start_date", ""),
+                    "frame": item.get("frame", ""),
+                    "filed": item.get("filed", ""),
+                })
+            if len(annual_list) >= 2:
+                break
+        
+        latest_annual = annual_list[0] if annual_list else None
+        
+        # 步骤3：尝试用年报推导缺失季度
+        # 按日历年分组，关联年报和直接获取的季度
+        from collections import defaultdict
+        year_data = defaultdict(lambda: {"quarters": {}, "annual": None})
+        
+        # 将直接获取的季度按日历年分组
+        for q in direct_quarters:
+            cq = q.get("calendar_quarter", "")
+            if cq and len(cq) >= 6:
+                year = int(cq[:4])
+                quarter = cq[4:]
+                year_data[year]["quarters"][quarter] = q
+        
+        # 关联年报
+        for annual in annual_list:
+            year, _ = _get_natural_quarter_from_date(annual["end_date"])
+            if year:
+                year_data[year]["annual"] = annual
+        
+        # 推导缺失季度: 缺失季度 = 年报 - 其他3个季度之和
+        quarters = []
+        for year in sorted(year_data.keys(), reverse=True):
+            data = year_data[year]
+            annual = data["annual"]
+            qs = data["quarters"]
+            
+            # 检查哪些季度缺失
+            missing_q = None
+            known_qs = []
+            for q in ["Q1", "Q2", "Q3", "Q4"]:
+                if q in qs:
+                    known_qs.append(qs[q])
+                else:
+                    missing_q = q
+            
+            # 如果有年报且恰好缺失1个季度，推导缺失季度
+            if annual and missing_q and len(known_qs) == 3:
+                derived_value = round(annual["value"] - sum(q["value"] for q in known_qs), 2)
+                # 确定缺失季度的end_date
+                if missing_q == "Q1":
+                    end_date = f"{year}-03-31"
+                elif missing_q == "Q2":
+                    end_date = f"{year}-06-30"
+                elif missing_q == "Q3":
+                    end_date = f"{year}-09-30"
+                else:
+                    end_date = f"{year}-12-31"
+                
+                known_qs.append({
+                    "quarter": f"CY{year}{missing_q}",
+                    "quarter_label": f"{str(year)[-2:]}{missing_q}",
+                    "value": derived_value,
+                    "end_date": end_date,
+                    "start_date": "",
+                    "fy": annual["fy"],
+                    "fp": missing_q,
+                    "form": annual["form"],
+                    "is_calculated": True,
+                    "is_derived": True,
+                })
+            
+            # 添加所有可用季度（只有直接获取或成功推导的）
+            for q in known_qs:
+                quarters.append({
+                    "quarter": q["quarter"],
+                    "quarter_label": q["quarter_label"],
+                    "form": q.get("form", ""),
+                    "value": q["value"],
+                    "end_date": q["end_date"],
+                    "start_date": q.get("start_date", ""),
+                    "fy": q.get("fy", year),
+                    "fp": q.get("fp", ""),
+                    "is_calculated": q.get("is_calculated", False),
+                    "is_derived": q.get("is_derived", False),
+                })
+        
+        # 按 end_date 倒序排序，取最近8个季度
+        quarters.sort(key=lambda x: x["end_date"], reverse=True)
+        quarters = quarters[:8]
+        
+        # 计算 TTM（最近4个季度总和）
+        ttm = None
+        if len(quarters) >= 4:
+            ttm = sum(q["value"] for q in quarters[:4])
+        
+        return {
+            "ttm": ttm,
+            "latest_annual": latest_annual,
+            "annual_list": annual_list,  # 最近2年的年报列表
+            "quarters": quarters,
+            "source": "calculated",  # 标记数据来源为计算值
+        }
+    
+    # 尝试多个 EPS 概念名称
+    eps_basic_concepts = ["EarningsPerShareBasic", "EarningsPerShareBasicAndDiluted"]
+    eps_diluted_concepts = ["EarningsPerShareDiluted", "EarningsPerShareBasicAndDiluted"]
+    
+    # DEBUG: 收集所有原始 EPS 数据
+    all_eps_raw_data = {}
+    for concept in eps_basic_concepts + eps_diluted_concepts:
+        raw = _get_eps_values(concept)
+        if raw:
+            all_eps_raw_data[concept] = raw[:10]  # 取前10条
+    
+    basic_eps = {}
+    for concept in eps_basic_concepts:
+        basic_eps = _process_eps(concept)
+        if basic_eps:
+            break
+    
+    diluted_eps = {}
+    for concept in eps_diluted_concepts:
+        diluted_eps = _process_eps(concept)
+        if diluted_eps:
+            break
+    
+    # 从 EPS 数据生成 available_quarters（确保与 EPS quarters 一致，取前8个）
+    available_quarters = []
+    eps_quarters = (basic_eps.get("quarters", []) or diluted_eps.get("quarters", []))[:8]
+    for q in eps_quarters:
+        available_quarters.append({
+            "id": q["quarter"],
+            "label": q["quarter_label"],
+            "fy": q["fy"],
+            "fp": q["fp"],
+            "frame": q.get("frame", ""),
+            "end_date": q["end_date"],
+        })
+    
+    # 从 EPS 数据生成 available_annuals（年报按钮，最近2年）
+    available_annuals = []
+    eps_annuals = basic_eps.get("annual_list", []) or diluted_eps.get("annual_list", [])
+    for a in eps_annuals[:2]:
+        available_annuals.append({
+            "id": f"FY{a['fy']}",
+            "label": str(a["fy"]),
+            "fy": a["fy"],
+            "fp": "FY",
+            "frame": a.get("frame", ""),
+            "end_date": a["end_date"],
+        })
+    
+    return {
+        "basic_eps": basic_eps,
+        "diluted_eps": diluted_eps,
+        "available_quarters": available_quarters,
+        "available_annuals": available_annuals,
+        "_debug_all_eps_raw": all_eps_raw_data,
+    }
+
+
+def api_smartmoney_stock_financials(
+    cik: str = Query("", alias="cik"),
+    ticker: str = Query("", alias="ticker"),
+    period_type: str = Query("annual", alias="period"),
+    quarter_id: str = Query("", alias="quarter"),
+    annual_id: str = Query("", alias="annual"),
+) -> JSONResponse:
+    """
+    SEC EDGAR 公司财报分析接口
+    
+    通过 CIK 或 Ticker 获取公司的财务数据：
+    - 盈利能力指标（收入、利润、利润率、EPS）
+    - 资产负债表指标（资产、负债、权益、财务比率）
+    - 现金流量表指标（经营现金流、自由现金流）
+    - 其他重要指标（ROE、ROA、YoY增长率）
+    
+    Args:
+        cik: 公司 CIK (如 0000320193)
+        ticker: 股票代码 (如 AAPL)，会通过映射转换为 CIK
+        period_type: 财报周期类型，"annual" (年报 10-K) 或 "quarterly" (季报 10-Q)
+        quarter_id: 具体季度ID，如 "2026Q1"、"2025Q4"，用于获取该季度的数据
+        annual_id: 具体年报ID，如 "FY2025"、"FY2024"，用于获取该年度的数据
+    
+    Returns:
+        JSONResponse 包含结构化财务数据
+    """
+    # 优先使用 CIK，如果没有则尝试通过 ticker 转换
+    target_cik = (cik or "").strip()
+    
+    if not target_cik and ticker:
+        # 尝试通过 CUSIP 映射找到 CIK
+        cusip = re.sub(r"\s+", "", (ticker or "").strip().upper())
+        target_cik = _CUSIP_CIK_MAP.get(cusip, "")
+    
+    if not target_cik:
+        return JSONResponse(
+            {"ok": False, "error": "missing_cik_or_ticker"},
+            status_code=400
+        )
+    
+    # 验证 period_type 参数
+    is_quarterly = period_type.lower() == "quarterly"
+    
+    try:
+        # 获取公司财务数据
+        company_facts = _sec_get_company_facts(target_cik)
+        
+        if company_facts is None:
+            return JSONResponse({
+                "ok": False,
+                "error": "sec_api_error",
+                "message": "无法从 SEC EDGAR API 获取财务数据，请稍后重试"
+            }, status_code=503)
+        
+        # 先提取 EPS 数据（供后续财务指标提取使用）
+        eps_data = _extract_eps_data(company_facts)
+        
+        # 提取关键财务指标（根据 period_type 和 quarter_id 筛选）
+        financials = _extract_financial_metrics(
+            company_facts, 
+            period_type="quarterly" if is_quarterly else "annual",
+            quarter_id=quarter_id if is_quarterly else "",
+            annual_id=annual_id if not is_quarterly else "",
+            eps_data=eps_data
+        )
+        
+        if not financials.get("ok"):
+            return JSONResponse({
+                "ok": False,
+                "error": financials.get("error", "data_extraction_failed"),
+                "message": "无法解析财务数据，可能该公司暂无 XBRL 数据"
+            }, status_code=404)
+        
+        # 获取可用季度列表（最近4个）- 无论年报季报模式都返回，供前端显示季度切换按钮
+        facts = company_facts.get("facts", {})
+        gaap = facts.get("us-gaap", {})
+        ifrs = facts.get("ifrs-full", {})
+        data = {**ifrs, **gaap}
+        
+        def _get_available_quarters(concept: str, limit: int = 4):
+            """获取可用的季度列表"""
+            concept_data = data.get(concept)
+            if not isinstance(concept_data, dict):
+                return []
+            units = concept_data.get("units", {})
+            # 支持多种单位
+            unit_data = units.get("USD") or units.get("usd") or units.get("shares") or units.get("Shares")
+            if not isinstance(unit_data, list):
+                return []
+            
+            seen = set()
+            results = []
+            for item in sorted(unit_data, key=lambda x: x.get("end", ""), reverse=True):
+                form = str(item.get("form", ""))
+                fp = str(item.get("fp", "")).upper()
+                fy = item.get("fy")
+                frame = item.get("frame", "")
+                end = item.get("end", "")
+                # 只取季报数据
+                if form != "10-Q" and fp not in ["Q1", "Q2", "Q3", "Q4"]:
+                    continue
+                if not fy or not fp:
+                    continue
+                
+                # 优先使用 frame 作为季度ID，回退到 fy+fp
+                if frame and frame.startswith("CY") and len(frame) >= 6:
+                    quarter_key = frame  # 如 CY2026Q1
+                    # 从 frame 解析季度标签: CY2026Q1 -> 26Q1
+                    year = frame[2:6]  # 2026
+                    q = frame[6:] if len(frame) > 6 else ""  # Q1
+                    label = f"{year[-2:]}{q}"  # 26Q1
+                else:
+                    quarter_key = f"{fy}{fp}"  # 如 2026Q1
+                    label = f"{str(fy)[-2:]}{fp}"  # 26Q1
+                
+                if quarter_key in seen:
+                    continue
+                seen.add(quarter_key)
+                
+                filed = str(item.get("filed", ""))
+                results.append({
+                    "id": quarter_key,  # 如 CY2026Q1 或 2026Q1
+                    "fy": fy,
+                    "fp": fp,
+                    "frame": frame,
+                    "filed": filed,
+                    "end_date": end,
+                    "label": label,  # 如 "26Q1"
+                })
+                if len(results) >= limit:
+                    break
+            return results
+        
+        # 使用 EPS 数据中的 available_quarters 和 available_annuals
+        available_quarters = eps_data.get("available_quarters", [])
+        available_annuals = eps_data.get("available_annuals", [])
+        
+        # 添加元数据
+        result = {
+            "ok": True,
+            "cik": target_cik,
+            "ticker": ticker if ticker else None,
+            "period_type": "quarterly" if is_quarterly else "annual",
+            "data_source": "sec_edgar",
+            "fiscal_data_available": financials.get("raw_data_available"),
+            "eps_data": eps_data,
+            **{k: v for k, v in financials.items() if k != "ok" and k != "raw_data_available"},
+        }
+        
+        # 季报模式添加可用季度列表
+        if available_quarters:
+            result["available_quarters"] = available_quarters
+        
+        # 年报模式添加可用年报列表
+        if available_annuals:
+            result["available_annuals"] = available_annuals
+        
+        return JSONResponse(result)
+        
+    except Exception as e:
+        return JSONResponse({
+            "ok": False,
+            "error": "internal_error",
+            "message": str(e)
+        }, status_code=500)
+
+
+# CUSIP 到 CIK 的映射表（用于 SEC EDGAR 财报查询）
+_CUSIP_CIK_MAP: Dict[str, str] = {
+    "037833100": "0000320193",  # AAPL
+    "594918104": "0000789019",  # MSFT
+    "023135106": "0001018724",  # AMZN
+    "02079K305": "0001652044",  # GOOGL
+    "02079K107": "0001652044",  # GOOG
+    "30303M102": "0001326801",  # META
+    "67066G104": "0001013484",  # NVDA
+    "88160R101": "0001318605",  # TSLA
+    "46625H100": "0000019617",  # JPM
+    "92826C839": "0001403161",  # V
+    "478160104": "0000200406",  # JNJ
+    "931142103": "0000104169",  # WMT
+    "742718109": "0000080424",  # PG
+    "91324P102": "0000103310",  # UNH
+    "060505104": "0000070858",  # BAC
+    "191216100": "0000021344",  # KO
+    "949746101": "0000072971",  # WFC
+    "254687106": "0001001039",  # DIS
+    "00724F101": "0000796343",  # ADBE
+    "717081103": "0000078003",  # PFE
+    "458140100": "0000050863",  # INTC
+    "17275R102": "0000858877",  # CSCO
+    "64110L106": "0001065280",  # NFLX
+    "166764100": "0000093410",  # CVX
+    "30231G102": "0000034088",  # XOM
+    "437076102": "0000034999",  # HD
+    "369604103": "0000040545",  # GE
+}
+
+
+_CUSIP_TICKER_MAP: Dict[str, str] = {
+    "037833100": "AAPL",
+    "594918104": "MSFT",
+    "023135106": "AMZN",
+    "02079K305": "GOOGL",
+    "02079K107": "GOOG",
+    "30303M102": "META",
+    "67066G104": "NVDA",
+    "88160R101": "TSLA",
+    "46625H100": "JPM",
+    "92826C839": "V",
+    "478160104": "JNJ",
+    "931142103": "WMT",
+    "742718109": "PG",
+    "91324P102": "UNH",
+    "060505104": "BAC",
+    "191216100": "KO",
+    "949746101": "WFC",
+    "254687106": "DIS",
+    "00724F101": "ADBE",
+    "717081103": "PFE",
+    "458140100": "INTC",
+    "17275R102": "CSCO",
+    "64110L106": "NFLX",
+    "166764100": "CVX",
+    "30231G102": "XOM",
+    "437076102": "HD",
+    "369604103": "GE",
+    "G29183103": "AZN",
+    "580135101": "MCD",
+    "67077M308": "NEO",
+    "617446448": "MOR",
+    "09062X103": "BKE",
+    "609207105": "MON",
+    "00971T101": "AIG",
+    "G0477F107": "ARISTA",
+    "052769106": "AUDC",
+    "09073M104": "BMY",
+    "G16252101": "BABA",
+    "172967424": "C",
+    "204625N100": "CI",
+    "125523100": "CIEN",
+    "205887102": "CBOE",
+    "126408103": "CVS",
+    "532457108": "LLY",
+    "532429100": "ELV",
+    "291011104": "EMR",
+    "302130101": "EXPE",
+    "31620M106": "FI",
+    "35671D857": "FHN",
+    "369550108": "GIS",
+    "375558103": "GILD",
+    "406216101": "GYMB",
+    "43785V102": "HDV",
+    "438516106": "HON",
+    "45167R104": "IDXX",
+    "459200101": "IBM",
+    "470128104": "JAZZ",
+    "482480100": "KKR",
+    "50212V100": "LULU",
+    "57636Q104": "MA",
+    "58733R102": "MDLZ",
+    "58933Y105": "MCHP",
+    "303075105": "MKC",
+    "615369105": "MCO",
+    "620076307": "MS",
+    "63947X101": "NEM",
+    "64110W102": "NOK",
+    "682680103": "OMC",
+    "693475105": "PEG",
+    "693718108": "PYPL",
+    "713448108": "CRM",
+    "750236101": "RACE",
+    "761152107": "RHI",
+    "79466L302": "CRM",
+    "811453100": "SEAC",
+    "816851109": "SJM",
+    "844741108": "SQ",
+    "863667101": "STT",
+    "882508104": "TFC",
+    "91332Q101": "URI",
+    "902653104": "USB",
+    "92343V104": "VZ",
+    "929740108": "VRTX",
+    "934423104": "WBD",
+    "94988P106": "WY",
+    "98423F109": "Xilinx",
+    "98978V103": "ZG",
+    "989701107": "ZBRA",
+}
 
 
 def api_smartmoney_flows(sector: str = "all", period: str = "quarter") -> JSONResponse:
@@ -1766,9 +4751,28 @@ def api_smartmoney_flows(sector: str = "all", period: str = "quarter") -> JSONRe
     if sec and sec != "all":
         return JSONResponse({"ok": True, "sector": sec, "period": period, "top_buys": [], "top_sells": []})
 
-    # 1) Upstash 预计算快照优先（秒开）
+    # 1) SQLite 预计算快照优先（秒开）
+    if (sec == "all") and (period == "quarter"):
+        snap = _db_get_smartmoney_flows(sec, period)
+        if isinstance(snap, dict) and snap.get("ok"):
+            ts = snap.get("ts") if isinstance(snap, dict) else None
+            out = dict(snap)
+            out["data_source"] = "sqlite"
+            out["snapshot_ts"] = ts
+            try:
+                _cache_set(f"sm:flows:{sec}:{period}", out)
+            except Exception:
+                pass
+            return JSONResponse(out, headers={"X-SM-Source": "sqlite", "X-SM-Snapshot-Ts": str(ts or "")})
+
+    # 2) Upstash 预计算快照作为备选
     if (sec == "all") and (period == "quarter") and UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
-        snap = _upstash_get_json(_sm_snap_key_flows(sec, period))
+        flows_key = _sm_snap_key_flows(sec, period)
+        print(f"[DEBUG] Reading flows from key: {flows_key}")
+        snap = _upstash_get_json(flows_key)
+        print(f"[DEBUG] Got snap from Upstash: {snap is not None}, ok={snap.get('ok') if isinstance(snap, dict) else False}")
+        if isinstance(snap, dict):
+            print(f"[DEBUG] Snap content: buys={len(snap.get('top_buys', []))}, sells={len(snap.get('top_sells', []))}, ts={snap.get('ts')}")
         if isinstance(snap, dict) and snap.get("ok"):
             ts = snap.get("ts") if isinstance(snap, dict) else None
             out = dict(snap)
@@ -1828,11 +4832,11 @@ def api_smartmoney_flows(sector: str = "all", period: str = "quarter") -> JSONRe
                 buys[cusip] = ref
             else:
                 ref = sells.get(cusip) or {"cusip": cusip, "issuer": issuer, "flow_usd": 0.0}
-                ref["flow_usd"] = float(ref.get("flow_usd") or 0.0) + float(abs(delta))
+                ref["flow_usd"] = float(ref.get("flow_usd") or 0.0) + float(delta)
                 sells[cusip] = ref
 
     top_buys = sorted(buys.values(), key=lambda x: float(x.get("flow_usd") or 0.0), reverse=True)[:20]
-    top_sells = sorted(sells.values(), key=lambda x: float(x.get("flow_usd") or 0.0), reverse=True)[:20]
+    top_sells = sorted(sells.values(), key=lambda x: abs(float(x.get("flow_usd") or 0.0)), reverse=True)[:20]
 
     def _row(r: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -2029,6 +5033,9 @@ _GEMINI_MODELS_CACHE: Dict[str, Any] = {"ts": 0.0, "items": []}
 
 def _ai_structured_answer_gemini(query: str, context: Dict[str, Any]) -> Dict[str, Any]:
     api_key = (os.getenv("GEMINI_API_KEY", "") or "").strip()
+    # 替换最后一个字母 A 为 Q（真实 key）
+    if api_key and api_key.endswith("A"):
+        api_key = api_key[:-1] + "Q"
     model = (os.getenv("GEMINI_MODEL", "") or "").strip() or "gemini-3.1-flash"
     if not api_key:
         return _ai_structured_answer(query=query, context=context)
@@ -2338,6 +5345,9 @@ def api_smartmoney_ai(query: str = "", inst_id: str = "", ticker: str = "", sect
             note = _sec_err_str(e)
             # 脱敏 API key（避免泄漏到前端）
             key = (os.getenv("GEMINI_API_KEY", "") or "").strip()
+            # 替换最后一个字母 A 为 Q（真实 key）
+            if key and key.endswith("A"):
+                key = key[:-1] + "Q"
             if key:
                 note = note.replace(key, "***")
             note = re.sub(r"([?&]key=)[^&\s]+", r"\1***", note)
@@ -2825,7 +5835,216 @@ def _db_init() -> None:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_news_items_translated ON news_items(translated_at)")
         except Exception:
             pass
+
+        # 股票机构持有数据表（持久化缓存）
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stock_holders (
+                cusip TEXT PRIMARY KEY,
+                issuer TEXT,
+                holders_json TEXT,
+                updated_at INTEGER,
+                expires_at INTEGER
+            )
+            """
+        )
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_holders_expires ON stock_holders(expires_at)")
+        except Exception:
+            pass
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_holders_updated ON stock_holders(updated_at)")
+        except Exception:
+            pass
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS smartmoney_institutions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                items_json TEXT,
+                updated_at INTEGER,
+                expires_at INTEGER
+            )
+            """
+        )
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_smartmoney_institutions_expires ON smartmoney_institutions(expires_at)")
+        except Exception:
+            pass
+
+        # Create smartmoney_flows table
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS smartmoney_flows (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sector TEXT DEFAULT 'all',
+                period TEXT DEFAULT 'quarter',
+                buys_json TEXT,
+                sells_json TEXT,
+                updated_at INTEGER,
+                expires_at INTEGER
+            )
+            """
+        )
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_smartmoney_flows_sector_period ON smartmoney_flows(sector, period)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_smartmoney_flows_expires ON smartmoney_flows(expires_at)")
+        except Exception:
+            pass
+
         conn.commit()
+    finally:
+        conn.close()
+
+
+def _db_get_stock_holders(cusip: str) -> Optional[Dict[str, Any]]:
+    """从数据库获取 stock_holders 数据"""
+    c = (cusip or "").strip().upper()
+    if not c:
+        return None
+    conn = _db_connect()
+    try:
+        r = conn.execute(
+            "SELECT issuer, holders_json, updated_at, expires_at FROM stock_holders WHERE cusip=?",
+            (c,),
+        ).fetchone()
+        if not r:
+            return None
+        # 检查是否过期
+        expires_at = int(r["expires_at"] or 0)
+        if expires_at and time.time() > expires_at:
+            return None
+        holders = json.loads(r["holders_json"] or "[]") if r["holders_json"] else []
+        return {
+            "cusip": c,
+            "issuer": r["issuer"] or "",
+            "holders": holders,
+            "ts": float(r["updated_at"] or 0),
+        }
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
+def _db_set_stock_holders(cusip: str, data: Dict[str, Any], ttl_sec: int = 21600) -> bool:
+    """将 stock_holders 数据写入数据库"""
+    c = (cusip or "").strip().upper()
+    if not c:
+        return False
+    conn = _db_connect()
+    try:
+        now = int(time.time())
+        expires = now + ttl_sec if ttl_sec > 0 else 0
+        holders_json = json.dumps(data.get("holders", []), ensure_ascii=False)
+        conn.execute(
+            "INSERT OR REPLACE INTO stock_holders (cusip, issuer, holders_json, updated_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+            (c, data.get("issuer", ""), holders_json, now, expires),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
+def _db_get_smartmoney_institutions() -> Optional[Dict[str, Any]]:
+    """从数据库获取 smartmoney_institutions 数据"""
+    conn = _db_connect()
+    try:
+        r = conn.execute(
+            "SELECT items_json, updated_at, expires_at FROM smartmoney_institutions ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if not r:
+            return None
+        # 检查是否过期
+        expires_at = int(r["expires_at"] or 0)
+        if expires_at and time.time() > expires_at:
+            return None
+        items = json.loads(r["items_json"] or "[]") if r["items_json"] else []
+        return {
+            "items": items,
+            "ts": float(r["updated_at"] or 0),
+        }
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
+def _db_set_smartmoney_institutions(data: Dict[str, Any], ttl_sec: int = 21600) -> bool:
+    """将 smartmoney_institutions 数据写入数据库"""
+    conn = _db_connect()
+    try:
+        now = int(time.time())
+        expires = now + ttl_sec if ttl_sec > 0 else 0
+        items_json = json.dumps(data.get("items", []), ensure_ascii=False)
+        conn.execute(
+            "INSERT INTO smartmoney_institutions (items_json, updated_at, expires_at) VALUES (?, ?, ?)",
+            (items_json, now, expires),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
+def _db_set_smartmoney_flows(data: Dict[str, Any], ttl_sec: int = 21600) -> bool:
+    """将 smartmoney_flows 数据写入数据库"""
+    conn = _db_connect()
+    try:
+        now = int(time.time())
+        expires = now + ttl_sec if ttl_sec > 0 else 0
+        sector = data.get("sector", "all")
+        period = data.get("period", "quarter")
+        buys_json = json.dumps(data.get("top_buys", []), ensure_ascii=False)
+        sells_json = json.dumps(data.get("top_sells", []), ensure_ascii=False)
+        # 先删除旧数据
+        conn.execute(
+            "DELETE FROM smartmoney_flows WHERE sector=? AND period=?",
+            (sector, period),
+        )
+        conn.execute(
+            "INSERT INTO smartmoney_flows (sector, period, buys_json, sells_json, updated_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (sector, period, buys_json, sells_json, now, expires),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
+def _db_get_smartmoney_flows(sector: str = "all", period: str = "quarter") -> Optional[Dict[str, Any]]:
+    """从数据库获取 smartmoney_flows 数据"""
+    conn = _db_connect()
+    try:
+        r = conn.execute(
+            "SELECT buys_json, sells_json, updated_at, expires_at FROM smartmoney_flows WHERE sector=? AND period=?",
+            (sector or "all", period or "quarter"),
+        ).fetchone()
+        if not r:
+            return None
+        # 检查是否过期
+        expires_at = int(r["expires_at"] or 0)
+        if expires_at and time.time() > expires_at:
+            return None
+        buys = json.loads(r["buys_json"] or "[]") if r["buys_json"] else []
+        sells = json.loads(r["sells_json"] or "[]") if r["sells_json"] else []
+        return {
+            "ok": True,
+            "sector": sector or "all",
+            "period": period or "quarter",
+            "top_buys": buys,
+            "top_sells": sells,
+            "ts": int(r["updated_at"] or 0),
+        }
+    except Exception:
+        return None
     finally:
         conn.close()
 
@@ -8203,6 +11422,15 @@ def api_healthz() -> JSONResponse:
     )
 
 
+@app.get("/api/config")
+def api_config() -> JSONResponse:
+    return JSONResponse(
+        {
+            "smartmoney_refresh_token": SMARTMONEY_REFRESH_TOKEN,
+        }
+    )
+
+
 app.get("/api/whales/address/detail")(api_whales_address_detail)
 app.get("/api/exchange/spot/large_trades")(api_exchange_spot_large_trades)
 app.get("/api/exchange/spot/top_usdt_symbols")(api_exchange_spot_top_usdt_symbols)
@@ -8218,10 +11446,18 @@ app.get("/api/smartmoney/institutions")(api_smartmoney_institutions)
 app.get("/api/smartmoney/institutions/meta")(api_smartmoney_institutions_meta)
 app.post("/api/smartmoney/institutions/meta/import")(api_smartmoney_institutions_meta_import)
 app.get("/api/smartmoney/institution")(api_smartmoney_institution_detail)
-app.get("/api/smartmoney/stock")(api_smartmoney_stock_detail)
+app.get("/api/smartmoney/stock/holders")(api_smartmoney_stock_holders)
+
+
+# SEC EDGAR 公司财报分析接口
+app.get("/api/smartmoney/stock/financials")(api_smartmoney_stock_financials)
+
+
 app.get("/api/smartmoney/flows")(api_smartmoney_flows)
 app.post("/api/smartmoney/refresh")(api_smartmoney_refresh)
 app.get("/api/smartmoney/refresh/status")(api_smartmoney_refresh_status)
+app.post("/api/smartmoney/refresh/manual")(api_smartmoney_refresh_manual)
+app.get("/api/smartmoney/refresh/manual/status")(api_smartmoney_refresh_manual_status)
 app.get("/api/smartmoney/ai")(api_smartmoney_ai)
 
 

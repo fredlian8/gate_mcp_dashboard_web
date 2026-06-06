@@ -35,6 +35,7 @@
     .nav-item:hover { background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.92); }
     .nav-item.active { background: rgba(37, 99, 235, 0.25); border: 1px solid rgba(59, 130, 246, 0.45); color: rgb(191, 219, 254); }
     .btn { padding: 8px 12px; border-radius: 12px; font-weight: 800; border: 1px solid rgba(255,255,255,0.10); background: rgba(255,255,255,0.04); }
+    .btn-secondary { background: rgba(59, 130, 246, 0.2); border-color: rgba(59, 130, 246, 0.4); }
     .btn:hover { background: rgba(255,255,255,0.08); }
     .btn.active { background: rgba(37, 99, 235, 0.25); border-color: rgba(59, 130, 246, 0.55); color: rgb(191, 219, 254); }
     .input { background: rgba(17,24,39,0.75); color: rgba(255,255,255,0.9); border: 1px solid rgba(255,255,255,0.12); border-radius: 12px; }
@@ -253,8 +254,11 @@
                 <div class="flex items-center gap-2">
                   <input id="smSearch" class="input px-3 py-2" placeholder="搜索机构（如 BlackRock）" style="min-width: 280px" />
                   <button class="btn" id="smSearchBtn">搜索</button>
+                  <button class="btn btn-secondary" id="smInstRefreshSqliteBtn" title="刷新热门机构数据到 SQLite">刷新到SQLite</button>
+                  <button class="btn btn-secondary" id="smInstRefreshUpstashBtn" title="刷新热门机构数据到 Upstash">刷新到Upstash</button>
                 </div>
               </div>
+              <div class="mt-2 text-xs text-gray-400" id="smInstDataSource">—</div>
 
               <details class="mt-3">
                 <summary class="muted text-sm cursor-pointer select-none">说明（取值口径 / 单位 / 周期）</summary>
@@ -443,6 +447,7 @@
                 <div>
                   <div class="font-extrabold" id="smStockTitle">股票详情</div>
                   <div class="muted text-sm mt-1" id="smStockMeta">—</div>
+                  <div class="text-xs text-gray-400 mt-1" id="smStockDataSource">—</div>
                 </div>
                 <div class="flex flex-wrap items-center gap-2">
                   <input id="smStockTicker" class="input px-3 py-2" placeholder="CUSIP：如 037833100" style="min-width: 220px" />
@@ -454,32 +459,343 @@
                 <div class="font-extrabold" id="smStockAiTitle">AI 分析</div>
                 <pre class="mt-2 text-xs muted whitespace-pre-wrap" id="smStockAiText">—</pre>
               </div>
-              <div class="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-4">
-                <div class="card rounded-2xl p-4">
-                  <div class="font-extrabold">当前价格</div>
-                  <div class="text-2xl font-extrabold mt-2" id="smStockPrice">—</div>
-                  <div class="muted text-sm mt-1" id="smStockDesc">说明：13F 不提供 ticker，且当前未做 CUSIP→ticker 映射，因此不展示价格。</div>
-                </div>
-                <div class="card rounded-2xl p-4 lg:col-span-2">
+              <div class="mt-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3" id="smIndicatorsGrid" style="display:none">
+                <div class="card rounded-2xl p-3"><div class="muted text-xs">????</div><div class="text-lg font-extrabold mt-1" data-ind="current_price">?</div></div>
+                <div class="card rounded-2xl p-3"><div class="muted text-xs">????</div><div class="text-lg font-extrabold mt-1" data-ind="previous_close">?</div></div>
+                <div class="card rounded-2xl p-3"><div class="muted text-xs">??</div><div class="text-lg font-extrabold mt-1" data-ind="market_cap">?</div></div>
+                <div class="card rounded-2xl p-3"><div class="muted text-xs">???(TTM)</div><div class="text-lg font-extrabold mt-1" data-ind="pe_trailing">?</div></div>
+                <div class="card rounded-2xl p-3"><div class="muted text-xs">?????</div><div class="text-lg font-extrabold mt-1" data-ind="pe_forward">?</div></div>
+                <div class="card rounded-2xl p-3"><div class="muted text-xs">EPS(TTM)</div><div class="text-lg font-extrabold mt-1" data-ind="eps_trailing">?</div></div>
+                <div class="card rounded-2xl p-3"><div class="muted text-xs">ROE</div><div class="text-lg font-extrabold mt-1" data-ind="roe">?</div></div>
+                <div class="card rounded-2xl p-3"><div class="muted text-xs">Beta</div><div class="text-lg font-extrabold mt-1" data-ind="beta">?</div></div>
+                <div class="card rounded-2xl p-3"><div class="muted text-xs">52??</div><div class="text-lg font-extrabold mt-1" data-ind="fifty_two_week_high">?</div></div>
+                <div class="card rounded-2xl p-3"><div class="muted text-xs">52??</div><div class="text-lg font-extrabold mt-1" data-ind="fifty_two_week_low">?</div></div>
+                <div class="card rounded-2xl p-3"><div class="muted text-xs">???</div><div class="text-lg font-extrabold mt-1" data-ind="volume">?</div></div>
+                <div class="card rounded-2xl p-3"><div class="muted text-xs">?????</div><div class="text-lg font-extrabold mt-1" data-ind="average_volume">?</div></div>
+                <div class="card rounded-2xl p-3"><div class="muted text-xs">??????</div><div class="text-lg font-extrabold mt-1" data-ind="target_mean_price">?</div></div>
+                <div class="card rounded-2xl p-3"><div class="muted text-xs">?????</div><div class="text-lg font-extrabold mt-1" data-ind="recommendation">?</div></div>
+              </div>
+              <!-- 机构持有表格 -->
+              <div class="mt-4" id="smHoldersSection" style="display:none">
+                <div class="flex items-center justify-between mb-2">
                   <div class="font-extrabold">机构持有（按占比）</div>
-                  <div class="mt-3 overflow-x-auto">
-                    <table class="min-w-full text-sm" id="smHoldersTable">
-                      <thead>
-                        <tr class="text-left muted">
-                          <th class="py-2">机构</th>
-                          <th class="py-2">占比</th>
-                          <th class="py-2">市值</th>
-                          <th class="py-2">较上期变化（$）</th>
-                        </tr>
-                      </thead>
-                      <tbody></tbody>
-                    </table>
+                  <button class="btn btn-sm btn-secondary" id="smHoldersRefreshBtn" title="刷新当前股票数据">实时获取数据</button>
+                </div>
+                <div class="overflow-x-auto">
+                  <table class="w-full text-sm" id="smHoldersTable">
+                    <thead>
+                      <tr class="border-b border-gray-700">
+                        <th class="text-left py-2 px-2">机构</th>
+                        <th class="text-left py-2 px-2">机构中文名</th>
+                        <th class="text-right py-2 px-2">占比</th>
+                        <th class="text-right py-2 px-2">持仓价值</th>
+                        <th class="text-right py-2 px-2">环比变化</th>
+                      </tr>
+                    </thead>
+                    <tbody id="smHoldersTbody">
+                    </tbody>
+                  </table>
+                </div>
+                <!-- 分页控件 -->
+                <div class="flex items-center justify-between mt-3 text-sm" id="smHoldersPagination" style="display:none">
+                  <div class="muted" id="smHoldersPageInfo">第 1 页，共 0 条</div>
+                  <div class="flex gap-2">
+                    <button class="btn btn-xs btn-secondary" id="smHoldersPrevBtn" disabled>上一页</button>
+                    <button class="btn btn-xs btn-secondary" id="smHoldersNextBtn" disabled>下一页</button>
+                  </div>
+                </div>
+                <!-- 资金流向汇总 -->
+                <div class="mt-3 pt-3 border-t border-gray-700 text-sm" id="smHoldersFlowsSummary" style="display:none">
+                  <div class="flex gap-4">
+                    <div>
+                      <span class="muted">环比流入总和：</span>
+                      <span class="font-semibold pos" id="smHoldersTotalInflow">—</span>
+                    </div>
+                    <div>
+                      <span class="muted">环比流出总和：</span>
+                      <span class="font-semibold neg" id="smHoldersTotalOutflow">—</span>
+                    </div>
+                    <div>
+                      <span class="muted">净流入/流出：</span>
+                      <span class="font-semibold" id="smHoldersNetFlow">—</span>
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
-          </div>
 
+              <!-- 公司财报分析 -->
+              <div class="mt-4" id="smFinancialsSection" style="display:none">
+                <div class="flex items-center justify-between mb-2">
+                  <div class="font-extrabold">公司财报分析</div>
+                  <div class="flex flex-wrap items-center gap-1" id="financialPeriodButtons">
+                    <!-- 年报和季度按钮动态生成 -->
+                  </div>
+                </div>
+                <div id="smFinancialsLoading" class="muted text-sm mb-2" style="display:none">正在加载财务数据...</div>
+                <div id="smFinancialsError" class="text-red-400 text-sm mb-2" style="display:none"></div>
+                
+                <!-- 盈利能力 -->
+                <div class="mb-4">
+                  <div class="font-semibold text-sm mb-2 text-blue-300">盈利能力</div>
+                  <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs">收入</div>
+                      <div class="font-semibold mt-1" id="finRevenue">-</div>
+                    </div>
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs">毛利润</div>
+                      <div class="font-semibold mt-1" id="finGrossProfit">-</div>
+                    </div>
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs">营业利润</div>
+                      <div class="font-semibold mt-1" id="finOperatingIncome">-</div>
+                    </div>
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs">净利润</div>
+                      <div class="font-semibold mt-1" id="finNetIncome">-</div>
+                    </div>
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs">毛利率</div>
+                      <div class="font-semibold mt-1" id="finGrossMargin">-</div>
+                    </div>
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs">营业利润率</div>
+                      <div class="font-semibold mt-1" id="finOperatingMargin">-</div>
+                    </div>
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs">净利润率</div>
+                      <div class="font-semibold mt-1" id="finNetMargin">-</div>
+                    </div>  
+                     <div class="card rounded-xl p-2">
+                      <div class="muted text-xs flex items-center gap-1">
+                        基本每股收益 (EPS)
+                        <svg class="w-3 h-3 text-gray-500 cursor-pointer hover:text-blue-400" onclick="showFieldTooltip('epsBasic')" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                      </div>
+                      <div class="font-semibold mt-1" id="finEPS">-</div>
+                    </div>
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs flex items-center gap-1">
+                        稀释每股收益 (EPS)
+                        <svg class="w-3 h-3 text-gray-500 cursor-pointer hover:text-blue-400" onclick="showFieldTooltip('epsDiluted')" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                      </div>
+                      <div class="font-semibold mt-1" id="finEPSDiluted">-</div>
+                    </div>
+                </div>
+
+                <!-- 资产负债表 -->
+                <div class="mb-4">
+                  <div class="font-semibold text-sm mb-2 text-green-300">资产负债表</div>
+                  <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs">总资产</div>
+                      <div class="font-semibold mt-1" id="finTotalAssets">-</div>
+                    </div>
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs">总负债</div>
+                      <div class="font-semibold mt-1" id="finTotalLiabilities">-</div>
+                    </div>
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs">股东权益</div>
+                      <div class="font-semibold mt-1" id="finTotalEquity">-</div>
+                    </div>
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs flex items-center gap-1">
+                        现金及等价物
+                        <svg class="w-3 h-3 text-gray-500 cursor-pointer hover:text-blue-400" onclick="showFieldTooltip('cash')" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                      </div>
+                      <div class="font-semibold mt-1" id="finCash">-</div>
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm mt-2">
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs flex items-center gap-1">
+                        流动资产
+                        <svg class="w-3 h-3 text-gray-500 cursor-pointer hover:text-blue-400" onclick="showFieldTooltip('currentAssets')" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                      </div>
+                      <div class="font-semibold mt-1" id="finCurrentAssets">-</div>
+                    </div>
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs flex items-center gap-1">
+                        流动负债
+                        <svg class="w-3 h-3 text-gray-500 cursor-pointer hover:text-blue-400" onclick="showFieldTooltip('currentLiabilities')" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                      </div>
+                      <div class="font-semibold mt-1" id="finCurrentLiabilities">-</div>
+                    </div>
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs flex items-center gap-1">
+                        总债务
+                        <svg class="w-3 h-3 text-gray-500 cursor-pointer hover:text-blue-400" onclick="showFieldTooltip('totalDebt')" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                      </div>
+                      <div class="font-semibold mt-1" id="finTotalDebt">-</div>
+                    </div>
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs">流动比率</div>
+                      <div class="font-semibold mt-1" id="finCurrentRatio">-</div>
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-2 gap-2 text-sm mt-2">
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs">负债权益比</div>
+                      <div class="font-semibold mt-1" id="finDebtToEquity">-</div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 现金流量 -->
+                <div class="mb-4">
+                  <div class="font-semibold text-sm mb-2 text-purple-300">现金流量</div>
+                  <div class="grid grid-cols-3 gap-2 text-sm">
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs flex items-center gap-1">
+                        经营现金流
+                        <svg class="w-3 h-3 text-gray-500 cursor-pointer hover:text-blue-400" onclick="showFieldTooltip('operatingCF')" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                      </div>
+                      <div class="font-semibold mt-1" id="finOperatingCF">-</div>
+                    </div>
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs flex items-center gap-1">
+                        资本支出
+                        <svg class="w-3 h-3 text-gray-500 cursor-pointer hover:text-blue-400" onclick="showFieldTooltip('capex')" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                      </div>
+                      <div class="font-semibold mt-1" id="finCapEx">-</div>
+                    </div>
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs flex items-center gap-1">
+                        自由现金流
+                        <svg class="w-3 h-3 text-gray-500 cursor-pointer hover:text-blue-400" onclick="showFieldTooltip('freeCF')" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                      </div>
+                      <div class="font-semibold mt-1" id="finFreeCF">-</div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 其他指标 -->
+                <div class="mb-2">
+                  <div class="font-semibold text-sm mb-2 text-orange-300">其他关键指标</div>
+                  <div class="grid grid-cols-2 md:grid-cols-5 gap-2 text-sm">
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs">净资产收益率</div>
+                      <div class="font-semibold mt-1" id="finROE">-</div>
+                    </div>
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs">总资产收益率</div>
+                      <div class="font-semibold mt-1" id="finROA">-</div>
+                    </div>
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs">每股账面价值</div>
+                      <div class="font-semibold mt-1" id="finBVPS">-</div>
+                    </div>
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs">流通股数</div>
+                      <div class="font-semibold mt-1" id="finSharesOutstanding">-</div>
+                    </div>
+                    <div class="card rounded-xl p-2">
+                      <div class="muted text-xs">收入增长 (YoY)</div>
+                      <div class="font-semibold mt-1" id="finRevenueGrowth">-</div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 指标计算公式说明 -->
+                <div class="mt-4 mb-2">
+                  <button id="btnToggleFormulas" class="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-200 transition-colors" onclick="toggleFormulaSection()">
+                    <svg id="formulaArrow" class="w-3 h-3 transform transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+                    </svg>
+                    <span>指标计算公式说明</span>
+                  </button>
+                  <div id="formulaSection" class="hidden mt-2 p-3 rounded-lg bg-gray-800/50 text-xs">
+                    <div class="space-y-2 text-gray-300">
+                      
+                      <div class="flex items-start gap-2">
+                        <span class="text-blue-300 font-medium min-w-[100px]">毛利率</span>
+                        <span class="text-gray-400">= 毛利润 / 收入</span>
+                      </div>
+                      <div class="flex items-start gap-2">
+                        <span class="text-blue-300 font-medium min-w-[100px]">营业利润率</span>
+                        <span class="text-gray-400">= 营业利润 / 收入</span>
+                      </div>
+                      <div class="flex items-start gap-2">
+                        <span class="text-blue-300 font-medium min-w-[100px]">净利润率</span>
+                        <span class="text-gray-400">= 净利润 / 收入</span>
+                      </div>
+                      <div class="border-t border-gray-700 my-2"></div>
+                      <div class="flex items-start gap-2">
+                        <span class="text-green-300 font-medium min-w-[100px]">流动比率</span>
+                        <span class="text-gray-400">= 流动资产 / 流动负债</span>
+                      </div>
+                      <div class="flex items-start gap-2">
+                        <span class="text-green-300 font-medium min-w-[100px]">负债权益比</span>
+                        <span class="text-gray-400">= 总债务 / 股东权益</span>
+                      </div>
+                      <div class="border-t border-gray-700 pt-2 mt-2 text-gray-500"></div>
+                      <div class="flex items-start gap-2">
+                        <span class="text-orange-300 font-medium min-w-[100px]">净资产收益率ROE</span>
+                        <span class="text-gray-400">= 净利润 / 股东权益</span>
+                      </div>
+                      <div class="flex items-start gap-2">
+                        <span class="text-orange-300 font-medium min-w-[100px]">总资产收益率ROA</span>
+                        <span class="text-gray-400">= 净利润 / 总资产</span>
+                      </div>
+                      <div class="flex items-start gap-2">
+                        <span class="text-orange-300 font-medium min-w-[100px]">每股账面价值</span>
+                        <span class="text-gray-400">= 股东权益 / 流通股数</span>
+                      </div>
+                      <div class="flex items-start gap-2">
+                        <span class="text-orange-300 font-medium min-w-[100px]">收入增长 (YoY)</span>
+                        <span class="text-gray-400">= (本期收入 - 上期收入) / |上期收入|</span>
+                      </div>
+                      <div class="border-t border-gray-700 my-2"></div>
+                        <p class="mb-1">注：所有计算基于当前选中的财报周期（年报/季报）</p>
+                        <p>金额单位：K=千, M=百万, B=十亿, T=万亿 (USD)</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 季报历史 -->
+                <div class="mb-4" id="quarterlyHistorySection" style="display:none">
+                  <div class="font-semibold text-sm mb-2 text-purple-300">最近4个季度趋势</div>
+                  <div class="overflow-x-auto">
+                    <table class="w-full text-xs">
+                      <thead>
+                        <tr class="text-left muted border-b border-gray-700">
+                          <th class="py-2 px-1">报告期</th>
+                          <th class="py-2 px-1 text-right">收入</th>
+                          <th class="py-2 px-1 text-right">环比变化</th>
+                          <th class="py-2 px-1 text-right">净利润</th>
+                          <th class="py-2 px-1 text-right">环比变化</th>
+                        </tr>
+                      </thead>
+                      <tbody id="quarterlyHistoryTbody">
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div class="text-xs muted mt-2">数据来源: SEC EDGAR (XBRL)</div>
+              </div>
+            </div>
+            </div>
+           </div>
           <div id="smViewFlows" class="space-y-4 hidden">
             <div class="card rounded-2xl p-4">
               <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
@@ -504,6 +820,8 @@
                     <option value="30d">最近30天</option>
                   </select>
                   <button class="btn" id="smFlowsLoad">刷新</button>
+                  <button class="btn btn-secondary" id="smFlowsRefreshUpstashBtn" title="刷新实时聪明钱数据到 Upstash">刷新到Upstash</button>
+                  <button class="btn btn-secondary" id="smFlowsRefreshSqliteBtn" title="刷新实时聪明钱数据到 SQLite">刷新到SQLite</button>
                   <button class="btn" id="smFlowsAi">AI 总结</button>
                 </div>
               </div>
@@ -511,6 +829,10 @@
               <div class="mt-4 card rounded-2xl p-4 hidden" id="smFlowsAiBox">
                 <div class="font-extrabold" id="smFlowsAiTitle">AI 总结</div>
                 <pre class="mt-2 text-xs muted whitespace-pre-wrap" id="smFlowsAiText">—</pre>
+              </div>
+
+              <div class="mt-2 text-xs muted">
+                数据来源: <span id="smFlowsDataSource">—</span>
               </div>
 
               <div class="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -4132,56 +4454,468 @@
     if (box) box.classList.remove('hidden');
   }
 
-  async function loadSmartMoneyStock(ticker) {
+  // 机构持有分页状态（本地分页）
+  let smHoldersPage = 1;
+  const smHoldersPageSize = 20;
+  let smHoldersAllData = []; // 存储完整数据用于本地分页
+
+  function _getPagedHolders(allHolders, page, pageSize) {
+    const total = allHolders.length;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const safePage = Math.min(Math.max(1, page), totalPages);
+    const startIdx = (safePage - 1) * pageSize;
+    const endIdx = startIdx + pageSize;
+    return {
+      holders: allHolders.slice(startIdx, endIdx),
+      page: safePage,
+      totalPages: totalPages,
+      total: total,
+    };
+  }
+
+  // 渲染机构持有表格（复用）
+  function _renderHoldersTable(holders, page, totalPages, total) {
+    const holdersSection = document.getElementById('smHoldersSection');
+    const holdersTbody = document.getElementById('smHoldersTbody');
+    const holdersPagination = document.getElementById('smHoldersPagination');
+    const holdersPageInfo = document.getElementById('smHoldersPageInfo');
+    const holdersPrevBtn = document.getElementById('smHoldersPrevBtn');
+    const holdersNextBtn = document.getElementById('smHoldersNextBtn');
+    if (!holdersSection || !holdersTbody) return;
+
+    if (holders && holders.length > 0) {
+      holdersSection.style.display = '';
+      holdersTbody.innerHTML = holders.map(h => {
+        const wt = Number(h.weight || 0);
+        const val = Number(h.value_usd || 0);
+        const qoq = Number(h.qoq_value_change || 0);
+        const wtClass = wt > 0.05 ? 'pos' : (wt < 0.01 ? 'neu' : '');
+        const qoqClass = qoq > 0 ? 'pos' : (qoq < 0 ? 'neg' : 'neu');
+        return `<tr class="border-b border-gray-800">
+          <td class="py-2 px-2">${h.inst_name || h.inst_id || '—'}</td>
+          <td class="py-2 px-2">${h.cn_name || '—'}</td>
+          <td class="py-2 px-2 text-right ${wtClass}">${(wt * 100).toFixed(2)}%</td>
+          <td class="py-2 px-2 text-right">$${(val / 1e12).toFixed(2)}T</td>
+          <td class="py-2 px-2 text-right ${qoqClass}">${qoq > 0 ? '+' : ''}$${(qoq / 1e12).toFixed(2)}T</td>
+        </tr>`;
+      }).join('');
+      // 更新分页控件
+      if (holdersPagination && holdersPageInfo && holdersPrevBtn && holdersNextBtn) {
+        holdersPagination.style.display = 'flex';
+        holdersPageInfo.textContent = `第 ${page} 页 / 共 ${totalPages} 页，总计 ${total} 条`;
+        holdersPrevBtn.disabled = page <= 1;
+        holdersNextBtn.disabled = page >= totalPages;
+      }
+    } else {
+      holdersSection.style.display = 'none';
+      if (holdersPagination) holdersPagination.style.display = 'none';
+    }
+  }
+
+  async function loadSmartMoneyStock(ticker, page = 1) {
     const cusip = String(ticker || '').trim().toUpperCase();
     if (!cusip) return;
     smLastTicker = cusip;
+    smHoldersPage = page;
     smAiRestore('smStockAiBox', 'smStockAiTitle', 'smStockAiText', `stock:${cusip}`);
-    const data = await fetchJson(`/api/smartmoney/stock?ticker=${encodeURIComponent(cusip)}`);
-    const st = (data && data.stock) ? data.stock : null;
-    const holders = (data && data.holders) ? data.holders : [];
-    const titleEl = document.getElementById('smStockTitle');
-    const metaEl = document.getElementById('smStockMeta');
-    const priceEl = document.getElementById('smStockPrice');
-    const descEl = document.getElementById('smStockDesc');
-    const issuer = st ? String(st.issuer || '') : '';
+    // 获取完整数据（后端不分页）
+    const holdersData = await fetchJson(`/api/smartmoney/stock/holders?ticker=${encodeURIComponent(cusip)}`).catch(() => null);
+    smHoldersAllData = (holdersData && holdersData.holders) ? holdersData.holders : [];
+    const issuer = (holdersData && holdersData.issuer) ? String(holdersData.issuer) : "";
+    const dataSource = (holdersData && holdersData.data_source) ? String(holdersData.data_source) : 'live';
+    const snapTs = (holdersData && holdersData.ts) ? Number(holdersData.ts) : 0;
+    // 本地分页
+    const paged = _getPagedHolders(smHoldersAllData, page, smHoldersPageSize);
+    const holders = paged.holders;
     smLastStockIssuer = issuer;
-    if (titleEl) titleEl.textContent = `${issuer || '标的'}（CUSIP: ${cusip}）`;
-    if (metaEl) metaEl.textContent = `CUSIP：${cusip}`;
-    if (priceEl) priceEl.textContent = '—';
-    if (descEl) descEl.textContent = '说明：13F 不提供 ticker，且当前未做 CUSIP→ticker 映射，因此不展示价格。';
+    const titleEl = document.getElementById('smStockTitle');
+    if (titleEl) titleEl.textContent = `${issuer || "??"} - CUSIP: ${cusip}`;
+    const metaEl = document.getElementById('smStockMeta');
+    if (metaEl) metaEl.textContent = `CUSIP: ${cusip}`;
+    // 显示数据源
+    const dataSourceEl = document.getElementById('smStockDataSource');
+    if (dataSourceEl) {
+      const srcTxt = dataSource ? `Source：${dataSource}` : '';
+      const tsTxt = snapTs ? `Snapshot：${new Date(snapTs * 1000).toLocaleString()}` : '';
+      const parts = [srcTxt, tsTxt].filter(x => String(x || '').trim());
+      dataSourceEl.textContent = parts.length ? parts.join(' | ') : '—';
+    }
+    // 填充机构持有表格（使用复用函数）
+    _renderHoldersTable(holders, paged.page, paged.totalPages, paged.total);
 
-    const tb = document.querySelector('#smHoldersTable tbody');
-    if (tb) {
-      tb.innerHTML = (holders && holders.length) ? holders.map(h => {
-        const iid = String(h.inst_id || '');
-        const iname = String(h.inst_name || iid);
-        const w = fmtPct2(h.weight);
-        const val = fmtUsd(h.value_usd);
-        const ch = Number(h.qoq_value_change || 0);
-        const chHtml = `<span class="${clsSigned(ch)}">${ch>0?'+':''}${fmtUsd(ch)}</span>`;
-        return `
-          <tr>
-            <td class="py-2 font-semibold"><a href="#" class="sm-inst-open2 hover:underline" data-id="${iid}">${iname}</a><div class="muted text-xs">id: ${iid}</div></td>
-            <td class="py-2">${w}</td>
-            <td class="py-2">${val}</td>
-            <td class="py-2">${chHtml}</td>
-          </tr>
-        `;
-      }).join('') : `<tr><td colspan="4" class="muted py-3">暂无数据</td></tr>`;
+    // 计算资金流向汇总
+    const totalInflow = smHoldersAllData.reduce((sum, h) => sum + (Number(h.qoq_value_change || 0) > 0 ? Number(h.qoq_value_change || 0) : 0), 0);
+    const totalOutflow = smHoldersAllData.reduce((sum, h) => sum + (Number(h.qoq_value_change || 0) < 0 ? Math.abs(Number(h.qoq_value_change || 0)) : 0), 0);
+    const netFlow = totalInflow - totalOutflow;
+    const flowsSummaryEl = document.getElementById('smHoldersFlowsSummary');
+    const totalInflowEl = document.getElementById('smHoldersTotalInflow');
+    const totalOutflowEl = document.getElementById('smHoldersTotalOutflow');
+    const netFlowEl = document.getElementById('smHoldersNetFlow');
+    if (flowsSummaryEl && totalInflowEl && totalOutflowEl && netFlowEl) {
+      flowsSummaryEl.style.display = 'block';
+      totalInflowEl.textContent = `$${(totalInflow / 1e12).toFixed(2)}T`;
+      totalOutflowEl.textContent = `$${(totalOutflow / 1e12).toFixed(2)}T`;
+      netFlowEl.textContent = `$${(netFlow / 1e12).toFixed(2)}T`;
+      netFlowEl.className = 'font-semibold ' + (netFlow > 0 ? 'pos' : (netFlow < 0 ? 'neg' : 'neu'));
     }
 
-    document.querySelectorAll('.sm-inst-open2').forEach(a => {
-      a.addEventListener('click', (e) => {
-        try { e.preventDefault(); } catch (_) {}
-        const iid = a.getAttribute('data-id') || '';
-        if (!iid) return;
-        const instInput = document.getElementById('smInstId');
-        if (instInput) instInput.value = iid;
-        smShowView('inst');
-        loadSmartMoneyInstitution(iid).catch(() => {});
+    // 加载 SEC EDGAR 财务数据
+    loadFinancialData(cusip);
+  }
+
+  // CUSIP 到 CIK 映射表（部分常用股票）
+  const _CUSIP_CIK_MAP = {
+    "037833100": "0000320193",  // AAPL
+    "594918104": "0000789019",  // MSFT
+    "023135106": "0001018724",  // AMZN
+    "02079K305": "0001652044",  // GOOGL
+    "02079K107": "0001652044",  // GOOG
+    "30303M102": "0001326801",  // META
+    "67066G104": "0001013484",  // NVDA
+    "88160R101": "0001318605",  // TSLA
+    "46625H100": "0000019617",  // JPM
+    "92826C839": "0001403161",  // V
+    "478160104": "0000200406",  // JNJ
+    "931142103": "0000104169",  // WMT
+    "742718109": "0000080424",  // PG
+    "91324P102": "0000103310",  // UNH
+    "060505104": "0000070858",  // BAC
+    "191216100": "0000021344",  // KO
+    "949746101": "0000072971",  // WFC
+    "254687106": "0001001039",  // DIS
+    "00724F101": "0000796343",  // ADBE
+    "717081103": "0000078003",  // PFE
+    "458140100": "0000050863",  // INTC
+    "17275R102": "0000858877",  // CSCO
+    "64110L106": "0001065280",  // NFLX
+    "166764100": "0000093410",  // CVX
+    "30231G102": "0000034088",  // XOM
+    "437076102": "0000034999",  // HD
+    "369604103": "0000040545",  // GE
+  };
+
+  // 当前财报周期类型：annual 或具体的季度ID如 "2026Q1"
+  let currentFinancialPeriod = 'annual';
+  let availableQuarters = []; // 存储可用的季度列表
+  let availableAnnuals = []; // 存储可用的年报列表
+  let currentQuarterId = ''; // 当前选中的季度ID
+
+  async function loadFinancialData(cusip, periodType = 'annual', quarterId = '', annualId = '') {
+    const cik = _CUSIP_CIK_MAP[cusip];
+    const finSection = document.getElementById('smFinancialsSection');
+    const finLoading = document.getElementById('smFinancialsLoading');
+    const finError = document.getElementById('smFinancialsError');
+    const quarterlySection = document.getElementById('quarterlyHistorySection');
+
+    if (!cik) {
+      if (finSection) finSection.style.display = 'none';
+      return;
+    }
+
+    // 更新当前周期类型和季度ID/年报ID
+    currentFinancialPeriod = periodType;
+    currentQuarterId = quarterId || annualId;
+
+    if (finSection) finSection.style.display = '';
+    if (finLoading) finLoading.style.display = '';
+    if (finError) finError.style.display = 'none';
+    if (quarterlySection) quarterlySection.style.display = 'none';
+
+    try {
+      // 构建API URL
+      let apiUrl = `/api/smartmoney/stock/financials?cik=${encodeURIComponent(cik)}&period=${periodType}`;
+      if (periodType === 'quarterly' && quarterId) {
+        apiUrl += `&quarter=${encodeURIComponent(quarterId)}`;
+      } else if (periodType === 'annual' && annualId) {
+        // 年报模式：传递年报ID（如 FY2025）
+        apiUrl += `&annual=${encodeURIComponent(annualId)}`;
+      }
+      const data = await fetchJson(apiUrl);
+
+      if (finLoading) finLoading.style.display = 'none';
+
+      if (!data || !data.ok) {
+        if (finError) {
+          finError.textContent = data?.message || '无法获取财务数据';
+          finError.style.display = '';
+        }
+        return;
+      }
+
+      // 保存可用季度列表并动态生成季度按钮
+      if (data.available_quarters && data.available_quarters.length > 0) {
+        availableQuarters = data.available_quarters;
+      }
+      // 保存可用年报列表，并设置默认选中的年报（第一个）
+      if (data.available_annuals && data.available_annuals.length > 0) {
+        availableAnnuals = data.available_annuals;
+        // 如果没有选中年报，默认选中第一个（最新的）
+        if (!currentQuarterId && currentFinancialPeriod === 'annual') {
+          currentQuarterId = availableAnnuals[0].id;  // 如 "FY2025"
+        }
+      }
+      // 渲染所有按钮（年报+季度）
+      renderPeriodButtons();
+
+      // 更新按钮样式
+      updatePeriodButtons();
+
+      // 格式化数字辅助函数
+      const fmt = (v) => {
+        if (v === null || v === undefined || isNaN(v)) return '-';
+        if (Math.abs(v) >= 1e12) return '$' + (v / 1e12).toFixed(2) + 'T';
+        if (Math.abs(v) >= 1e9) return '$' + (v / 1e9).toFixed(2) + 'B';
+        if (Math.abs(v) >= 1e6) return '$' + (v / 1e6).toFixed(2) + 'M';
+        if (Math.abs(v) >= 1e3) return '$' + (v / 1e3).toFixed(2) + 'K';
+        return '$' + v.toFixed(2);
+      };
+
+      const fmtPct = (v) => {
+        if (v === null || v === undefined || isNaN(v)) return '-';
+        return (v * 100).toFixed(2) + '%';
+      };
+
+      // 盈利能力
+      const prof = data.profitability || {};
+      document.getElementById('finRevenue').textContent = fmt(prof.revenue);
+      document.getElementById('finGrossProfit').textContent = fmt(prof.gross_profit);
+      document.getElementById('finOperatingIncome').textContent = fmt(prof.operating_income);
+      document.getElementById('finNetIncome').textContent = fmt(prof.net_income);
+      document.getElementById('finEPS').textContent = prof.eps_basic ? '$' + prof.eps_basic.toFixed(2) : (prof.eps_diluted ? '$' + prof.eps_diluted.toFixed(2) : '-');
+      document.getElementById('finEPSDiluted').textContent = prof.eps_diluted ? '$' + prof.eps_diluted.toFixed(2) : '-';
+      document.getElementById('finGrossMargin').textContent = fmtPct(prof.gross_margin);
+      document.getElementById('finOperatingMargin').textContent = fmtPct(prof.operating_margin);
+      document.getElementById('finNetMargin').textContent = fmtPct(prof.net_margin);
+
+      // 资产负债表
+      const bs = data.balance_sheet || {};
+      document.getElementById('finTotalAssets').textContent = fmt(bs.total_assets);
+      document.getElementById('finTotalLiabilities').textContent = fmt(bs.total_liabilities);
+      document.getElementById('finTotalEquity').textContent = fmt(bs.total_equity);
+      document.getElementById('finCash').textContent = fmt(bs.cash_and_equivalents);
+      document.getElementById('finCurrentAssets').textContent = fmt(bs.current_assets);
+      document.getElementById('finCurrentLiabilities').textContent = fmt(bs.current_liabilities);
+      document.getElementById('finTotalDebt').textContent = fmt(bs.total_debt);
+      document.getElementById('finCurrentRatio').textContent = bs.current_ratio ? bs.current_ratio.toFixed(2) : '-';
+      document.getElementById('finDebtToEquity').textContent = bs.debt_to_equity ? bs.debt_to_equity.toFixed(2) : '-';
+
+      // 现金流量
+      const cf = data.cash_flow || {};
+      document.getElementById('finOperatingCF').textContent = fmt(cf.operating_cash_flow);
+      document.getElementById('finCapEx').textContent = fmt(cf.capital_expenditures);
+      document.getElementById('finFreeCF').textContent = fmt(cf.free_cash_flow);
+
+      // 其他指标
+      const other = data.other_metrics || {};
+      document.getElementById('finROE').textContent = fmtPct(other.roe);
+      document.getElementById('finROA').textContent = fmtPct(other.roa);
+      document.getElementById('finBVPS').textContent = fmt(other.book_value_per_share);
+      
+      // 流通股数（格式化显示）
+      const sharesEl = document.getElementById('finSharesOutstanding');
+      if (other.shares_outstanding !== null && other.shares_outstanding !== undefined) {
+        const s = other.shares_outstanding;
+        if (s >= 1e9) {
+          sharesEl.textContent = (s / 1e9).toFixed(2) + 'B';
+        } else if (s >= 1e6) {
+          sharesEl.textContent = (s / 1e6).toFixed(2) + 'M';
+        } else if (s >= 1e3) {
+          sharesEl.textContent = (s / 1e3).toFixed(2) + 'K';
+        } else {
+          sharesEl.textContent = s.toLocaleString();
+        }
+      } else {
+        sharesEl.textContent = '-';
+      }
+
+      // 增长率（带正负号颜色）
+      const growthEl = document.getElementById('finRevenueGrowth');
+      if (other.revenue_yoy_growth !== null && other.revenue_yoy_growth !== undefined) {
+        const g = other.revenue_yoy_growth;
+        growthEl.textContent = (g > 0 ? '+' : '') + (g * 100).toFixed(1) + '%';
+        growthEl.className = 'font-semibold mt-1 ' + (g > 0 ? 'pos' : (g < 0 ? 'neg' : 'neu'));
+      } else {
+        growthEl.textContent = '-';
+        growthEl.className = 'font-semibold mt-1';
+      }
+
+    } catch (e) {
+      if (finLoading) finLoading.style.display = 'none';
+      if (finError) {
+        finError.textContent = '加载财务数据失败';
+        finError.style.display = '';
+      }
+    }
+  }
+
+  // 渲染周期按钮（年报+季度）
+  function renderPeriodButtons() {
+    const container = document.getElementById('financialPeriodButtons');
+    if (!container) return;
+
+    // 移除所有动态生成的按钮（保留静态年报按钮作为模板）
+    const existingBtns = container.querySelectorAll('.dynamic-btn');
+    existingBtns.forEach(btn => btn.remove());
+
+    // 移除静态年报按钮（将被动态按钮替代）
+    const staticAnnualBtn = document.getElementById('btnAnnual');
+    if (staticAnnualBtn) staticAnnualBtn.remove();
+
+    // 为每个可用年报创建按钮（如 2025, 2024）
+    if (availableAnnuals && availableAnnuals.length > 0) {
+      availableAnnuals.forEach(a => {
+        const btn = document.createElement('button');
+        btn.className = 'px-3 py-1 text-xs rounded-lg dynamic-btn';
+        btn.textContent = a.label;  // 如 "2025"
+        btn.dataset.annualId = a.id;  // 如 "FY2025"
+        btn.dataset.periodType = 'annual';
+        btn.onclick = () => switchFinancialPeriod('annual', a.id);
+        container.appendChild(btn);
       });
+    }
+
+    // 为每个可用季度创建按钮
+    if (availableQuarters && availableQuarters.length > 0) {
+      availableQuarters.forEach(q => {
+        const btn = document.createElement('button');
+        btn.className = 'px-2 py-1 text-xs rounded-lg dynamic-btn';
+        btn.textContent = q.label;  // 如 "26Q1"
+        btn.dataset.quarterId = q.id;  // 如 "CY2025Q4"
+        btn.dataset.periodType = 'quarterly';
+        btn.onclick = () => switchFinancialPeriod('quarterly', q.id);
+        container.appendChild(btn);
+      });
+    }
+  }
+
+  // 切换财报周期类型
+  // quarterId 可以是季度ID（如 CY2026Q1）或年报ID（如 FY2025）
+  function switchFinancialPeriod(period, periodId = '') {
+    const isSamePeriod = period === currentFinancialPeriod && periodId === currentQuarterId;
+    if (isSamePeriod) return;
+
+    if (period === 'annual') {
+      // 年报模式：periodId 是年报ID如 FY2025
+      loadFinancialData(smLastTicker, 'annual', '', periodId);
+    } else if (period === 'quarterly' && periodId) {
+      // 季报模式：periodId 是季度ID
+      loadFinancialData(smLastTicker, 'quarterly', periodId, '');
+    }
+  }
+
+  // 更新按钮样式
+  function updatePeriodButtons() {
+    const btns = document.querySelectorAll('#financialPeriodButtons .dynamic-btn');
+
+    btns.forEach(btn => {
+      const periodType = btn.dataset.periodType;
+      const isActive = 
+        (periodType === 'annual' && currentFinancialPeriod === 'annual' && btn.dataset.annualId === currentQuarterId) ||
+        (periodType === 'quarterly' && currentFinancialPeriod === 'quarterly' && btn.dataset.quarterId === currentQuarterId);
+      
+      if (isActive) {
+        btn.className = 'px-3 py-1 text-xs rounded-lg dynamic-btn bg-blue-600 text-white';
+      } else {
+        btn.className = 'px-3 py-1 text-xs rounded-lg dynamic-btn bg-gray-700 text-gray-300';
+      }
     });
+  }
+
+  // 展开/收起计算公式说明
+  function toggleFormulaSection() {
+    const section = document.getElementById('formulaSection');
+    const arrow = document.getElementById('formulaArrow');
+    if (!section || !arrow) return;
+    
+    const isHidden = section.classList.contains('hidden');
+    if (isHidden) {
+      section.classList.remove('hidden');
+      arrow.classList.add('rotate-90');
+    } else {
+      section.classList.add('hidden');
+      arrow.classList.remove('rotate-90');
+    }
+  }
+
+  // 字段解释文案
+  const FIELD_TOOLTIPS = {
+    epsBasic: {
+      title: '基本每股收益 (EPS)',
+      content: '净利润除以报告期内加权平均流通股数。反映每股普通股享有的净利润，是衡量公司盈利能力最常用的指标。'
+    },
+    epsDiluted: {
+      title: '稀释每股收益 (EPS)',
+      content: '考虑所有潜在稀释性证券（如可转债、股票期权、认股权证）转换为普通股后的每股收益。更保守地反映每股盈利能力。'
+    },
+    operatingCF: {
+      title: '经营现金流',
+      content: '公司日常经营活动产生的现金净流入。包括销售商品/服务收到的现金，减去支付供应商、员工、税费等的现金。反映核心业务造血能力。'
+    },
+    capex: {
+      title: '资本支出',
+      content: '公司为购置、维护或升级长期资产（如厂房、设备、技术）而支出的现金。反映公司对未来产能和竞争力的投资力度。'
+    },
+    freeCF: {
+      title: '自由现金流',
+      content: '经营现金流减去资本支出后的剩余现金。代表公司可用于分红、还债、收购或回购股票的真实可支配现金。衡量公司财务灵活性的关键指标。'
+    },
+    cash: {
+      title: '现金及现金等价物',
+      content: '公司手头最灵活的钱，包括库存现金、银行存款、以及极易变现的短期投资（如货币基金、3个月内到期的国债等）。'
+    },
+    currentAssets: {
+      title: '流动资产',
+      content: '公司在一年以内（或一个经营周期内）可以变现、消耗或出售的资产。主要包括现金、应收账款、库存、短期投资等。体现公司短期流动性。'
+    },
+    currentLiabilities: {
+      title: '流动负债',
+      content: '公司在一年以内需要偿还的债务。主要包括应付账款、短期借款、即将到期的长期负债、应付工资等。'
+    },
+    totalDebt: {
+      title: '总债务',
+      content: '公司所有有息负债的总和，包括短期借款 + 长期借款 + 债券等。不包括无息负债（如应付账款）。反映公司整体杠杆水平。'
+    }
+  };
+
+  // 显示字段解释弹窗
+  function showFieldTooltip(fieldKey) {
+    const tooltip = FIELD_TOOLTIPS[fieldKey];
+    if (!tooltip) return;
+    
+    // 创建或获取弹窗元素
+    let modal = document.getElementById('fieldTooltipModal');
+    if (!modal) {
+      modal = document.createElement('div');
+      modal.id = 'fieldTooltipModal';
+      modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/50 hidden';
+      modal.innerHTML = `
+        <div class="bg-gray-800 rounded-xl p-4 max-w-md mx-4 shadow-xl border border-gray-700">
+          <div class="flex items-start justify-between mb-3">
+            <h3 id="tooltipTitle" class="text-sm font-semibold text-white"></h3>
+            <button onclick="hideFieldTooltip()" class="text-gray-400 hover:text-white ml-2">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+              </svg>
+            </button>
+          </div>
+          <p id="tooltipContent" class="text-xs text-gray-300 leading-relaxed"></p>
+        </div>
+      `;
+      modal.onclick = function(e) {
+        if (e.target === modal) hideFieldTooltip();
+      };
+      document.body.appendChild(modal);
+    }
+    
+    document.getElementById('tooltipTitle').textContent = tooltip.title;
+    document.getElementById('tooltipContent').textContent = tooltip.content;
+    modal.classList.remove('hidden');
+  }
+
+  // 隐藏字段解释弹窗
+  function hideFieldTooltip() {
+    const modal = document.getElementById('fieldTooltipModal');
+    if (modal) modal.classList.add('hidden');
   }
 
   async function loadSmartMoneyFlows() {
@@ -4195,6 +4929,14 @@
     const sells = (data && data.top_sells) ? data.top_sells : [];
     const tbB = document.querySelector('#smBuysTable tbody');
     const tbS = document.querySelector('#smSellsTable tbody');
+
+    // 更新数据来源显示
+    const dsEl = document.getElementById('smFlowsDataSource');
+    if (dsEl) {
+      const source = (data && data.data_source) ? String(data.data_source) : '实时计算';
+      const ts = (data && data.snapshot_ts) ? new Date(data.snapshot_ts * 1000).toLocaleString('zh-CN') : '—';
+      dsEl.textContent = `${source} ${ts ? '(' + ts + ')' : ''}`;
+    }
 
     // DataTables：刷新前先销毁（否则重复初始化会报错）
     try {
@@ -4223,7 +4965,7 @@
             <td class="py-2 pos" data-order="${isFinite(flowNum)?flowNum:0}">${amt}</td>
           </tr>
         `;
-      }).join('') : `<tr><td colspan="3" class="muted py-3">暂无数据</td></tr>`;
+      }).join('') : `<tr><td class="muted py-3">暂无数据</td><td></td><td></td></tr>`;
     }
     if (tbS) {
       tbS.innerHTML = (sells && sells.length) ? sells.map(x => {
@@ -4233,26 +4975,30 @@
         const sec2 = String(x.sector || '—');
         const flowNum = Number(x.flow_usd || 0);
         const amt = fmtUsd(flowNum);
+        // data-order使用正数绝对值，确保DataTables按流出金额从大到小排序
+        const orderValue = isFinite(flowNum) ? Math.abs(flowNum) : 0;
         return `
           <tr>
             <td class="py-2 font-semibold"><a href="#" class="sm-flow-stock hover:underline" data-cusip="${cusip}">${nm}<div class="muted text-xs">CUSIP: ${cusip || '—'}</div></a></td>
             <td class="py-2">${sec2}</td>
-            <td class="py-2 neg" data-order="${isFinite(flowNum)?flowNum:0}">${amt}</td>
+            <td class="py-2 neg" data-order="${orderValue}">${amt}</td>
           </tr>
         `;
-      }).join('') : `<tr><td colspan="3" class="muted py-3">暂无数据</td></tr>`;
+      }).join('') : `<tr><td class="muted py-3">暂无数据</td><td></td><td></td></tr>`;
     }
 
     // DataTables 分页：默认 30/页
     try {
       if (window.jQuery && $.fn && $.fn.dataTable) {
         $('#smBuysTable').DataTable({
+          destroy: true,
           pageLength: 30,
           lengthMenu: [[30, 50, 100, 200, -1], [30, 50, 100, 200, 'All']],
           order: [[2, 'desc']],
           autoWidth: false,
         });
         $('#smSellsTable').DataTable({
+          destroy: true,
           pageLength: 30,
           lengthMenu: [[30, 50, 100, 200, -1], [30, 50, 100, 200, 'All']],
           order: [[2, 'desc']],
@@ -4364,6 +5110,117 @@
   const _smSearch = document.getElementById('smSearch');
   if (_smSearch) _smSearch.addEventListener('keydown', (e) => { if (e && e.key === 'Enter') { try { e.preventDefault(); } catch (_) {} const b = document.getElementById('smSearchBtn'); if (b) b.click(); } });
 
+  // 刷新 holders 数据按钮（刷新当前股票数据到数据库）
+  const _smHoldersRefreshBtn = document.getElementById('smHoldersRefreshBtn');
+  if (_smHoldersRefreshBtn) _smHoldersRefreshBtn.addEventListener('click', async () => {
+    if (!smLastTicker) return;
+    _smHoldersRefreshBtn.textContent = '刷新中...';
+    _smHoldersRefreshBtn.disabled = true;
+    try {
+      // 强制刷新当前股票数据（从 SEC 重新获取，写入内存缓存和数据库）
+      const resp = await fetchJson(`/api/smartmoney/stock/holders?ticker=${encodeURIComponent(smLastTicker)}&refresh=1`);
+      if (resp && resp.ok) {
+        // 直接使用返回的数据（已包含最新 SEC 数据）
+        smHoldersAllData = (resp && resp.holders) ? resp.holders : [];
+        smLastStockIssuer = resp.issuer || '';
+        // 更新分页显示（第一页）
+        const paged = _getPagedHolders(smHoldersAllData, 1, smHoldersPageSize);
+        _renderHoldersTable(paged.holders, 1, paged.totalPages, paged.total);
+        // 显示成功提示
+        const dbStatus = resp.db_saved ? '已保存到数据库' : ('数据库保存失败: ' + (resp.db_error || '未知错误'));
+        alert(`数据已刷新！${dbStatus} (共 ${smHoldersAllData.length} 条机构数据)`);
+      } else {
+        alert('刷新失败：' + (resp?.error || '未知错误'));
+      }
+    } catch (e) {
+      alert('刷新失败：' + String(e));
+    } finally {
+      _smHoldersRefreshBtn.textContent = '刷新';
+      _smHoldersRefreshBtn.disabled = false;
+    }
+  });
+
+  // 分页按钮事件
+  const _smHoldersPrevBtn = document.getElementById('smHoldersPrevBtn');
+  const _smHoldersNextBtn = document.getElementById('smHoldersNextBtn');
+  if (_smHoldersPrevBtn) {
+    _smHoldersPrevBtn.addEventListener('click', () => {
+      if (smHoldersPage > 1 && smLastTicker) {
+        const paged = _getPagedHolders(smHoldersAllData, smHoldersPage - 1, smHoldersPageSize);
+        _renderHoldersTable(paged.holders, paged.page, paged.totalPages, paged.total);
+        smHoldersPage = paged.page;
+      }
+    });
+  }
+  if (_smHoldersNextBtn) {
+    _smHoldersNextBtn.addEventListener('click', () => {
+      const totalPages = Math.max(1, Math.ceil(smHoldersAllData.length / smHoldersPageSize));
+      if (smHoldersPage < totalPages && smLastTicker) {
+        const paged = _getPagedHolders(smHoldersAllData, smHoldersPage + 1, smHoldersPageSize);
+        _renderHoldersTable(paged.holders, paged.page, paged.totalPages, paged.total);
+        smHoldersPage = paged.page;
+      }
+    });
+  }
+
+  // 刷新热门机构数据按钮（刷新到 SQLite）
+  const _smInstRefreshSqliteBtn = document.getElementById('smInstRefreshSqliteBtn');
+  if (_smInstRefreshSqliteBtn) _smInstRefreshSqliteBtn.addEventListener('click', async () => {
+    _smInstRefreshSqliteBtn.textContent = '刷新中...';
+    _smInstRefreshSqliteBtn.disabled = true;
+    try {
+      const r = await fetch('/api/smartmoney/refresh?target=sqlite', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'x-refresh-token': smartmoneyRefreshToken
+        },
+      });
+      const resp = await r.json();
+      if (resp && resp.ok) {
+        alert(`热门机构数据刷新成功！已更新到 SQLite`);
+        // 刷新数据
+        loadSmartMoneyDashboard().catch(() => {});
+      } else {
+        alert('刷新失败：' + (resp?.error || '未知错误'));
+      }
+    } catch (e) {
+      alert('刷新失败：' + String(e));
+    } finally {
+      _smInstRefreshSqliteBtn.textContent = '刷新到SQLite';
+      _smInstRefreshSqliteBtn.disabled = false;
+    }
+  });
+
+  // 刷新热门机构数据按钮（刷新到 Upstash）
+  const _smInstRefreshUpstashBtn = document.getElementById('smInstRefreshUpstashBtn');
+  if (_smInstRefreshUpstashBtn) _smInstRefreshUpstashBtn.addEventListener('click', async () => {
+    _smInstRefreshUpstashBtn.textContent = '刷新中...';
+    _smInstRefreshUpstashBtn.disabled = true;
+    try {
+      const r = await fetch('/api/smartmoney/refresh?target=upstash', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'x-refresh-token': smartmoneyRefreshToken
+        },
+      });
+      const resp = await r.json();
+      if (resp && resp.ok) {
+        alert(`热门机构数据刷新成功！已更新到 Upstash`);
+        // 刷新数据
+        loadSmartMoneyDashboard().catch(() => {});
+      } else {
+        alert('刷新失败：' + (resp?.error || '未知错误'));
+      }
+    } catch (e) {
+      alert('刷新失败：' + String(e));
+    } finally {
+      _smInstRefreshUpstashBtn.textContent = '刷新到Upstash';
+      _smInstRefreshUpstashBtn.disabled = false;
+    }
+  });
+
   const _smInstLoad = document.getElementById('smInstLoad');
   if (_smInstLoad) _smInstLoad.addEventListener('click', () => {
     const iid = String((document.getElementById('smInstId') || {}).value || '').trim();
@@ -4397,6 +5254,63 @@
 
   const _smFlowsLoad = document.getElementById('smFlowsLoad');
   if (_smFlowsLoad) _smFlowsLoad.addEventListener('click', () => loadSmartMoneyFlows().catch(() => {}));
+
+  const _smFlowsRefreshUpstashBtn = document.getElementById('smFlowsRefreshUpstashBtn');
+  if (_smFlowsRefreshUpstashBtn) _smFlowsRefreshUpstashBtn.addEventListener('click', async () => {
+    _smFlowsRefreshUpstashBtn.textContent = '刷新中...';
+    _smFlowsRefreshUpstashBtn.disabled = true;
+    try {
+      const r = await fetch('/api/smartmoney/refresh?target=upstash&stage=flows', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-refresh-token': smartmoneyRefreshToken
+        },
+      });
+      const resp = await r.json();
+      if (resp && resp.ok) {
+        alert(`聪明钱数据刷新成功！已更新到 Upstash`);
+        // 刷新数据
+        loadSmartMoneyFlows().catch(() => {});
+      } else {
+        alert('刷新失败：' + (resp?.error || '未知错误'));
+      }
+    } catch (e) {
+      alert('刷新失败：' + String(e));
+    } finally {
+      _smFlowsRefreshUpstashBtn.textContent = '刷新到Upstash';
+      _smFlowsRefreshUpstashBtn.disabled = false;
+    }
+  });
+
+  const _smFlowsRefreshSqliteBtn = document.getElementById('smFlowsRefreshSqliteBtn');
+  if (_smFlowsRefreshSqliteBtn) _smFlowsRefreshSqliteBtn.addEventListener('click', async () => {
+    _smFlowsRefreshSqliteBtn.textContent = '刷新中...';
+    _smFlowsRefreshSqliteBtn.disabled = true;
+    try {
+      const r = await fetch('/api/smartmoney/refresh?target=sqlite&stage=flows', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-refresh-token': smartmoneyRefreshToken
+        },
+      });
+      const resp = await r.json();
+      if (resp && resp.ok) {
+        alert(`聪明钱数据刷新成功！已更新到 SQLite`);
+        // 刷新数据
+        loadSmartMoneyFlows().catch(() => {});
+      } else {
+        alert('刷新失败：' + (resp?.error || '未知错误'));
+      }
+    } catch (e) {
+      alert('刷新失败：' + String(e));
+    } finally {
+      _smFlowsRefreshSqliteBtn.textContent = '刷新到SQLite';
+      _smFlowsRefreshSqliteBtn.disabled = false;
+    }
+  });
+
   const _smFlowsAi = document.getElementById('smFlowsAi');
   if (_smFlowsAi) _smFlowsAi.addEventListener('click', () => {
     const sec = String((document.getElementById('smSector') || {}).value || 'all');
@@ -7759,6 +8673,20 @@
 
   // 60 秒自动刷新
   setInterval(loadAll, 60 * 1000);
+
+  // 加载配置（获取 refresh token）
+  let smartmoneyRefreshToken = '';
+  (async () => {
+    try {
+      const r = await fetch('/api/config');
+      const config = await r.json();
+      if (config && config.smartmoney_refresh_token) {
+        smartmoneyRefreshToken = config.smartmoney_refresh_token;
+      }
+    } catch (e) {
+      console.error('Failed to load config:', e);
+    }
+  })();
 
   loadAll();
 </script>
